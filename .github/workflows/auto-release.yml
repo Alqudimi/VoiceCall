@@ -1,0 +1,230 @@
+name: VoiceCall - Automated Release
+
+on:
+  push:
+    branches:
+      - main
+
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: voicecall-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build and Publish Release
+    runs-on: ubuntu-latest
+
+    steps:
+      # ==========================================
+      # Checkout
+      # ==========================================
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # ==========================================
+      # Generate unique version
+      # ==========================================
+
+      - name: Generate release metadata
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SHORT_SHA="${GITHUB_SHA:0:7}"
+          TIMESTAMP="$(date -u +'%Y%m%d-%H%M%S')"
+
+          VERSION="v1.0.0-${TIMESTAMP}-${SHORT_SHA}"
+
+          echo "tag=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "short_sha=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "timestamp=${TIMESTAMP}" >> "$GITHUB_OUTPUT"
+
+          echo "Release version: ${VERSION}"
+
+      # ==========================================
+      # Create Git tag
+      # ==========================================
+
+      - name: Create and push Git tag
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git tag -a "$TAG" "$GITHUB_SHA" \
+            -m "VoiceCall Release $TAG"
+
+          git push origin "refs/tags/$TAG"
+
+      # ==========================================
+      # Prepare release directory
+      # ==========================================
+
+      - name: Prepare release assets
+        id: package
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PROJECT="VoiceCall"
+          RELEASE_DIR="$RUNNER_TEMP/release"
+
+          mkdir -p "$RELEASE_DIR"
+
+          PREFIX="${PROJECT}-${TAG}"
+
+          # ----------------------------------------
+          # Verify the three official installers
+          # ----------------------------------------
+
+          INSTALLERS=(
+            "scripts/ubuntu/install_ubuntu.sh"
+            "scripts/windows/install_windows.ps1"
+            "scripts/colab/install_colab.sh"
+          )
+
+          for FILE in "${INSTALLERS[@]}"; do
+            if [[ ! -f "$FILE" ]]; then
+              echo "::error::Missing installer: $FILE"
+              exit 1
+            fi
+          done
+
+          # ----------------------------------------
+          # ZIP archive
+          # ----------------------------------------
+
+          git archive \
+            --format=zip \
+            --prefix="${PREFIX}/" \
+            "$GITHUB_SHA" \
+            > "$RELEASE_DIR/${PREFIX}.zip"
+
+          # ----------------------------------------
+          # TAR.GZ archive
+          # ----------------------------------------
+
+          git archive \
+            --format=tar \
+            --prefix="${PREFIX}/" \
+            "$GITHUB_SHA" \
+            | gzip -9 \
+            > "$RELEASE_DIR/${PREFIX}.tar.gz"
+
+          # ----------------------------------------
+          # Copy standalone installers
+          # ----------------------------------------
+
+          cp scripts/ubuntu/install_ubuntu.sh \
+            "$RELEASE_DIR/install_ubuntu.sh"
+
+          cp scripts/windows/install_windows.ps1 \
+            "$RELEASE_DIR/install_windows.ps1"
+
+          cp scripts/colab/install_colab.sh \
+            "$RELEASE_DIR/install_colab.sh"
+
+          # ----------------------------------------
+          # Generate SHA256 checksums
+          # ----------------------------------------
+
+          cd "$RELEASE_DIR"
+
+          sha256sum \
+            "${PREFIX}.zip" \
+            "${PREFIX}.tar.gz" \
+            "install_ubuntu.sh" \
+            "install_windows.ps1" \
+            "install_colab.sh" \
+            > "${PREFIX}-SHA256SUMS.txt"
+
+          # ----------------------------------------
+          # Verify generated checksums
+          # ----------------------------------------
+
+          sha256sum --check "${PREFIX}-SHA256SUMS.txt"
+
+          echo "release_dir=${RELEASE_DIR}" >> "$GITHUB_OUTPUT"
+
+          echo "Generated release assets:"
+          ls -lh "$RELEASE_DIR"
+
+      # ==========================================
+      # Create GitHub Release
+      # ==========================================
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+
+          name: VoiceCall ${{ steps.version.outputs.tag }}
+
+          target_commitish: ${{ github.sha }}
+
+          draft: false
+          prerelease: false
+
+          generate_release_notes: true
+
+          body: |
+            # Iraqi Voice Studio — VoiceCall
+
+            Automated release generated from the main branch.
+
+            ## Build Information
+
+            - Version: `${{ steps.version.outputs.tag }}`
+            - Commit: `${{ github.sha }}`
+            - Branch: `main`
+            - Build date: `${{ steps.version.outputs.timestamp }} UTC`
+
+            ## Included Assets
+
+            | Asset | Description |
+            |---|---|
+            | ZIP | Complete project archive |
+            | TAR.GZ | Complete project archive |
+            | install_ubuntu.sh | Ubuntu installer |
+            | install_windows.ps1 | Windows PowerShell installer |
+            | install_colab.sh | Google Colab installer |
+            | SHA256SUMS | SHA-256 integrity checksums |
+
+            ## Verify Downloads
+
+            Download `*-SHA256SUMS.txt` and run:
+
+            ```bash
+            sha256sum --check VoiceCall-${{ steps.version.outputs.tag }}-SHA256SUMS.txt
+            ```
+
+            ## Source
+
+            This release corresponds exactly to commit:
+
+            `${{ github.sha }}`
+
+          files: |
+            ${{ steps.package.outputs.release_dir }}/*.zip
+            ${{ steps.package.outputs.release_dir }}/*.tar.gz
+            ${{ steps.package.outputs.release_dir }}/install_ubuntu.sh
+            ${{ steps.package.outputs.release_dir }}/install_windows.ps1
+            ${{ steps.package.outputs.release_dir }}/install_colab.sh
+            ${{ steps.package.outputs.release_dir }}/*SHA256SUMS.txt
+
+          fail_on_unmatched_files: true
