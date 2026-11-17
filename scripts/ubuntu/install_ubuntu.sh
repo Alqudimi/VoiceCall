@@ -100,13 +100,19 @@ fi
 
 # ---------------------------------------------------------------- project ---
 cd "$PROJECT_ROOT"
-log "syncing python environment (CPU wheels by default; GPU: make env-gpu CUDA=cu124)"
+log "syncing python environment (CPU wheels by default; GPU: make env-gpu CUDA=cu128)"
 uv sync --all-groups
 if [[ $GPU -eq 1 ]]; then
+  # available variants for the locked torch 2.7.x: cu118 / cu126 / cu128 only
+  # (cu121/cu124 have no wheels for this version). CUDA_VARIANT may be preset:
+  #   CUDA_VARIANT=cu128 bash scripts/ubuntu/install_ubuntu.sh
   if [[ -n "${CUDA_VARIANT:-}" ]]; then
-    uv run rvc-platform env gpu "$CUDA_VARIANT"
+    if uv run rvc-platform env gpu "$CUDA_VARIANT"; then
+      export UV_NO_SYNC=1   # plain `uv run` would re-sync back to CPU wheels
+    fi
   else
-    log "GPU detected — install CUDA torch anytime with: make env-gpu CUDA=cu124"
+    log "GPU detected — install CUDA torch anytime with: make env-gpu CUDA=cu128"
+    log "(cu118 للدرايفر 11.x / 12.0–12.1، cu126 لـ 12.2–12.7، cu128 لـ 12.8+ / 13.x)"
   fi
 fi
 

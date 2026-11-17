@@ -8,7 +8,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -32,6 +32,44 @@ from rvc_platform.infrastructure.security.auth import TokenAuth
 from rvc_platform.utils.device import select_device
 
 logger = logging.getLogger(__name__)
+
+
+class _AuthGuardMiddleware:
+    """Pure ASGI bearer-token guard for /api/* routes.
+
+    Deliberately NOT ``@app.middleware("http")`` (BaseHTTPMiddleware): a
+    function middleware replays the inner app's response body and, combined
+    with certain responses, corrupts keep-alive framing — reproduced live as
+    ``RuntimeError: Response content longer than Content-Length``. A pure
+    ASGI middleware short-circuits with a single, correctly framed response
+    and never touches successful response bodies.
+    """
+
+    def __init__(self, app, auth) -> None:
+        self.app = app
+        self.auth = auth  # TokenAuth — mutable (enabled can be toggled at runtime)
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] == "http":
+            path = scope.get("path", "")
+            if (
+                path.startswith("/api")
+                and not path.startswith("/api/health")
+                and self.auth.enabled
+            ):
+                auth_header = None
+                for key, value in scope.get("headers", []):
+                    if key == b"authorization":
+                        auth_header = value.decode("latin-1")
+                        break
+                if not self.auth.check_header(auth_header):
+                    response = JSONResponse(
+                        {"detail": "missing or invalid bearer token"},
+                        status_code=401,
+                    )
+                    await response(scope, receive, send)
+                    return
+        await self.app(scope, receive, send)
 
 
 def create_app() -> FastAPI:
@@ -95,6 +133,10 @@ def create_app() -> FastAPI:
     tunnel_service.auth_enabler = enable_auth_for_tunnel
 
     app = FastAPI(title="Iraqi Voice Studio", version=__version__, docs_url="/api/docs")
+    # auth first, CORS second → CORS becomes the OUTERMOST layer: preflight
+    # OPTIONS requests are answered by CORS directly, and 401s from the guard
+    # still carry CORS headers for cross-origin API clients.
+    app.add_middleware(_AuthGuardMiddleware, auth=auth)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=config.server.cors_origins,
@@ -119,20 +161,10 @@ def create_app() -> FastAPI:
     }
     app.state.services = state
 
-    # ---- auth middleware ----
-    # NOTE: returns a 401 response instead of raising HTTPException, because
-    # exceptions raised in user middleware bypass the router's handlers and
-    # surface as 500s (verified by tests/integration/test_api.py).
-    @app.middleware("http")
-    async def auth_guard(request: Request, call_next):
-        if request.url.path.startswith("/api") and not request.url.path.startswith("/api/health"):
-            if auth.enabled and not auth.check_header(
-                request.headers.get("Authorization")
-            ):
-                return JSONResponse(
-                    {"detail": "missing or invalid bearer token"}, status_code=401
-                )
-        return await call_next(request)
+    # ---- auth guard ----
+    # Enforced by _AuthGuardMiddleware above (pure ASGI). Semantics kept
+    # identical to the previously tested behaviour: every /api/* route except
+    # /api/health requires a valid bearer token whenever auth is enabled.
 
     # ---- uniform error envelope for unhandled failures ----
     # per-route errors raise HTTPException already; anything that slips past
@@ -163,8 +195,12 @@ def create_app() -> FastAPI:
             return FileResponse(web_dir / "index.html")
 
         @app.get("/favicon.ico")
-        async def favicon() -> JSONResponse:
-            return JSONResponse({}, status_code=204)
+        async def favicon() -> Response:
+            # 204 MUST be bodyless — a JSONResponse would emit stray body bytes
+            # and poison HTTP/1.1 keep-alive framing (reproduced live: the next
+            # request on the same connection dies with "Response content
+            # longer than Content-Length").
+            return Response(status_code=204)
 
     @app.on_event("shutdown")
     async def on_shutdown() -> None:

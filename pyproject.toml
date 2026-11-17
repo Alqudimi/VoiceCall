@@ -37,8 +37,11 @@ dependencies = [
 
 [project.optional-dependencies]
 # GPU wheels are intentionally NOT installed by default (CPU wheels keep every
-# environment bootable). GPU users run: `make env-gpu CUDA=cu124`
-# which performs `uv pip install torch==..+cu124 --index-url .../whl/cu124`.
+# environment bootable). GPU users run: `make env-gpu CUDA=cu128`
+# which performs `uv pip install torch==..+cu128 --index-url .../whl/cu128`
+# (variants available for the locked torch 2.7.x: cu118 / cu126 / cu128 only).
+# NOTE: plain `uv run` re-syncs from the lock (CPU wheels) — keep GPU wheels
+# with UV_NO_SYNC=1; the Colab installer wires it automatically.
 training = [
     "tensorboard>=2.19.0,<3",
     "scikit-learn>=1.6.0,<2",

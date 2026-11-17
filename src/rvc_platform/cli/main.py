@@ -156,11 +156,27 @@ def sync(groups: bool = typer.Option(True, "--all-groups/--no-groups")):
     raise typer.Exit(os.system(" ".join(cmd)))
 
 
+_GPU_VARIANTS = ("cu118", "cu126", "cu128")
+# NOTE: for the locked torch 2.7.x the PyTorch index publishes ONLY cu118 /
+# cu126 / cu128 wheels (verified against download.pytorch.org). cu121/cu124
+# do not exist for this version and would fail resolution.
+
+
 @env_app.command("gpu")
-def env_gpu(cuda: str = typer.Argument("cu124", help="cu118|cu121|cu124|cu128")):
-    """Install CUDA torch wheels into the project venv (CPU -> GPU switch)."""
-    if cuda not in ("cu118", "cu121", "cu124", "cu128"):
-        raise typer.BadParameter("supported: cu118, cu121, cu124, cu128")
+def env_gpu(cuda: str = typer.Argument("cu128", help="cu118|cu126|cu128")):
+    """Install CUDA torch wheels into the project venv (CPU -> GPU switch).
+
+    IMPORTANT — persistence: a plain ``uv run`` re-syncs the environment from
+    the lockfile and would REVERT these GPU wheels back to CPU. After this
+    command, run the platform with ``UV_NO_SYNC=1 uv run ...`` (or
+    ``uv run --no-sync ...``, or ``.venv/bin/rvc-platform ...``) so the venv
+    is used as-is. On Colab the installer wires UV_NO_SYNC automatically.
+    """
+    if cuda not in _GPU_VARIANTS:
+        raise typer.BadParameter(
+            f"supported: {', '.join(_GPU_VARIANTS)} — cu121/cu124 have no "
+            "wheels for the locked torch 2.7.x"
+        )
     import torch
 
     version = torch.__version__.split("+")[0]
@@ -168,8 +184,36 @@ def env_gpu(cuda: str = typer.Argument("cu124", help="cu118|cu121|cu124|cu128"))
     cmd = (f"uv pip install --index-url https://download.pytorch.org/whl/{cuda} "
            f"'torch=={version}+{cuda}' 'torchaudio=={version}+{cuda}'")
     code = os.system(cmd)
-    if code == 0:
-        console.print("[green]GPU torch installed — verify with `rvc-platform install check`[/green]")
+    if code != 0:
+        console.print("[red]GPU torch install FAILED — the venv still has the "
+                      "previous torch build[/red]")
+        raise typer.Exit(1)
+    # honest verification in a FRESH interpreter: this process still holds the
+    # old CPU torch in memory, so re-importing here would lie.
+    probe = (
+        "import torch, torchaudio; "
+        "print(torch.__version__); "
+        "print('cuda', torch.cuda.is_available()); "
+        "print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else '-')"
+    )
+    check = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True)
+    if check.returncode != 0:
+        console.print(f"[red]torch/torchaudio import failed after GPU install:\n"
+                      f"{check.stderr.strip()[:500]}[/red]")
+        raise typer.Exit(1)
+    out_lines = [l for l in check.stdout.strip().splitlines() if l]
+    torch_ver = out_lines[0] if out_lines else "?"
+    cuda_ok = len(out_lines) > 1 and out_lines[1].endswith("True")
+    gpu_name = out_lines[2] if len(out_lines) > 2 else "-"
+    if cuda_ok:
+        console.print(f"[green]GPU torch active: {torch_ver} on {gpu_name}[/green]")
+    else:
+        console.print(f"[yellow]torch {torch_ver} installed but CUDA is NOT "
+                      "available — check nvidia-smi / driver, or pick a variant "
+                      "matching your driver (cu118 for 11.x, cu126 for 12.0–12.7, "
+                      "cu128 for 12.8+ / 13.x)[/yellow]")
+    console.print("next: keep the GPU wheels by exporting UV_NO_SYNC=1 before "
+                  "`uv run` (plain `uv run` re-syncs back to CPU torch)")
 
 
 @env_app.command("lock")

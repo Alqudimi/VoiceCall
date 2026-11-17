@@ -87,7 +87,19 @@ uv run rvc-platform web
 
 ## 4. Google Colab — التدريب السحابي
 
-المثبّت `scripts/colab/install_colab.sh` مصمم للخلية الأولى في Colab:
+الدفتر الرسمي `notebooks/RVC_Training_Colab.ipynb` هو الطريق الموصى به:
+
+```text
+File → Open notebook → GitHub → <user>/VoiceCall → notebooks/RVC_Training_Colab.ipynb
+```
+
+مهم: فعّل GPU أولًا من `Runtime ← Change runtime type ← T4 GPU`، ثم شغّل الخلايا بالترتيب.
+
+**ربط Drive يجب أن يحدث من الخلية 1 (خلية Python في النواة) — لا من خلية bash.**
+`drive.mount()` يحتاج نواة IPython؛ من داخل سكربت bash يفشل دائمًا بخطأ
+`AttributeError: 'NoneType' object has no attribute 'kernel'`. الدفتر يتكفل بذلك.
+
+ولمن يفضّل خلية واحدة في أي دفتر آخر:
 
 ```bash
 curl -fsSL <repo>/scripts/colab/install_colab.sh | bash
@@ -96,15 +108,21 @@ curl -fsSL <repo>/scripts/colab/install_colab.sh | bash
 > ملاحظة مهمة: عنوان السكربت `<repo>` يعتمد على مكان استضافتك للمستودع — على
 > GitHub مثلًا يكون بصيغة raw:
 > `https://raw.githubusercontent.com/<user>/<repo>/main/scripts/colab/install_colab.sh`.
-> استبدل العنوان بما يوافق مستودعك.
+> استبدل العنوان بما يوافق مستودعك. وإذا لم يكن Drive مربوطًا من قبل (خلية Python)،
+> يكمل السكربت محليًا ويطبع لك سطرَي ربط Drive لتشغّلها ثم تعيد المثبّت.
 
 ما يفعله المثبّت:
-1. يكتشف بيئة Colab وGPU وCUDA تلقائيًا (T4/L4/A100).
-2. يستنسخ/ينزّل المشروع ويثبّت `uv` ثم `uv sync --all-groups` مع عجلات CUDA.
-3. ينزّل الأصول المدربة مسبقًا (`download-models`).
-4. يربط Google Drive: مجلد `RVC_Iraqi/` للتجربة، عبر `RVC_PLATFORM_ROOT` و`drive_sync`
-   (مزامنة نقاط الحفظ إلى Drive حتى لا تضيع عند انقطاع الجلسة).
-5. يستأنف تلقائيًا من آخر checkpoint موجود عند إعادة التشغيل.
+1. يكتشف بيئة Colab وGPU وCUDA تلقائيًا (T4/L4/A100) ويربط Drive إن كان مثبتًا.
+2. يستنسخ/ينزّل المشروع ويثبّت `uv` ثم `uv sync --all-groups`.
+3. يثبّت عجلة CUDA المطابقة للدرايفر (cu128 لـ 12.8+/13.x، cu126 لـ 12.2–12.7،
+   cu118 لـ 11.x) — العجلات المتاحة فعليًا لإصدار torch المقفل 2.7.x هي cu118/cu126/cu128 فقط.
+4. يضبط `UV_NO_SYNC=1` في الجلسة (عبر `colab_wire_env.py`) كي لا يعيد `uv run`
+   عجلات GPU إلى CPU — سلوك مثبت ومقصود من uv: كل `uv run` يعيد مزامنة البيئة من `uv.lock`.
+5. ينزّل الأصول المدربة مسبقًا (`download-models`) ويستعيد runs/models من Drive.
+6. يستأنف تلقائيًا من آخر checkpoint موجود عند إعادة التشغيل.
+
+> الرمز: نفق Cloudflare يُفعّل المصادقة تلقائيًا — كل نداءات `/api/*` تعيد 401
+> حتى تدخل التوكن من تبويب الإعدادات في الواجهة (اقرأه من `logs/auth.token`).
 
 يوجد أيضًا دفتر جupyter مكافئ: `notebooks/RVC_Training_Colab.ipynb` — نفس الخطوات
 في خلايا قابلة للتشغيل. تفاصيل التدريب في TRAINING.md (قسم Colab).
@@ -159,29 +177,52 @@ uv run rvc-platform install doctor --fix           # فحص + تنزيل الن�
 
 ## 6. إعداد GPU (عجلات CUDA)
 
-الافتراضي CPU. للتبديل إلى GPU (مثال cu124):
+الافتراضي CPU. للتبديل إلى GPU (مثال cu128):
 
 ```bash
-make env-gpu CUDA=cu124
-# = rvc-platform env gpu cu124
-# = uv pip install --index-url https://download.pytorch.org/whl/cu124 \
-#     'torch==<version>+cu124' 'torchaudio==<version>+cu124'
+make env-gpu CUDA=cu128
+# = rvc-platform env gpu cu128
+# = uv pip install --index-url https://download.pytorch.org/whl/cu128 \
+#     'torch==<version>+cu128' 'torchaudio==<version>+cu128'
 ```
 
-الإصدارات المدعومة: `cu118 | cu121 | cu124 | cu128`.
+الإصدارات المدعومة: `cu118 | cu126 | cu128` — وهي فقط المتاحة فعليًا لإصدار
+torch المقفل 2.7.x على فهرس PyTorch (لا وجود لعجلات cu121/cu124 لهذا الإصدار).
+
+اختيار المتغير حسب درايفر NVIDIA (من `nvidia-smi`، سطر CUDA Version):
+
+| درايفر CUDA | المتغير |
+|---|---|
+| 13.x أو 12.8+ | `cu128` |
+| 12.2 – 12.7 | `cu126` |
+| 11.x أو 12.0–12.1 | `cu118` |
+
+> درايفر CUDA 13.x متوافق رجعيًا بالكامل مع عجلات cu128.
+
+**تحذير مهم — ثبات العجلات:** أي استدعاء `uv run` عادي يعيد مزامنة البيئة من
+`uv.lock` فيُرجع عجلات GPU إلى CPU. بعد `env gpu` استخدم أحد:
+
+```bash
+export UV_NO_SYNC=1        # ثم uv run ... كالمعتاد (يفعله مثبّت Colab تلقائيًا)
+uv run --no-sync ...       # أو صراحةً في كل مرة
+.venv/bin/rvc-platform ...  # أو استدعاء الـCLI من البيئة مباشرة
+```
+
+وإن شغّلت `uv sync` صريحًا لسبب ما، أعِد بعدها `make env-gpu CUDA=...`.
 
 تحقق بعدها:
 
 ```bash
 make check
-# python 3.12.x | torch 2.x.x+cu124 | cuda available: True
+# python 3.12.x | torch 2.x.x+cu128 | cuda available: True
 ```
 
 ملاحظات:
-- الأمر يثبّت عجلة CUDA **بنفس إصدار torch الحالي** في البيئة.
+- الأمر يثبّت عجلة CUDA **بنفس إصدار torch الحالي** في البيئة، ثم يتحقق من
+  الاستيراد ومن `cuda.is_available()` فعليًا (في مفسر جديد) ويطبع النتيجة بصدق.
 - fp16 يُفعّل تلقائيًا على GPU المؤهل (يعتمد على `engine.precision: auto`)،
   ويمكن إجباره إلى `fp32` عبر CONFIGURATION.md.
-- على Colab مثبّت المثبّت عجلات CUDA تلقائيًا مع الجهاز الممنوح.
+- على Colab يفعّل المثبّت كل هذا تلقائيًا مع الجهاز الممنوح.
 
 ---
 

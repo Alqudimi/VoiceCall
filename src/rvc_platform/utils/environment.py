@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import platform
+import re
 import shutil
 import subprocess
 from dataclasses import dataclass, field
@@ -146,7 +147,12 @@ def detect_system() -> SystemProfile:
         code, v = _run(["nvidia-smi"], timeout=5)
         for line in (v or "").splitlines():
             if "CUDA Version" in line:
-                cuda_version = line.split("CUDA Version")[-1].strip().strip("|").strip()
+                # header row: "| NVIDIA-SMI ... Driver Version: 550.163 CUDA
+                # Version: 13.0 |" — extract the bare number, not ": 13.0".
+                match = re.search(r"CUDA Version:\s*([0-9][0-9.]*)", line)
+                if match:
+                    cuda_version = match.group(1)
+                    break
 
     try:
         import psutil  # type: ignore

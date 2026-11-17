@@ -129,8 +129,11 @@ pretending; run `make realtime MODEL=<name>` on your hardware for truth.
 The upstream main branch targets Python 3.12 (fairseq-free, transformers
 HuBERT) — we pin `>=3.12,<3.13`. `uv` manages the venv/lockfile.
 **CPU wheels install by default** so every environment boots (Colab, CPU
-laptops, CI); GPU users run `make env-gpu CUDA=cu124` which installs the
-matching CUDA wheels into the project venv. No global pip installs, no
+laptops, CI); GPU users run  `make env-gpu CUDA=cu128` which installs the
+matching CUDA wheels into the project venv (available variants for the locked
+torch 2.7.x: cu118/cu126/cu128 only). Because plain `uv run` re-syncs the
+venv from `uv.lock`, GPU wheels persist only with `UV_NO_SYNC=1` (wired
+automatically by the Colab installer). No global pip installs, no
 cross-project pollution; all caches/artifacts under the project root with
 per-directory env redirections.
 

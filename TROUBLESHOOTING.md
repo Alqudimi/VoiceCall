@@ -18,7 +18,7 @@ curl -s http://127.0.0.1:8320/api/health
 | `uv: command not found` | uv غير مثبت | `curl -LsSf https://astral.sh/uv/install.sh \| sh` ثم أعد فتح الطرفية |
 | رفض Python بالإصدار | غير 3.12 (يتطلب `>=3.12,<3.13`) | ثبّت Python 3.12 وأعد `uv sync --all-groups` |
 | فشل استيراد عند `make check` | بيئة ناقصة/فاسدة | `make verify` (إعادة إنشاء من `uv.lock` + فحص)؛ إن استمر: احذف `.venv` وأعد `make install` |
-| عجلة torch لا تعمل بعد تحديث | مزج CPU/GPU wheels | `make env-gpu CUDA=cu124` بنفس إصدار torch الحالي فقط |
+| عجلة torch لا تعمل بعد تحديث | مزج CPU/GPU wheels | `make env-gpu CUDA=cu128` بنفس إصدار torch الحالي فقط (المتاح: cu118/cu126/cu128) |
 | `psutil` مفقود عند web-stop | مجموعة dev غير مثبتة | `uv sync --all-groups` |
 | سكربت المثبّت يرفض المتابعة | فحوص Ubuntu/arch/python ناقصة | ثبّت الناقص كما يقول السكربت (`apt`) ثم أعد تشغيله |
 
@@ -26,8 +26,10 @@ curl -s http://127.0.0.1:8320/api/health
 
 | العرَض | السبب | الحل |
 |---|---|---|
-| `cuda available: False` مع GPU موجود | عجلات CPU لا تزال مثبتة | `make env-gpu CUDA=cu124` (أو cu121/cu118/cu128 بحسب درايفر NVIDIA) |
+| `cuda available: False` مع GPU موجود | عجلات CPU لا تزال مثبتة | `make env-gpu CUDA=cu128` (cu126 للدرايفر 12.2–12.7، cu118 لـ 11.x) — انظر INSTALLATION.md §6 |
 | fp16 لا يتفعل | GPU غير مؤهل أو `precision: fp32` | تحقق من `make doctor`؛ اضبط `engine.precision: auto` |
+| رجع GPU إلى CPU بعد `uv run` | أي `uv run` عادي يعيد المزامنة من `uv.lock` | `export UV_NO_SYNC=1` ثم `uv run ...` — أو `uv run --no-sync` / `.venv/bin/rvc-platform` (مثبّت Colab يفعّلها تلقائيًا) |
+| استدعيت `uv sync` صريحًا فأعدت العجلات إلى CPU | سلوك uv المقصود | أعِد `make env-gpu CUDA=cu128` بعده |
 | `CUDA out of memory` أثناء التدريب | batch كبير للـVRAM | أنزل `--batch` (6–8GB ≈ 6؛ 24GB ≈ 12)؛ أعد التشغيل لتحرير الذاكرة |
 | `CUDA out of memory` عند البث | جلسات متعددة/نموذج آخر محمّل | جلسة واحدة، `POST /api/models/unload` ما لا تستخدمه |
 | أداء GPU أضعف من المتوقع | تشغيل على iGPU/توفير طاقة | `make doctor` لعرض اسم GPU وVRAM؛ قارن بـ`make realtime MODEL=<name>` |
@@ -46,7 +48,9 @@ curl -s http://127.0.0.1:8320/api/health
 | العرَض | السبب | الحل |
 |---|---|---|
 | `port 8320 already in use` | خادم سابق شغّال | `make web-status` ثم `make web-stop`؛ أو `PORT=8330 make web` |
-| `401 missing or invalid bearer token` | المصادقة مفعلة (نفق غالبًا) | اقرأ `logs/auth.token` وأرسل `Authorization: Bearer <token>` |
+| `401 missing or invalid bearer token` | المصادقة مفعلة (نفق غالبًا) | اقرأ `logs/auth.token` وأرسل `Authorization: Bearer <token>` — في الواجهة: تبويب الإعدادات ← الرمز |
+| الواجهة عبر النفق: كل النداءات 401 وهم تظهر | الرمز لم يُدخل بعد | مقصود أمنيًا: `!cat logs/auth.token` في Colab ثم أدخله في تبويب الإعدادات وحفظ |
+| `RuntimeError: Response content longer than Content-Length` | صُلّح في هذا الإصدار (favicon كان يرسل جسمًا مع رد 204 فيفسد بروتوكول الاتصال) | حدّث المستودع — لا حل يدوي مطلوب |
 | WS يُغلق برمز `4401` | توكن لم يُمرر في `?token=` | المتصفح لا يرسل ترويسات على WebSocket — استخدم `ws://…?token=<token>` (REALTIME.md) |
 | نتيجة تحويل `409` | لا نموذج محمّل | `POST /api/models/{name}/load` أولًا |
 | رفض رفع صوت `400` | فارغ/أكبر من 40MB/صيغة غير مدعومة | ارفع ملفًا أصغر بصيغة مدعومة (WAV/MP3/FLAC/OGG/M4A/OPUS/WebM/AAC) |
@@ -118,7 +122,7 @@ curl -s http://127.0.0.1:8320/api/health
 |---|---|
 | PowerShell يرفض السكربت | `powershell -ExecutionPolicy Bypass -File scripts/windows/install_windows.ps1` |
 | لا Makefile افتراضيًا | استخدم CLI: `uv run rvc-platform <command>` — كل هدف make له مكافئ |
-| البطء الشديد بعد التثبيت | تحقق من GPU: `uv run rvc-platform install check` — إن كان CPU wheels نفّذ `env gpu cu124` |
+| البطء الشديد بعد التثبيت | تحقق من GPU: `uv run rvc-platform install check` — إن كان CPU wheels نفّذ `env gpu cu128` مع `UV_NO_SYNC=1` |
 | ASIO لا يظهر عبر المتصفح | أرقام ASIO (~90ms) خاصة بتطبيقات upstream على Windows — البث عبر المتصفح يستخدم قناة الصوت الاعتيادية |
 
 ### Colab
@@ -128,6 +132,8 @@ curl -s http://127.0.0.1:8320/api/health
 | انقطعت الجلسة وضاع التقدم | شغّل مثبّت Colab مجددًا — يستأنف من آخر checkpoint متزامن في Drive (`RVC_Iraqi/`) |
 | GPU لم يُمنح | من `Runtime > Change runtime type` اختر GPU ثم أعد المثبّت |
 | مساحة Drive ممتلئة | نظّف `runs/` القديمة أو ارفع `RVC_RUNS_DIR` إلى مسار أوسع |
+| `AttributeError: 'NoneType' object has no attribute 'kernel'` عند ربط Drive | `drive.mount()` لا يعمل من خلية bash/سكربت (يحتاج نواة IPython): شغّل في خلية **Python**: `from google.colab import drive; drive.mount('/content/drive')` ثم أعد خلية التثبيت — الدفتر الرسمي يفعل هذا في الخلية 1 |
+| `engine device=cpu` رغم وجود GPU | عجلات GPU رُكّبت ثم أعادها `uv run` إلى CPU: نفّذ `!uv run rvc-platform env gpu cu128` ثم `import os; os.environ["UV_NO_SYNC"]="1"` قبل كل `!uv run` لاحق — أو استخدم الدفتر الرسمي (يفعّلها تلقائيًا) |
 
 ## 11. أين تجد كل سجل
 

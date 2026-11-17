@@ -213,7 +213,7 @@ Windows/Colab حيث لا يوجد make. المجموعات: `install`, `env`, `
 | فحص استيرادات سريع | `make check` | `uv run rvc-platform install check` |
 | فحص عميق (GPU/CUDA/الأصول) | `make doctor FIX=1` | `uv run rvc-platform install doctor --fix` |
 | نظرة عامة على البيئة والمسارات | `make env` | `uv run rvc-platform env info` |
-| عجلات CUDA | `make env-gpu CUDA=cu124` | `uv run rvc-platform env gpu cu124` |
+| عجلات CUDA |  `make env-gpu CUDA=cu128` | `uv run rvc-platform env gpu cu128` |
 | تحديث الاعتماديات | `make update` | `uv run rvc-platform env update` |
 | توليد uv.lock | `make lock` | `uv run rvc-platform env lock` |
 | إعادة إنتاج من lockfile | `make verify` | `uv run rvc-platform env verify` |

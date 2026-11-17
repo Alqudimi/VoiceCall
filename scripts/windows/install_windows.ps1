@@ -1,6 +1,6 @@
 # Iraqi Voice Studio — Windows installer (PowerShell)
 # Usage:  powershell -ExecutionPolicy Bypass -File scripts\windows\install_windows.ps1
-#         [-SkipAssets] [-GpuVariant cu124|cu121|cu118|cu128|none]
+#         [-SkipAssets] [-GpuVariant cu118|cu126|cu128|none]
 [CmdletBinding()]
 param(
   [switch]$SkipAssets = $false,
@@ -68,12 +68,16 @@ if (Get-Command nvidia-smi -ErrorAction SilentlyContinue) {
     $driverCuda = $cudaLine.Matches[0].Groups[1].Value
     Log "driver CUDA runtime: $driverCuda"
     if ($HasGpu -and $GpuVariant -eq "none") {
-      switch ($driverCuda) {
-        "12.8" { Log "suggested torch variant: cu128 (make env-gpu CUDA=cu128)" }
-        "12.4" { Log "suggested torch variant: cu124 (make env-gpu CUDA=cu124)" }
-        "12.1" { Log "suggested torch variant: cu121 (make env-gpu CUDA=cu121)" }
-        "11.8" { Log "suggested torch variant: cu118 (make env-gpu CUDA=cu118)" }
-        default { Log "unknown CUDA runtime $driverCuda — cu124 is the safe pick" }
+      # available variants for the locked torch 2.7.x: cu118 / cu126 / cu128
+      # only (cu121/cu124 have no wheels for this version).
+      $major = [int]($driverCuda.Split(".")[0])
+      $minor = if ($driverCuda -match "\d+\.(\d+)") { [int]$Matches[1] } else { 0 }
+      if ($major -ge 13 -or ($major -eq 12 -and $minor -ge 8)) {
+        Log "suggested torch variant: cu128 (make env-gpu CUDA=cu128)"
+      } elseif ($major -eq 12 -and $minor -ge 2) {
+        Log "suggested torch variant: cu126 (make env-gpu CUDA=cu126)"
+      } else {
+        Log "suggested torch variant: cu118 (make env-gpu CUDA=cu118)"
       }
     }
   }
@@ -81,8 +85,8 @@ if (Get-Command nvidia-smi -ErrorAction SilentlyContinue) {
 if (-not $HasGpu) {
   Warn "no NVIDIA GPU detected — CPU mode: training VERY slow, realtime unusable"
 } elseif ($GpuVariant -eq "none") {
-  Log "GPU found; install CUDA torch with: make env-gpu CUDA=cu124"
-  Log "(or re-run this script with -GpuVariant cu124)"
+  Log "GPU found; install CUDA torch with: make env-gpu CUDA=cu128"
+  Log "(or re-run this script with -GpuVariant cu128)"
 }
 
 # ---------------------------------------------------------------- project ---
@@ -92,6 +96,11 @@ uv sync --all-groups
 if ($HasGpu -and $GpuVariant -ne "none") {
   Log "installing CUDA torch variant: $GpuVariant"
   uv run rvc-platform env gpu $GpuVariant
+  if ($LASTEXITCODE -eq 0) {
+    # plain `uv run` re-syncs from the lockfile and would revert GPU wheels
+    # back to CPU — keep them for the rest of this installer.
+    $env:UV_NO_SYNC = "1"
+  }
 }
 
 # ---------------------------------------------------------------- assets ----

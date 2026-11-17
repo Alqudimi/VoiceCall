@@ -16,7 +16,7 @@ make test                  # كل الاختبارات
 ```
 
 - Python **3.12 فقط**. `uv` مدير البيئة والحزم من `uv.lock` (قابل للتوليد بـ`make lock`).
-- عجلات GPU ليست افتراضية: `make env-gpu CUDA=cu124` عند الحاجة (انظر INSTALLATION.md).
+- عجلات GPU ليست افتراضية:  `make env-gpu CUDA=cu128` عند الحاجة (انظر INSTALLATION.md).
 
 ### تشغيل الاختبارات
 
