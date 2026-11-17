@@ -1,0 +1,34 @@
+# --- environment / build ---
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# --- runtime artifacts (never commit user data or big weights) ---
+assets/
+models/*.pth
+models/*.index
+models/registry.json
+data/
+runs/
+logs/
+.cache/
+.tmp/
+*.log
+
+# --- editors / OS ---
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# --- local overrides ---
+configs/user.yaml
+.env
+.colab_env
+.devref/

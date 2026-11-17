@@ -1,0 +1,85 @@
+[project]
+name = "rvc-platform"
+version = "1.0.0"
+description = "Iraqi Voice Studio — production-grade RVC v2 voice-conversion platform with Iraqi-Arabic specialization, full training pipeline, resumable checkpoints and real-time conversion"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.12,<3.13"
+authors = [{ name = "Iraqi Voice Studio Engineering Team" }]
+keywords = ["rvc", "voice-conversion", "iraqi-arabic", "real-time-audio", "deep-learning"]
+
+dependencies = [
+    # ---- numerical / audio core ----
+    "numpy>=1.26.4,<2",
+    "scipy>=1.13.1,<2",
+    "librosa>=0.10.2,<0.11",
+    "soundfile>=0.12.1,<1",
+    "torch>=2.4.1,<2.8",
+    "torchaudio>=2.4.1,<2.8",
+    # ---- model runtime ----
+    "transformers>=4.49.0,<4.50",       # HuBERT / ContentVec content encoder
+    "faiss-cpu>=1.8.0,<2",              # retrieval index
+    "praat-parselmouth>=0.4.5,<1",      # "pm" F0 extractor
+    "torchfcpe>=0.0.4,<0.1",            # "fcpe" F0 extractor
+    # ---- web backend ----
+    "fastapi>=0.115.0,<1",
+    "uvicorn[standard]>=0.30.0,<1",
+    "pydantic>=2.8,<3",
+    "pydantic-settings>=2.4,<3",
+    "pyyaml>=6.0,<7",
+    # ---- CLI & tooling ----
+    "typer>=0.12,<1",
+    "rich>=13.7,<15",
+    "httpx>=0.27,<1",
+    "tqdm>=4.66,<5",
+    "python-multipart>=0.0.9,<1",
+]
+
+[project.optional-dependencies]
+# GPU wheels are intentionally NOT installed by default (CPU wheels keep every
+# environment bootable). GPU users run: `make env-gpu CUDA=cu124`
+# which performs `uv pip install torch==..+cu124 --index-url .../whl/cu124`.
+training = [
+    "tensorboard>=2.19.0,<3",
+    "scikit-learn>=1.6.0,<2",
+    "matplotlib>=3.8.2,<4",
+]
+onnx = ["onnxruntime>=1.18.0,<2"]
+
+[project.scripts]
+rvc-platform = "rvc_platform.cli.main:app_run"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/rvc_platform"]
+
+[tool.uv]
+package = true
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu" }]
+torchaudio = [{ index = "pytorch-cpu" }]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.2,<9",
+    "pytest-asyncio>=0.23,<2",
+    "psutil>=6.0,<7",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+asyncio_mode = "auto"
+markers = [
+    "gpu: requires a physical CUDA GPU (skipped automatically otherwise)",
+    "slow: long-running integration test",
+]

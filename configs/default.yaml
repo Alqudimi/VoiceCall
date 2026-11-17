@@ -1,0 +1,66 @@
+# Iraqi Voice Studio — default runtime configuration.
+# Copy to configs/user.yaml (or point RVC_PLATFORM_CONFIG at a file) to
+# override; environment variables (RVC_*) win over everything.
+
+server:
+  host: 127.0.0.1          # use 0.0.0.0 only behind a tunnel / on Colab
+  port: 8320
+  auth_enabled: false       # forced ON automatically when a tunnel starts
+  auth_token: ""            # empty -> auto-generated & written to logs/auth.token
+  cors_origins: ["*"]
+  max_upload_mb: 200
+
+engine:
+  device: auto              # auto | cpu | cuda:0
+  f0_method: rmvpe          # rmvpe (best) | fcpe (fast) | pm (CPU fallback)
+  precision: auto           # auto | fp16 | fp32
+
+conversion:
+  pitch_shift: 0
+  index_rate: 0.0
+  filter_radius: 3
+  rms_mix_rate: 0.25
+  protect: 0.33
+  denoise: false
+  normalize: true
+  output_sample_rate: null
+
+realtime:
+  block_ms: 160             # 60..500; 160ms ≈ official RVC default budget
+  lookback_ms: 200          # F0/history context fed each block
+  crossfade_ms: 8           # SOLA blend between consecutive blocks
+  silence_threshold_db: -40 # gate blocks below this level
+  keep_alive_s: 60
+  f0_method: rmvpe
+
+training:
+  sample_rate: "40k"        # 32k | 40k | 48k
+  version: v2
+  f0: true
+  f0_method: rmvpe
+  epochs: 200
+  batch_size: 6             # 6-8 GB VRAM ≈ 6; 24 GB ≈ 12
+  learning_rate: 1.0e-4
+  lr_decay: 0.999875
+  save_every_epoch: 10
+  save_latest: true
+  save_every_weights: true
+  cache_in_gpu: false
+  preload_base_models: true
+  gpu: null
+
+tunnel:
+  enabled: false
+  binary: cloudflared
+  retries: 3
+  start_timeout_s: 30
+
+downloads:
+  huggingface_base: "https://huggingface.co/lj1995/VoiceConversionWebUI/resolve/main"
+  chunk_mb: 8
+  connect_timeout_s: 30
+
+logging:
+  level: INFO
+  max_bytes: 10485760
+  backups: 5

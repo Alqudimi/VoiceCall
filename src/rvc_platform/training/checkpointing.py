@@ -1,0 +1,159 @@
+"""Checkpoint I/O with *complete* resumable state.
+
+Upstream RVC saves {model, optimizer, learning_rate, iteration(epoch)} which
+loses scheduler / scaler / global-step / RNG state. We keep byte-compatibility
+(read those checkpoints for resume) and add our own richer format:
+
+    checkpoints/
+        G_<step>.pth   {"model", "optimizer", "scheduler", "scaler",
+                        "epoch", "global_step", "rng"}          (step snapshot)
+        D_<step>.pth   same for the discriminator
+        G_2333333.pth / D_2333333.pth    always-latest mirrors
+        state.json     {epoch, global_step, dataset_signature,
+                        run_config, losses tail, wall_clock, last_save}
+
+Resume policy (CheckpointManager.resolve):
+    1. explicit checkpoint requested -> use it;
+    2. state.json exists and matches run config + dataset signature -> latest;
+    3. upstream-style G_/D_ present -> legacy resume (epoch from 'iteration');
+    4. nothing -> fresh start with optional pretrained base.
+"""
+from __future__ import annotations
+
+import glob
+import json
+import logging
+import re
+import time
+from pathlib import Path
+from typing import Any
+
+import torch
+
+from rvc_platform.core.entities import CheckpointInfo
+from rvc_platform.core.errors import CheckpointError
+
+logger = logging.getLogger(__name__)
+
+LATEST_TAG = 2333333
+
+
+def _torch_save(obj: dict, path: Path) -> None:
+    tmp = path.with_suffix(".pth.tmp")
+    torch.save(obj, tmp)
+    tmp.replace(path)
+
+
+def save_full(
+    path: Path,
+    model: torch.nn.Module,
+    optimizer: torch.optim.Optimizer,
+    scheduler: torch.optim.lr_scheduler.LRScheduler | None,
+    scaler: Any | None,
+    epoch: int,
+    global_step: int,
+) -> None:
+    _torch_save(
+        {
+            "model": model.state_dict(),
+            "optimizer": optimizer.state_dict(),
+            "scheduler": scheduler.state_dict() if scheduler is not None else None,
+            "scaler": scaler.state_dict() if scaler is not None else None,
+            "epoch": epoch,
+            "global_step": global_step,
+            "rng": torch.get_rng_state(),
+            "saved_at": time.time(),
+        },
+        path,
+    )
+
+
+def load_full(path: Path, model: torch.nn.Module, optimizer: torch.optim.Optimizer,
+              scheduler: torch.optim.lr_scheduler.LRScheduler | None = None,
+              scaler: Any | None = None) -> dict:
+    """Load a full-state checkpoint into live objects. Returns metadata."""
+    if not Path(path).is_file():
+        raise CheckpointError(f"checkpoint missing: {path}")
+    payload = torch.load(path, map_location="cpu", weights_only=False)
+    if "model" not in payload:
+        raise CheckpointError(f"{path} has no 'model' entry")
+    model.load_state_dict(payload["model"])
+    if optimizer is not None and payload.get("optimizer"):
+        optimizer.load_state_dict(payload["optimizer"])
+    if scheduler is not None and payload.get("scheduler"):
+        scheduler.load_state_dict(payload["scheduler"])
+    if scaler is not None and payload.get("scaler"):
+        scaler.load_state_dict(payload["scaler"])
+    if payload.get("rng") is not None:
+        torch.set_rng_state(payload["rng"].to(torch.uint8))
+    return {
+        "epoch": int(payload.get("epoch", payload.get("iteration", 1)) or 1),
+        "global_step": int(payload.get("global_step", 0) or 0),
+    }
+
+
+def legacy_iteration_epoch(path: Path) -> int:
+    """Epoch number of an upstream-style checkpoint."""
+    payload = torch.load(path, map_location="cpu", weights_only=False)
+    return int(payload.get("iteration", 1) or 1)
+
+
+def write_state(state: dict, path: Path) -> None:
+    tmp = Path(path).with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(state, ensure_ascii=False, indent=1), encoding="utf-8")
+    tmp.replace(path)
+
+
+def read_state(path: Path) -> dict | None:
+    path = Path(path)
+    if not path.is_file():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return None
+
+
+def list_checkpoints(checkpoint_dir: Path) -> list[CheckpointInfo]:
+    checkpoint_dir = Path(checkpoint_dir)
+    out: list[CheckpointInfo] = []
+    for path in sorted(checkpoint_dir.glob("G_*.pth")):
+        kind = "G-latest" if path.stem == "G_2333333" else "G"
+        epoch, step = _probe_epoch(path)
+        out.append(
+            CheckpointInfo(
+                run_id=checkpoint_dir.parent.name,
+                path=path,
+                kind=kind,
+                epoch=epoch,
+                global_step=step,
+                created_at=path.stat().st_mtime,
+                size_mb=path.stat().st_size / (1024 * 1024),
+            )
+        )
+    return out
+
+
+def _probe_epoch(path: Path) -> tuple[int, int]:
+    try:
+        payload = torch.load(path, map_location="cpu", weights_only=False)
+        return int(payload.get("epoch", payload.get("iteration", 0)) or 0), int(
+            payload.get("global_step", 0) or 0
+        )
+    except Exception:
+        return 0, int(re.sub(r"\D", "", path.stem) or 0)
+
+
+def latest_step_checkpoint(checkpoint_dir: Path) -> Path | None:
+    """Highest-numbered G_<step>.pth excluding the always-latest mirror."""
+    checkpoint_dir = Path(checkpoint_dir)
+    candidates = [
+        p for p in checkpoint_dir.glob("G_*.pth")
+        if p.stem != f"G_{LATEST_TAG}"
+    ]
+    if not candidates:
+        return None
+    def step_of(p: Path) -> int:
+        digits = re.sub(r"\D", "", p.stem)
+        return int(digits) if digits else 0
+    return max(candidates, key=step_of)

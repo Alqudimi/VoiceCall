@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>استوديو الصوت العراقي — Iraqi Voice Studio</title>
+  <link rel="stylesheet" href="/static/css/app.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <div class="brand">
+        <svg class="brand-mark" viewBox="0 0 40 40" aria-hidden="true">
+          <rect x="1" y="1" width="38" height="38" rx="9" fill="none" stroke="currentColor" stroke-width="2"/>
+          <path d="M6 20 L11 20 L14 12 L18 28 L22 12 L26 28 L29 20 L34 20"
+                fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <div class="brand-text">
+          <span class="brand-title">استوديو الصوت العراقي</span>
+          <span class="brand-sub latin">Iraqi Voice Studio · RVC v2</span>
+        </div>
+      </div>
+
+      <div class="status-chips" id="status-chips">
+        <span class="chip" id="chip-conn" data-state="unknown" title="حالة الاتصال بالخادم">
+          <span class="chip-dot"></span><span class="chip-label">الاتصال</span>
+        </span>
+        <span class="chip" id="chip-engine" data-state="unknown" title="حالة محرك التحويل">
+          <span class="chip-dot"></span><span class="chip-label">المحرك</span>
+        </span>
+        <a class="chip chip-btn" id="chip-token" href="#settings" title="إدارة رمز المصادقة">
+          <span class="chip-dot"></span><span class="chip-label">الرمز</span>
+        </a>
+      </div>
+
+      <nav class="tabs" id="tabs" aria-label="أقسام المنصة"></nav>
+    </div>
+  </header>
+
+  <main class="wrap" id="view-root" aria-live="polite"></main>
+
+  <footer class="footer">
+    <span>استوديو الصوت العراقي — واجهة تشغيل محلية لواجهة API الخاصة بمنصة RVC v2.</span>
+    <span class="latin" id="footer-version">—</span>
+  </footer>
+
+  <div class="toasts" id="toasts" role="status" aria-live="polite"></div>
+  <div class="modal-root" id="modal-root"></div>
+
+  <script type="module" src="/static/js/app.js"></script>
+</body>
+</html>
