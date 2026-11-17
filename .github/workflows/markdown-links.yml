@@ -29,7 +29,7 @@ jobs:
     continue-on-error: true
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Run lychee on all markdown files
         uses: lycheeverse/lychee-action@v1
