@@ -722,6 +722,7 @@ async function refreshCheckpoints(state, ui) {
         el("td", { class: "num" }, [String(c.global_step ?? 0)]),
         el("td", { class: "latin small" }, [fmtTime(c.created_at)]),
         el("td", { class: "num" }, [fmtMB(c.size_mb)]),
+        el("td", {}, [resumeFromButton(state, ui, c)]),
       ]));
     }
     box.append(el("div", { class: "table-wrap" }, [
@@ -733,6 +734,7 @@ async function refreshCheckpoints(state, ui) {
           el("th", {}, ["الخطوة"]),
           el("th", {}, ["التاريخ"]),
           el("th", {}, ["الحجم"]),
+          el("th", {}, ["إجراء"]),
         ])]),
         tbody,
       ]),
@@ -741,6 +743,28 @@ async function refreshCheckpoints(state, ui) {
     clear(box);
     box.append(el("p", { class: "muted small" }, [err.message]));
   }
+}
+
+function resumeFromButton(state, ui, c) {
+  const name = Path(c.path).name; // c.path comes from the server (G_*.pth)
+  const btn = el("button", { class: "btn sm ghost", type: "button" }, ["استكمال من هنا"]);
+  btn.addEventListener("click", async () => {
+    if (!name) { toast("لا يمكن تحديد نقطة الحفظ.", "warn"); return; }
+    setBusy(btn, true, "جارٍ الاستكمال…");
+    try {
+      await post(`/training/resume?experiment=${encodeURIComponent(state.currentExperiment)}&checkpoint=${encodeURIComponent(name)}`);
+      toast(`بدأ استكمال التدريب من ${name}.`, "success");
+    } catch (err) {
+      toast(err.message, "error", 10000);
+    } finally { setBusy(btn, false); }
+  });
+  return btn;
+}
+
+function Path(p) { // minimal basename helper without importing node:path
+  const s = String(p || "");
+  const i = Math.max(s.lastIndexOf("/"), s.lastIndexOf("\\"));
+  return { name: i >= 0 ? s.slice(i + 1) : s };
 }
 
 async function refreshLogs(state, ui) {

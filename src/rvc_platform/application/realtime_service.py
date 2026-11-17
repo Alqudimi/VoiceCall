@@ -48,12 +48,16 @@ class RealtimeSession:
             crossfade_ms=realtime_cfg.crossfade_ms,
             extra_ms=realtime_cfg.lookback_ms,
             silence_threshold_db=realtime_cfg.silence_threshold_db,
+            f0_method=realtime_cfg.f0_method,   # config-driven server default
         )
         self.created_at = time.time()
         self.last_seen = time.time()
         self.blocks = 0
         self.client_reported_rtt_ms: list[float] = []
         self._transport_overhead_ms = 0.0
+
+    def idle_seconds(self) -> float:
+        return max(0.0, time.time() - self.last_seen)
 
     def load(self, model_name: str, settings: dict[str, Any]) -> dict:
         info = self.repo.get(model_name)
@@ -129,14 +133,33 @@ class RealtimeService:
         self.cfg = get_config().realtime
         self.sessions: dict[str, RealtimeSession] = {}
         self._lock = threading.Lock()
+        self._reaper_started = False
 
     def new_session(self) -> RealtimeSession:
+        # VRAM guard: every session holds its own engine + model copy — cap them
+        with self._lock:
+            self._drop_idle_locked()
+            live = sum(1 for s in self.sessions.values())
+            if live >= self.cfg.max_sessions:
+                raise RealtimeError(
+                    f"too many realtime sessions ({live}/{self.cfg.max_sessions}); "
+                    "close one before opening another"
+                )
         session = RealtimeSession(
             f"rt_{uuid.uuid4().hex[:8]}", self.profile, self.cfg, self.repo
         )
         with self._lock:
             self.sessions[session.id] = session
         return session
+
+    def _drop_idle_locked(self) -> None:
+        """Close sessions silent past keep_alive_s (abandoned mics, dead tabs)."""
+        for sid in list(self.sessions):
+            session = self.sessions.get(sid)
+            if session is not None and session.idle_seconds() > self.cfg.keep_alive_s:
+                logger.info("dropping idle realtime session %s (%.0fs silent)",
+                            sid, session.idle_seconds())
+                self.sessions.pop(sid, None)
 
     def close(self, session: RealtimeSession) -> None:
         with self._lock:

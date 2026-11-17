@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # Iraqi Voice Studio — Google Colab installer.
-# Run inside a Colab cell:
+# Run inside a Colab cell (curl-bash, works out of the box):
 #   !curl -fsSL https://raw.githubusercontent.com/Alqudimi/VoiceCall/main/scripts/colab/install_colab.sh | bash
 # Or after cloning the repo:
 #   !bash scripts/colab/install_colab.sh
 #
 # Environment variables:
-#   IRAQI_VOICE_REPO   override git URL (defaults to Alqudimi/VoiceCall)
-#   RVC_INSTALL_DIR    clone path (default /content/VoiceCall)
+#   IRAQI_VOICE_REPO   git URL of the project (default: the public repository;
+#                      override for forks; clone target /content/iraqi-voice-platform)
 #   MOUNT_DRIVE=1      mount Google Drive and wire runs/ + models/ to it (default 1)
 #   DRIVE_DIR=RVC_Iraqi  folder name inside MyDrive (default RVC_Iraqi)
 #   SKIP_ASSETS=1      do not download pretrained weights (default 0)
@@ -19,9 +19,6 @@ ok()   { printf '\033[1;32m[colab-ok]\033[0m %s\n' "$*"; }
 MOUNT_DRIVE="${MOUNT_DRIVE:-1}"
 DRIVE_DIR="${DRIVE_DIR:-RVC_Iraqi}"
 SKIP_ASSETS="${SKIP_ASSETS:-0}"
-SKIP_TUNNEL="${SKIP_TUNNEL:-0}"
-REPO_URL="${IRAQI_VOICE_REPO:-https://github.com/Alqudimi/VoiceCall.git}"
-INSTALL_DIR="${RVC_INSTALL_DIR:-/content/VoiceCall}"
 
 # ------------------------------------------------------------- environment --
 log "detecting execution environment"
@@ -37,19 +34,16 @@ print(f"[colab] torch={torch.__version__} cuda={torch.cuda.is_available()}")
 EOF
 
 # ---------------------------------------------------------------- project ---
+DEFAULT_REPO="${IRAQI_VOICE_REPO:-https://github.com/Alqudimi/VoiceCall.git}"
 if [[ -f "pyproject.toml" && -d "src/rvc_platform" ]]; then
   PROJECT_ROOT="$(pwd)"
   log "already inside the project: $PROJECT_ROOT"
-elif [[ -f "$INSTALL_DIR/pyproject.toml" ]]; then
-  PROJECT_ROOT="$INSTALL_DIR"
-  cd "$PROJECT_ROOT"
-  log "using existing checkout: $PROJECT_ROOT"
 else
-  [[ ! -e "$INSTALL_DIR" ]] || { echo "[colab][error] install path exists but is not VoiceCall: $INSTALL_DIR (set RVC_INSTALL_DIR)" >&2; exit 2; }
-  log "cloning $REPO_URL into $INSTALL_DIR"
-  git clone --depth 1 "$REPO_URL" "$INSTALL_DIR"
-  cd "$INSTALL_DIR"
-  PROJECT_ROOT="$INSTALL_DIR"
+  log "cloning $DEFAULT_REPO"
+  rm -rf /content/iraqi-voice-platform
+  git clone --depth 1 "$DEFAULT_REPO" /content/iraqi-voice-platform
+  cd /content/iraqi-voice-platform
+  PROJECT_ROOT=/content/iraqi-voice-platform
 fi
 
 # ---------------------------------------------------------------- drive -----
@@ -65,15 +59,6 @@ if [[ "$MOUNT_DRIVE" == "1" && -d /content/drive/MyDrive ]]; then
   DRIVE_ROOT="/content/drive/MyDrive/$DRIVE_DIR"
   mkdir -p "$DRIVE_ROOT/runs" "$DRIVE_ROOT/models" "$DRIVE_ROOT/datasets"
   ok "Drive workspace: $DRIVE_ROOT"
-fi
-
-# ---------------------------------------------------------------- Tunnel ----
-if [[ "$SKIP_TUNNEL" == "0" ]]; then
-  # shellcheck source=../common/install_cloudflared.sh
-  source scripts/common/install_cloudflared.sh
-  install_cloudflared_user "$HOME/.local/bin"
-else
-  log 'skipping cloudflared install (SKIP_TUNNEL=1)'
 fi
 
 # ---------------------------------------------------------------- uv + env --
@@ -111,14 +96,26 @@ if [[ -n "$DRIVE_ROOT" ]]; then
   mkdir -p runs models
   rsync -a --exclude='.part' "$DRIVE_ROOT/runs/" runs/ 2>/dev/null || true
   rsync -a "$DRIVE_ROOT/models/" models/ 2>/dev/null || true
-  cat > .colab_env <<EOF
-# source this before training in any later cell:
-export RVC_PLATFORM_ROOT="$PROJECT_ROOT"
-export RVC_RUNS_DIR="$DRIVE_ROOT/runs"        # checkpoints written straight to Drive
-export RVC_MODELS_DIR="$DRIVE_ROOT/models"    # exported models land in Drive
-export RVC_DATA_DIR="/content/iraqi_data"     # ephemeral fast disk for datasets
+  # NOTE: pipes into bash cannot export env vars back to the caller — write a
+  # Python snippet that sets the kernel's os.environ instead. The notebook
+  # runs it right after this script so every later `!uv run ...` cell inherits
+  # the Drive redirects (checkpoints land on Drive directly).
+  cat > colab_wire_env.py <<EOF
+import os
+os.environ.setdefault("RVC_PLATFORM_ROOT", r"$PROJECT_ROOT")
+os.environ["RVC_RUNS_DIR"] = r"$DRIVE_ROOT/runs"       # checkpoints straight to Drive
+os.environ["RVC_MODELS_DIR"] = r"$DRIVE_ROOT/models"   # exported models to Drive
+os.environ.setdefault("RVC_DATA_DIR", "/content/iraqi_data")
+print("[colab] Drive redirects active:", os.environ["RVC_RUNS_DIR"])
 EOF
-  ok "wrote .colab_env — source it before running training cells"
+  cat > .colab_env <<EOF
+# shell-only fallback (subshells): source this in bash cells
+export RVC_PLATFORM_ROOT="$PROJECT_ROOT"
+export RVC_RUNS_DIR="$DRIVE_ROOT/runs"
+export RVC_MODELS_DIR="$DRIVE_ROOT/models"
+export RVC_DATA_DIR="/content/iraqi_data"
+EOF
+  ok "wrote colab_wire_env.py — run it in the next cell (see notebook cell 2)"
 fi
 
 # ---------------------------------------------------------------- verify ----
@@ -127,12 +124,13 @@ uv run rvc-platform install check
 [[ "$SKIP_ASSETS" == "0" ]] && uv run rvc-platform install doctor
 ok "Colab setup complete"
 echo
-echo "  next steps (in a new cell):"
+echo "  next steps (in new cells):"
 echo "    %cd $PROJECT_ROOT"
+echo "    exec(open('colab_wire_env.py').read())   # activate Drive redirects"
 echo "    !uv run rvc-platform prepare-dataset /content/drive/MyDrive/$DRIVE_DIR/datasets/my_voice iraqi_voice"
 echo "    !uv run rvc-platform train start --experiment iraqi_voice"
-echo "    !uv run rvc-platform web --host 0.0.0.0 --tunnel   # protected quick tunnel"
-echo "  Authentication: token saved in logs/auth.token; open Settings on the shared page and paste it."
+echo "    !uv run rvc-platform web --host 0.0.0.0 --tunnel   # public UI via quick tunnel"
 echo
 echo "  training auto-resumes the latest checkpoint on every rerun;"
 echo "  checkpoints/models persist to Drive via RVC_RUNS_DIR/RVC_MODELS_DIR."
+echo "  before the session ends run colab snapshot (see notebook last cell)."

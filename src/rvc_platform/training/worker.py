@@ -18,6 +18,7 @@ import time
 from pathlib import Path
 
 from rvc_platform.infrastructure.logging.setup import setup_logging
+from rvc_platform.infrastructure.paths import get_paths
 from rvc_platform.training.run_config import TrainingRunConfig
 from rvc_platform.training.trainer import Trainer
 from rvc_platform.training.utils import (
@@ -26,6 +27,21 @@ from rvc_platform.training.utils import (
     stable_dataset_signature,
 )
 from rvc_platform.utils.device import select_device, training_dtype
+
+
+def _register_trainer_pid() -> None:
+    """Publish this worker's pid so `rvc-platform train stop` (CLI or API)
+    can send a cooperative-stop SIGTERM from any terminal."""
+    pid_file = get_paths().temp / "trainer.pid"
+    pid_file.parent.mkdir(parents=True, exist_ok=True)
+    pid_file.write_text(str(__import__("os").getpid()), encoding="utf-8")
+
+
+def _unregister_trainer_pid() -> None:
+    try:
+        (get_paths().temp / "trainer.pid").unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -76,8 +92,9 @@ def main(argv: list[str] | None = None) -> int:
     signal.signal(signal.SIGTERM, _handle_sigterm)
     signal.signal(signal.SIGINT, _handle_sigterm)
 
+    _register_trainer_pid()
     try:
-        dataset_files = sorted(Path(config.dataset_path).glob("*"))
+        dataset_files = sorted(Path(config.dataset_path).rglob("*"))
         signature = stable_dataset_signature(dataset_files)
         completed = trainer.run(dataset_signature=signature)
         return 0 if completed else 0  # cooperative stop is also success (0)
@@ -85,6 +102,8 @@ def main(argv: list[str] | None = None) -> int:
         logger.exception("training worker failed")
         emit({"topic": "training.failed", "error": str(exc)})
         return 3
+    finally:
+        _unregister_trainer_pid()
 
 
 if __name__ == "__main__":

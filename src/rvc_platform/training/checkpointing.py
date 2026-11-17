@@ -114,11 +114,25 @@ def read_state(path: Path) -> dict | None:
         return None
 
 
+def write_latest_mirrors(checkpoint_dir: Path, g_path: Path, d_path: Path) -> None:
+    """Refresh the upstream-compatible always-latest mirrors (atomic copy)."""
+    checkpoint_dir = Path(checkpoint_dir)
+    for src, tag in ((g_path, "G"), (d_path, "D")):
+        dst = checkpoint_dir / f"{tag}_{LATEST_TAG}.pth"
+        tmp = dst.with_suffix(".pth.tmp")
+        try:
+            tmp.write_bytes(Path(src).read_bytes())
+            tmp.replace(dst)
+        except OSError:
+            logger.warning("could not refresh %s mirror", dst, exc_info=True)
+
+
 def list_checkpoints(checkpoint_dir: Path) -> list[CheckpointInfo]:
     checkpoint_dir = Path(checkpoint_dir)
     out: list[CheckpointInfo] = []
     for path in sorted(checkpoint_dir.glob("G_*.pth")):
-        kind = "G-latest" if path.stem == "G_2333333" else "G"
+        stem = path.stem
+        kind = "G-latest" if stem == "G_2333333" else ("G-final" if stem == "G_final" else "G")
         epoch, step = _probe_epoch(path)
         out.append(
             CheckpointInfo(
@@ -145,15 +159,34 @@ def _probe_epoch(path: Path) -> tuple[int, int]:
 
 
 def latest_step_checkpoint(checkpoint_dir: Path) -> Path | None:
-    """Highest-numbered G_<step>.pth excluding the always-latest mirror."""
+    """Newest *numbered* G_<step>.pth, or G_final.pth if it is at least as far.
+
+    ``G_final`` is written at completion with the highest global_step seen;
+    a numbered ``G_<step>.pth`` only becomes newer when training continued
+    past a final save (resume with a higher ``total_epoch``) and saved again.
+    We probe G_final's embedded ``global_step`` (a single small load at
+    startup) and prefer it when it is >= the highest numbered step.
+    The always-latest mirror ``G_2333333`` is excluded — ``_restore``
+    compares it by mtime.
+    """
     checkpoint_dir = Path(checkpoint_dir)
-    candidates = [
-        p for p in checkpoint_dir.glob("G_*.pth")
-        if p.stem != f"G_{LATEST_TAG}"
-    ]
-    if not candidates:
-        return None
-    def step_of(p: Path) -> int:
-        digits = re.sub(r"\D", "", p.stem)
-        return int(digits) if digits else 0
-    return max(candidates, key=step_of)
+    numbered = [p for p in checkpoint_dir.glob("G_*.pth")
+                if p.stem != f"G_{LATEST_TAG}" and p.stem != "G_final"]
+    final = checkpoint_dir / "G_final.pth"
+
+    def digits(p: Path) -> int:
+        d = re.sub(r"\D", "", p.stem)
+        return int(d) if d else 0
+
+    if not numbered:
+        return final if final.is_file() else None
+    best_numbered = max(numbered, key=digits)
+    if final.is_file():
+        try:
+            payload = torch.load(final, map_location="cpu", weights_only=False)
+            final_step = int(payload.get("global_step", 0) or 0)
+        except Exception:
+            final_step = 0
+        if final_step >= digits(best_numbered):
+            return final
+    return best_numbered

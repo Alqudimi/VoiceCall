@@ -324,13 +324,19 @@ curl -s -X POST $API/api/training/start -H "Authorization: Bearer $TOKEN" \
 curl -s -X POST $API/api/training/stop -H "Authorization: Bearer $TOKEN"
 ```
 
-### POST /api/training/resume — استئناف
+### POST /api/training/resume?experiment=<name>&checkpoint=<G_step.pth|latest> — استئناف
 
-- المعامل: `experiment` (query, اختياري — بدونها أحدث تجربة).
-- الاستجابة: كما `/start`. أخطاء: `404` لا تجارب.
+- المعاملات: `experiment` (query, اختياري — بدونها أحدث تجربة) و
+  `checkpoint` (query, اختياري): اسم نقطة مثل `G_48.pth` أو مسار كامل أو
+  الكلمة `latest` — يستكمل من تلك النقطة بالذات بدل الأحدث تلقائيًا.
+- الاستجابة: كما `/start`. أخطاء: `404` لا تجارب/لا نقطة.
 
 ```bash
 curl -s -X POST "$API/api/training/resume?experiment=iraqi_voice" \
+     -H "Authorization: Bearer $TOKEN"
+
+# استكمال من نقطة محددة (متاح كزر في واجهة الويب لكل صف في جدول النقاط):
+curl -s -X POST "$API/api/training/resume?experiment=iraqi_voice&checkpoint=G_48.pth" \
      -H "Authorization: Bearer $TOKEN"
 ```
 

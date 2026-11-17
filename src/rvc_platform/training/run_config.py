@@ -55,6 +55,7 @@ class TrainingRunConfig(BaseModel):
     speaker_id: int = Field(default=0, ge=0, le=109)
     clean_start: bool = False                    # ignore existing checkpoints
     resume: bool = True                          # auto-resume when possible
+    resume_from: Path | None = None             # explicit G_*.pth to resume from
 
     @field_validator("sample_rate")
     @classmethod
@@ -178,7 +179,7 @@ class TrainingRunConfig(BaseModel):
         if not ds.is_dir():
             raise DatasetError(f"dataset folder missing: {ds}")
         files = [
-            p for p in ds.iterdir()
+            p for p in ds.rglob("*")
             if p.is_file() and p.suffix.lower() in (".wav", ".mp3", ".flac", ".ogg", ".m4a", ".opus", ".webm", ".aac")
         ]
         if len(files) < 1:

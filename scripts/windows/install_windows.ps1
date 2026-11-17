@@ -1,17 +1,13 @@
 # Iraqi Voice Studio — Windows installer (PowerShell)
 # Usage:  powershell -ExecutionPolicy Bypass -File scripts\windows\install_windows.ps1
-#         [-SkipAssets] [-SkipTunnel] [-RepoUrl <git-url>] [-InstallDir <path>]
-# Remote bootstrap: fetch this script from raw.githubusercontent.com and run it.
+#         [-SkipAssets] [-GpuVariant cu124|cu121|cu118|cu128|none]
 [CmdletBinding()]
 param(
   [switch]$SkipAssets = $false,
-  [switch]$SkipTunnel = $false,
-  [string]$RepoUrl = "https://github.com/Alqudimi/VoiceCall.git",
-  [string]$InstallDir = (Join-Path $env:USERPROFILE "VoiceCall"),
   [string]$GpuVariant = "none"
 )
 $ErrorActionPreference = "Stop"
-$ProjectRoot = $null
+$ProjectRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 
 function Log($msg)  { Write-Host "[install] $msg" -ForegroundColor Cyan }
 function Ok($msg)   { Write-Host "[ok] $msg" -ForegroundColor Green }
@@ -19,6 +15,11 @@ function Warn($msg) { Write-Host "[warn] $msg" -ForegroundColor Yellow }
 
 # ---------------------------------------------------------------- system ----
 Log "Windows $([System.Environment]::OSVersion.Version) | PS $($PSVersionTable.PSVersion) | arch $env:PROCESSOR_ARCHITECTURE"
+$WinMajor = [System.Environment]::OSVersion.Version.Major
+if ($WinMajor -lt 10) {
+  Warn "Windows versions below 10 are not supported (detected $WinMajor)"
+  exit 3
+}
 if ($env:PROCESSOR_ARCHITECTURE -ne "AMD64") { Warn "only x64 is tested" }
 
 # ---------------------------------------------------------------- winget ----
@@ -35,49 +36,9 @@ function Ensure-Command($name, $wingetId, $hint) {
   return $false
 }
 
-if (-not (Ensure-Command "git" "Git.Git" "install Git for Windows from https://git-scm.com")) {
-  throw "Git is required to download the project source. Install Git and rerun this installer."
-}
+Ensure-Command "git"  "Git.Git"    "install Git for Windows from https://git-scm.com"
 Ensure-Command "ffmpeg" "Gyan.FFmpeg" "install ffmpeg (needed for MP3/M4A uploads; WAV works without it)"
-
-# Running this script from a checkout and downloading this raw .ps1 are both supported.
-$CandidateRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
-if ($CandidateRoot -and (Test-Path (Join-Path $CandidateRoot "pyproject.toml"))) {
-  $ProjectRoot = (Resolve-Path $CandidateRoot).Path
-} elseif (Test-Path (Join-Path $InstallDir "pyproject.toml")) {
-  $ProjectRoot = (Resolve-Path $InstallDir).Path
-} else {
-  if (Test-Path $InstallDir) { throw "Install path exists but is not VoiceCall: $InstallDir (choose -InstallDir)." }
-  Log "cloning $RepoUrl into $InstallDir"
-  New-Item -ItemType Directory -Force -Path (Split-Path -Parent $InstallDir) | Out-Null
-  git clone --depth 1 $RepoUrl $InstallDir
-  if ($LASTEXITCODE -ne 0) { throw "git clone failed with exit code $LASTEXITCODE" }
-  $ProjectRoot = (Resolve-Path $InstallDir).Path
-}
-
-if (-not $SkipTunnel) {
-  $CloudBinDir = Join-Path $env:LOCALAPPDATA "IraqiVoiceStudio\bin"
-  $CloudBinary = Join-Path $CloudBinDir "cloudflared.exe"
-  if (-not (Get-Command cloudflared -ErrorAction SilentlyContinue) -and -not (Test-Path $CloudBinary)) {
-    New-Item -ItemType Directory -Force -Path $CloudBinDir | Out-Null
-    $CloudTmp = Join-Path $CloudBinDir "cloudflared.download.exe"
-    Log "downloading official Cloudflare Windows x64 executable"
-    Invoke-WebRequest -UseBasicParsing "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe" -OutFile $CloudTmp
-    & $CloudTmp --version
-    if ($LASTEXITCODE -ne 0) { Remove-Item $CloudTmp -Force; throw "Downloaded cloudflared failed its version check." }
-    Move-Item -Force $CloudTmp $CloudBinary
-  }
-  $UserPath = [string][System.Environment]::GetEnvironmentVariable("Path", "User")
-  if (($UserPath -split ';') -notcontains $CloudBinDir) {
-    $UserPath = $UserPath.TrimEnd(';')
-    $NewUserPath = if ($UserPath) { "$UserPath;$CloudBinDir" } else { $CloudBinDir }
-    [System.Environment]::SetEnvironmentVariable("Path", $NewUserPath, "User")
-  }
-  $env:Path = "$CloudBinDir;$env:Path"
-  if (Test-Path $CloudBinary) { & $CloudBinary --version }
-} else {
-  Warn "cloudflared skipped; tunnel requires manual installation."
-}
+Ensure-Command "cloudflared" "Cloudflare.cloudflared" "optional — only needed for make tunnel"
 
 # ---------------------------------------------------------------- python ----
 # uv manages Python 3.12 itself; a system python is NOT required.
@@ -101,11 +62,26 @@ $HasGpu = $false
 if (Get-Command nvidia-smi -ErrorAction SilentlyContinue) {
   $smi = nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>$null
   if ($smi) { $HasGpu = $true; Log "NVIDIA GPU: $($smi -join ' | ')" }
+  # CUDA runtime version reported by the driver (matches the Ubuntu installer)
+  $cudaLine = nvidia-smi 2>$null | Select-String -Pattern "CUDA Version:\s*([0-9]+\.[0-9]+)"
+  if ($cudaLine) {
+    $driverCuda = $cudaLine.Matches[0].Groups[1].Value
+    Log "driver CUDA runtime: $driverCuda"
+    if ($HasGpu -and $GpuVariant -eq "none") {
+      switch ($driverCuda) {
+        "12.8" { Log "suggested torch variant: cu128 (make env-gpu CUDA=cu128)" }
+        "12.4" { Log "suggested torch variant: cu124 (make env-gpu CUDA=cu124)" }
+        "12.1" { Log "suggested torch variant: cu121 (make env-gpu CUDA=cu121)" }
+        "11.8" { Log "suggested torch variant: cu118 (make env-gpu CUDA=cu118)" }
+        default { Log "unknown CUDA runtime $driverCuda — cu124 is the safe pick" }
+      }
+    }
+  }
 }
 if (-not $HasGpu) {
   Warn "no NVIDIA GPU detected — CPU mode: training VERY slow, realtime unusable"
 } elseif ($GpuVariant -eq "none") {
-  Log "GPU found; to install CUDA torch run: make env-gpu CUDA=cu124"
+  Log "GPU found; install CUDA torch with: make env-gpu CUDA=cu124"
   Log "(or re-run this script with -GpuVariant cu124)"
 }
 
@@ -137,5 +113,4 @@ Write-Host "  start web interface:   uv run rvc-platform web     (or: make web)"
 Write-Host "  open:                  http://127.0.0.1:8320"
 Write-Host "  prepare dataset:       uv run rvc-platform prepare-dataset data\raw\my_voice iraqi_voice"
 Write-Host "  train:                 uv run rvc-platform train start --dataset data\raw\my_voice --experiment iraqi_voice"
-Write-Host "  tunnel:                uv run rvc-platform web --tunnel  (authentication turns on automatically)"
-Write-Host "  auth token:            logs\auth.token — paste into Settings on the public page"
+Write-Host "  tunnel:                uv run rvc-platform web --tunnel  (auth token auto-enables)"

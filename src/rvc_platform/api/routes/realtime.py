@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import secrets
 
 from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
 
@@ -50,7 +51,10 @@ async def realtime_ws(ws: WebSocket) -> None:
     svc = ws.app.state.services
     auth = svc["auth"]
     token_param = ws.query_params.get("token")
-    if auth.enabled and (not token_param or token_param != auth._token):
+    # browsers cannot set Authorization headers on WebSocket: the token rides
+    # the query string; comparison is constant-time either way.
+    if auth.enabled and (not token_param
+                         or not secrets.compare_digest(token_param, auth._token)):
         await ws.close(code=4401, reason="unauthorized")
         return
     await ws.accept()

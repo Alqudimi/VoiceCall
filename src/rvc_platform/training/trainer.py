@@ -144,6 +144,27 @@ class Trainer:
         return dataset, loader, net_g, net_d, optim_g, optim_d
 
     # ------------------------------------------------------------------ resume
+    def _resolve_explicit(self) -> Path | None:
+        """Resolve config.resume_from (absolute path, run-relative name, or
+        'latest') into a concrete G_*.pth inside this run's checkpoints."""
+        raw = self.config.resume_from
+        if raw is None:
+            return None
+        candidate = Path(raw)
+        if candidate.is_file():
+            return candidate
+        in_run = self.checkpoint_dir / candidate.name
+        if in_run.is_file():
+            return in_run
+        if str(raw).strip().lower() in ("latest", "final"):
+            latest = checkpointing.latest_step_checkpoint(self.checkpoint_dir)
+            if latest is not None:
+                return latest
+        raise CheckpointError(
+            f"resume_from checkpoint not found: {raw} "
+            f"(looked at {candidate} and {in_run})"
+        )
+
     def _load_pretrained(self, net_g, net_d, optim_d) -> None:
         hps = self.hps
         if hps.pretrainG and Path(hps.pretrainG).is_file():
@@ -168,10 +189,28 @@ class Trainer:
 
     def _restore(self, net_g, net_d, optim_g, optim_d, sched_g, sched_d, scaler,
                  dataset_signature: dict | None) -> bool:
-        """Full resume > legacy resume > pretrained start. Returns resumed?"""
+        """Explicit > full resume > legacy resume > pretrained start.
+        Returns resumed?"""
         from rvc_platform.training.checkpointing import read_state
 
         state = read_state(self.checkpoint_dir / "state.json")
+
+        explicit = self._resolve_explicit()
+        if explicit is not None:
+            # policy 1: an explicit checkpoint wins over auto-discovery
+            meta = checkpointing.load_full(explicit, net_g, optim_g, sched_g, scaler)
+            d_path = (self.checkpoint_dir / explicit.name.replace("G_", "D_")
+                      if explicit.name.startswith("G_") else None)
+            if d_path is not None and d_path.is_file():
+                checkpointing.load_full(d_path, net_d, optim_d, sched_d)
+            self.epoch = max(meta["epoch"], 1)
+            self.global_step = meta.get("global_step") or (self.epoch - 1) * self.steps_per_epoch
+            logger.info("resumed (explicit) from %s (epoch=%s step=%s)",
+                        explicit, self.epoch, self.global_step)
+            self.emit("training.resumed", checkpoint=str(explicit), epoch=self.epoch,
+                      global_step=self.global_step, explicit=True)
+            return True
+
         resume_path = checkpointing.latest_step_checkpoint(self.checkpoint_dir)
         latest_g = self.checkpoint_dir / f"G_{checkpointing.LATEST_TAG}.pth"
         latest_d = self.checkpoint_dir / f"D_{checkpointing.LATEST_TAG}.pth"
@@ -192,7 +231,7 @@ class Trainer:
             )
             d_path = latest_d if latest_d.is_file() else Path(str(chosen).replace("G_", "D_"))
             if d_path.is_file():
-                checkpointing.load_full(d_path, net_d, optim_d)
+                checkpointing.load_full(d_path, net_d, optim_d, sched_d)
             self.epoch = max(meta["epoch"], 1)
             self.global_step = meta.get("global_step") or (self.epoch - 1) * self.steps_per_epoch
             logger.info("resumed from %s (epoch=%s step=%s)", chosen, self.epoch, self.global_step)
@@ -255,8 +294,16 @@ class Trainer:
                 loader, start_epoch,
             )
         except Exception as exc:
+            # crash-save: persist an emergency checkpoint so the run stays
+            # resumable even after an unexpected failure (OOM, bad batch...)
             self.state = JobState.FAILED
-            self.emit("training.failed", error=str(exc))
+            try:
+                self._checkpoint(net_g, net_d, optim_g, optim_d, sched_g, sched_d,
+                                 scaler, self.epoch, final=False, emergency=True)
+            except Exception:
+                logger.exception("emergency crash-save also failed")
+            self.emit("training.failed", error=str(exc),
+                      emergency_checkpoint=bool(self.global_step))
             logger.exception("training failed")
             raise
         self._finalize(net_g, self.epoch, completed=completed)
@@ -388,7 +435,7 @@ class Trainer:
 
     # ------------------------------------------------------------------ checkpointing
     def _checkpoint(self, net_g, net_d, optim_g, optim_d, sched_g, sched_d,
-                    scaler, epoch: int, final: bool) -> dict:
+                    scaler, epoch: int, final: bool, emergency: bool = False) -> dict:
         step_name = self.global_step if not final else f"final"
         g_path = self.checkpoint_dir / f"G_{step_name}.pth"
         d_path = self.checkpoint_dir / f"D_{step_name}.pth"
@@ -396,6 +443,9 @@ class Trainer:
                                  epoch, self.global_step)
         checkpointing.save_full(d_path, net_d, optim_d, sched_d, None,
                                 epoch, self.global_step)
+        if int(self.hps.if_latest) == 1:
+            # upstream-compatible always-latest mirrors (G_2333333/D_2333333)
+            checkpointing.write_latest_mirrors(self.checkpoint_dir, g_path, d_path)
         state = {
             "epoch": epoch,
             "global_step": self.global_step,
@@ -413,8 +463,8 @@ class Trainer:
                 self.hps.sample_rate, self.hps.if_f0,
             )
             self.emit("training.exported", path=str(export), epoch=epoch)
-        logger.info("checkpoint saved: epoch=%s step=%s -> %s", epoch,
-                    self.global_step, g_path)
+        logger.info("checkpoint saved: epoch=%s step=%s emergency=%s -> %s", epoch,
+                    self.global_step, emergency, g_path)
         return state
 
     def _finalize(self, net_g, epoch: int, completed: bool) -> None:

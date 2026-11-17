@@ -60,8 +60,13 @@ def create_app() -> FastAPI:
     inference_engine = RVCInferenceEngine(profile, audio_engine)
 
     repository = ModelRepository(paths.models)
-    model_service = ModelService(repository, inference_engine)
-    conversion_service = ConversionService(inference_engine, audio_engine, config.conversion)
+    model_service = ModelService(repository, inference_engine,
+                                 max_upload_mb=config.server.max_upload_mb)
+    conversion_service = ConversionService(
+        inference_engine, audio_engine, config.conversion,
+        engine_cfg=config.engine,               # f0_method default knob
+        max_upload_mb=config.server.max_upload_mb,
+    )
 
     process_manager = ProcessManager(paths.logs / "processes")
     training_service = TrainingService(process_manager)
@@ -70,7 +75,7 @@ def create_app() -> FastAPI:
     tunnel_service = TunnelService(
         process_manager, config.server.port, retries=config.tunnel.retries,
         start_timeout_s=config.tunnel.start_timeout_s,
-        binary=config.tunnel.binary,
+        binary=config.tunnel.binary,            # tunnel.binary knob
     )
 
     system_service = SystemService(
@@ -84,14 +89,8 @@ def create_app() -> FastAPI:
 
     def enable_auth_for_tunnel() -> None:
         if not auth.enabled:
-            token = config.server.auth_token or config.server.effective_token(
-                paths.logs / "auth.token"
-            )
-            auth.enable(token)
-            logger.warning(
-                "tunnel authentication enabled; token is stored in %s",
-                paths.logs / "auth.token",
-            )
+            auth.enabled = True
+            logger.warning("tunnel active: API authentication is now REQUIRED")
 
     tunnel_service.auth_enabler = enable_auth_for_tunnel
 
@@ -134,6 +133,18 @@ def create_app() -> FastAPI:
                     {"detail": "missing or invalid bearer token"}, status_code=401
                 )
         return await call_next(request)
+
+    # ---- uniform error envelope for unhandled failures ----
+    # per-route errors raise HTTPException already; anything that slips past
+    # is caught here so clients always get JSON (never an HTML 500 page).
+    @app.exception_handler(Exception)
+    async def unhandled_exception(request: Request, exc: Exception):
+        logger.exception("unhandled error on %s %s", request.method, request.url.path)
+        return JSONResponse(
+            {"detail": f"internal error: {exc.__class__.__name__}",
+             "path": request.url.path},
+            status_code=500,
+        )
 
     app.include_router(system.router)
     app.include_router(models.router)

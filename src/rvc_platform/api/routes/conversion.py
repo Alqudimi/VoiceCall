@@ -46,21 +46,23 @@ def settings(request: Request):
 async def convert(
     request: Request,
     file: UploadFile = File(...),
-    pitch_shift: int = Form(0),
-    f0_method: str = Form("rmvpe"),
-    index_rate: float = Form(0.0),
-    filter_radius: int = Form(3),
-    rms_mix_rate: float = Form(0.25),
-    protect: float = Form(0.33),
+    pitch_shift: int | None = Form(None),
+    f0_method: str | None = Form(None),
+    index_rate: float | None = Form(None),
+    filter_radius: int | None = Form(None),
+    rms_mix_rate: float | None = Form(None),
+    protect: float | None = Form(None),
     output_sample_rate: int | None = Form(None),
-    denoise: bool = Form(False),
-    normalize: bool = Form(True),
+    denoise: bool | None = Form(None),
+    normalize: bool | None = Form(None),
 ):
     svc = _svc(request)
     try:
         stored = svc["conversion"].store_upload(file.filename or "upload.wav", await file.read())
     except ConversionError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    # absent fields fall back to the server-side configuration defaults
+    # (engine.f0_method / conversion.* — no hard-coded client-side values)
     settings = svc["conversion"].build_settings(
         {
             "pitch_shift": pitch_shift,

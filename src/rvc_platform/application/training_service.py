@@ -162,7 +162,8 @@ class TrainingService:
             return []
         return log_path.read_text(encoding="utf-8", errors="replace").splitlines()[-lines:]
 
-    def resume(self, experiment: str | None = None) -> dict:
+    def resume(self, experiment: str | None = None,
+               checkpoint: str | None = None) -> dict:
         if experiment is None:
             candidates = sorted(
                 get_paths().runs.glob("*/run_config.json"),
@@ -171,7 +172,25 @@ class TrainingService:
             if not candidates:
                 raise TrainingError("no runs to resume")
             experiment = candidates[0].parent.name
-        config = TrainingRunConfig.load(get_paths().runs / experiment)
+        run_dir = get_paths().runs / experiment
+        if not (run_dir / "run_config.json").is_file():
+            raise TrainingError(f"no such run: {experiment}")
+        config = TrainingRunConfig.load(run_dir)
+        if checkpoint:
+            # explicit resume point: G_<step>.pth name/path or 'latest'
+            candidate = Path(checkpoint)
+            ckpt_dir = get_paths().runs / experiment / "checkpoints"
+            if not candidate.is_file() and (ckpt_dir / candidate.name).is_file():
+                candidate = ckpt_dir / candidate.name
+            if not candidate.is_file() and checkpoint.strip().lower() != "latest":
+                raise TrainingError(f"checkpoint not found: {checkpoint}")
+            if checkpoint.strip().lower() == "latest":
+                from rvc_platform.training import checkpointing
+                latest = checkpointing.latest_step_checkpoint(ckpt_dir)
+                if latest is None:
+                    raise TrainingError(f"no checkpoints in run {experiment}")
+                candidate = latest
+            config.resume_from = candidate
         return self.start(config, resume=True)
 
     def export(self, experiment: str, epoch: int | None = None,

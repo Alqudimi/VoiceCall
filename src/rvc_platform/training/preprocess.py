@@ -51,10 +51,16 @@ class DatasetReport:
     min_duration_s: float = 0.0
     max_duration_s: float = 0.0
     empty_audio: list[str] = field(default_factory=list)
+    mean_silence_ratio: float | None = None
+    capped_at: int | None = None      # set when max_files truncated the scan
 
     @property
     def ok(self) -> bool:
         return self.usable_files > 0
+
+    @property
+    def meets_recommendation(self) -> bool:
+        return self.total_duration_s >= 600.0
 
     def to_dict(self) -> dict:
         return {
@@ -69,6 +75,11 @@ class DatasetReport:
             "min_duration_s": round(self.min_duration_s, 2),
             "max_duration_s": round(self.max_duration_s, 2),
             "empty_audio": self.empty_audio,
+            "mean_silence_ratio": (
+                round(self.mean_silence_ratio, 3)
+                if self.mean_silence_ratio is not None else None
+            ),
+            "capped_at": self.capped_at,
             "recommended_min_duration_s": 600.0,
             "meets_recommendation": self.total_duration_s >= 600.0,
         }
@@ -78,18 +89,24 @@ class DatasetChecker:
     def __init__(self, audio_loader=load_audio) -> None:
         self._loader = audio_loader
 
-    def check(self, dataset_path: Path, max_files: int = 5000) -> DatasetReport:
+    def check(self, dataset_path: Path, max_files: int = 5000,
+              recursive: bool = True) -> DatasetReport:
         dataset_path = Path(dataset_path)
         if not dataset_path.is_dir():
             raise DatasetError(f"dataset folder missing: {dataset_path}")
         report = DatasetReport(dataset_path=dataset_path)
-        files = sorted(
-            p for p in dataset_path.iterdir() if p.is_file()
-        )
+        it = dataset_path.rglob("*") if recursive else dataset_path.iterdir()
+        files = sorted(p for p in it if p.is_file())
         report.total_files = len(files)
+        if len(files) > max_files:
+            report.capped_at = max_files
+            logger.warning("dataset scan capped at %s files (%s found) — "
+                           "raise max_files for a full scan", max_files, len(files))
+            files = files[:max_files]
         seen_hashes: dict[str, str] = {}
         durations: list[float] = []
-        for path in files[:max_files]:
+        silence_ratios: list[float] = []
+        for path in files:
             if path.suffix.lower() not in AUDIO_EXTS:
                 report.unsupported.append(path.name)
                 continue
@@ -107,12 +124,26 @@ class DatasetChecker:
             else:
                 seen_hashes[digest] = path.name
             durations.append(audio.size / 16_000)
+            silence_ratios.append(_silence_ratio(audio))
         report.usable_files = len(durations)
         if durations:
             report.total_duration_s = float(sum(durations))
             report.min_duration_s = float(min(durations))
             report.max_duration_s = float(max(durations))
+            report.mean_silence_ratio = float(np.mean(silence_ratios))
         return report
+
+
+def _silence_ratio(audio: np.ndarray, threshold_db: float = -40.0) -> float:
+    """Fraction of frames quieter than threshold (10 ms frames, RMS-based)."""
+    frame = 160  # 10 ms @ 16 kHz
+    if audio.size < frame:
+        return 1.0
+    audio = np.abs(np.asarray(audio, dtype=np.float32).ravel())
+    frames = audio[: (audio.size // frame) * frame].reshape(-1, frame)
+    rms = np.sqrt((frames ** 2).mean(axis=1))
+    db = 20.0 * np.log10(np.maximum(rms, 1e-9))
+    return float(np.mean(db < threshold_db))
 
 
 class DatasetPreprocessor:
@@ -178,7 +209,7 @@ class DatasetPreprocessor:
     def run(self, dataset_path: Path, progress=None) -> dict:
         dataset_path = Path(dataset_path)
         files = sorted(
-            p for p in dataset_path.iterdir()
+            p for p in dataset_path.rglob("*")
             if p.is_file() and p.suffix.lower() in AUDIO_EXTS
         )
         if not files:

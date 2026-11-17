@@ -1,32 +1,41 @@
 #!/usr/bin/env bash
 # Iraqi Voice Studio — Ubuntu / Linux installer
-# Usage:  bash scripts/ubuntu/install_ubuntu.sh [--no-apt] [--skip-assets] [--skip-tunnel]
-# One-line: curl -fsSL https://raw.githubusercontent.com/Alqudimi/VoiceCall/main/scripts/ubuntu/install_ubuntu.sh | bash
+# Usage:  bash scripts/ubuntu/install_ubuntu.sh [--no-apt] [--skip-assets]
 # Requires: bash 4+, internet. Root not required (sudo used only for apt).
 set -euo pipefail
 
-REPO_URL="${IRAQI_VOICE_REPO:-https://github.com/Alqudimi/VoiceCall.git}"
-INSTALL_DIR="${RVC_INSTALL_DIR:-$HOME/VoiceCall}"
-PROJECT_ROOT=""
-NO_APT=0; SKIP_ASSETS=0; SKIP_TUNNEL=0
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+NO_APT=0; SKIP_ASSETS=0
 for arg in "$@"; do
   case "$arg" in
     --no-apt) NO_APT=1 ;; --skip-assets) SKIP_ASSETS=1 ;;
-    --skip-tunnel) SKIP_TUNNEL=1 ;;
-    -h|--help) echo 'Usage: install_ubuntu.sh [--no-apt] [--skip-assets] [--skip-tunnel]'; exit 0 ;;
-    *) echo "[error] unknown option: $arg" >&2; exit 2 ;;
   esac
 done
 
 log()  { printf '\033[1;34m[install]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[warn]\033[0m %s\n' "$*"; }
 ok()   { printf '\033[1;32m[ok]\033[0m %s\n' "$*"; }
-fail() { printf '\033[1;31m[error]\033[0m %s\n' "$*" >&2; exit 2; }
 
 # ---------------------------------------------------------------- system ----
 log "detecting system"
 . /etc/os-release 2>/dev/null || { warn "/etc/os-release missing — not Ubuntu?"; }
 log "OS: ${PRETTY_NAME:-unknown} | arch: $(uname -m)"
+# enforce a supported Ubuntu base (20.04+) unless --any-ubuntu is passed
+ANY_UBUNTU=0
+for arg in "$@"; do [[ "$arg" == "--any-ubuntu" ]] && ANY_UBUNTU=1; done
+if [[ "${ID:-}" == "ubuntu" ]]; then
+  UBUNTU_MAJOR="${VERSION_ID%%.*}"
+  if [[ -n "$UBUNTU_MAJOR" && "$UBUNTU_MAJOR" =~ ^[0-9]+$ && "$UBUNTU_MAJOR" -ge 20 ]]; then
+    ok "Ubuntu ${VERSION_ID} supported"
+  elif [[ $ANY_UBUNTU -eq 1 ]]; then
+    warn "Ubuntu ${VERSION_ID:-unknown} older than 20.04 — continuing (--any-ubuntu)"
+  else
+    warn "Ubuntu ${VERSION_ID:-unknown} is below the supported floor (20.04);"
+    warn "rerun with --any-ubuntu to force the install anyway"
+    exit 3
+  fi
+fi
 if [[ "$(uname -m)" != "x86_64" && "$(uname -m)" != "aarch64" ]]; then
   warn "untested architecture: $(uname -m)"
 fi
@@ -38,9 +47,18 @@ if [[ $EUID -ne 0 ]] && command -v sudo >/dev/null 2>&1; then SUDO="sudo"; fi
 
 # ---------------------------------------------------------------- apt pkgs --
 if [[ $NO_APT -eq 0 ]]; then
-  log "ensuring Ubuntu system prerequisites"
-  $SUDO apt-get update -y
-  $SUDO apt-get install -y git curl ca-certificates ffmpeg make build-essential ninja-build cmake pkg-config libsndfile1 libportaudio2 python3.12-dev
+  NEED_PKGS=()
+  for bin in git curl ffmpeg make gcc; do
+    command -v "$bin" >/dev/null 2>&1 || NEED_PKGS+=("$bin")
+  done
+  if [[ ${#NEED_PKGS[@]} -gt 0 ]]; then
+    log "installing missing system packages: ${NEED_PKGS[*]}"
+    $SUDO apt-get update -y
+    # gcc lives in build-essential; map binary names to packages
+    $SUDO apt-get install -y git curl ffmpeg make build-essential
+  else
+    ok "all system tools present"
+  fi
 else
   log "skipping apt (--no-apt)"
 fi
@@ -48,34 +66,10 @@ for bin in git curl ffmpeg make; do
   command -v "$bin" >/dev/null 2>&1 || warn "$bin still missing — install it manually"
 done
 
-# A curl|bash process has no script location. Use the current checkout when
-# present; otherwise clone safely without deleting an existing directory.
-if [[ -f "$PWD/pyproject.toml" && -d "$PWD/src/rvc_platform" ]]; then
-  PROJECT_ROOT="$(pwd -P)"
-elif [[ -n "${BASH_SOURCE[0]:-}" && -f "${BASH_SOURCE[0]}" ]]; then
-  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-  if [[ -f "$SCRIPT_DIR/../../pyproject.toml" ]]; then PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd -P)"; fi
-fi
-if [[ -z "$PROJECT_ROOT" ]]; then
-  command -v git >/dev/null 2>&1 || fail 'git is required to clone the source repository.'
-  if [[ -f "$INSTALL_DIR/pyproject.toml" ]]; then
-    PROJECT_ROOT="$(cd "$INSTALL_DIR" && pwd -P)"
-  elif [[ -e "$INSTALL_DIR" ]]; then
-    fail "Install path exists but is not VoiceCall: $INSTALL_DIR (set RVC_INSTALL_DIR)."
-  else
-    log "cloning $REPO_URL into $INSTALL_DIR"
-    mkdir -p "$(dirname "$INSTALL_DIR")"
-    git clone --depth 1 "$REPO_URL" "$INSTALL_DIR"
-    PROJECT_ROOT="$(cd "$INSTALL_DIR" && pwd -P)"
-  fi
-fi
-cd "$PROJECT_ROOT"
-
 # ---------------------------------------------------------------- python ----
-PY_OK=0
 if command -v python3 >/dev/null 2>&1; then
   PYV="$(python3 -c 'import sys;print(".".join(map(str,sys.version_info[:2])))')"
-  [[ "$PYV" == "3.12" ]] && PY_OK=1 || log "system python is $PYV (uv will provide 3.12)"
+  log "system python is $PYV (uv pins the project to 3.12 regardless)"
 else
   log "no system python3 — uv will provide 3.12"
 fi
@@ -104,16 +98,8 @@ else
   warn "no NVIDIA GPU detected — CPU mode: training VERY slow, realtime unusable"
 fi
 
-# ---------------------------------------------------------------- tunnel ---
-if [[ $SKIP_TUNNEL -eq 0 ]]; then
-  # shellcheck source=../common/install_cloudflared.sh
-  source scripts/common/install_cloudflared.sh
-  install_cloudflared_user "$HOME/.local/bin"
-else
-  warn 'Skipping cloudflared install (--skip-tunnel).'
-fi
-
 # ---------------------------------------------------------------- project ---
+cd "$PROJECT_ROOT"
 log "syncing python environment (CPU wheels by default; GPU: make env-gpu CUDA=cu124)"
 uv sync --all-groups
 if [[ $GPU -eq 1 ]]; then
@@ -142,5 +128,4 @@ echo "  start the web interface:   make web        (or: uv run rvc-platform web)
 echo "  open:                      http://127.0.0.1:8320"
 echo "  prepare Iraqi dataset:     make prepare-dataset DATASET=data/raw/my_voice EXPERIMENT=iraqi_voice"
 echo "  train:                     make train DATASET=data/raw/my_voice EXPERIMENT=iraqi_voice"
-echo "  expose via tunnel:         make tunnel (after starting web; authentication is enabled automatically)"
-echo "  auth token:                cat logs/auth.token; enter it in Settings from the public page"
+echo "  expose via tunnel:         make web TUNNEL=1  (auth token auto-enables)"

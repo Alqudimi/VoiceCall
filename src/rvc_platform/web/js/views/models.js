@@ -4,7 +4,7 @@
    ============================================================ */
 
 import {
-  bus, get, post, postFormWithProgress, del, toast, confirmDialog,
+  bus, get, post, postFormWithProgress, del, getBlob, toast, confirmDialog,
   el, clear, icon, setBusy, fmtMB, fmtTime, fmtNum, ENGINE_LABELS,
 } from "../api.js";
 
@@ -261,6 +261,23 @@ function actionsCell(m) {
   const btnDetails = el("button", { class: "btn sm ghost", type: "button" }, ["تفاصيل"]);
   btnDetails.addEventListener("click", () => toggleDetails(m.name));
 
+  const btnDownload = el("button", { class: "btn sm ghost", type: "button" }, ["تنزيل"]);
+  btnDownload.addEventListener("click", async () => {
+    setBusy(btnDownload, true, "جارٍ التنزيل…");
+    try {
+      const blob = await getBlob(`/models/${encodeURIComponent(m.name)}/download`);
+      const url = URL.createObjectURL(blob);
+      const a = el("a", { href: url, download: `${m.name}.pth` });
+      document.body.append(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 5000);
+      toast(`تم تنزيل "${m.name}".`, "success");
+    } catch (err) {
+      toast(err.message, "error");
+    } finally { setBusy(btnDownload, false); }
+  });
+
   const btnDelete = el("button", { class: "btn sm danger", type: "button" }, ["حذف"]);
   btnDelete.addEventListener("click", async () => {
     const ok = await confirmDialog({
@@ -281,7 +298,7 @@ function actionsCell(m) {
     } finally { setBusy(btnDelete, false); }
   });
 
-  wrap.append(btnLoad, btnDetails, btnDelete);
+  wrap.append(btnLoad, btnDetails, btnDownload, btnDelete);
   return wrap;
 }
 

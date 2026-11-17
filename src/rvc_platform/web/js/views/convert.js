@@ -38,6 +38,7 @@ async function mount(root) {
   };
 
   wireDropzone(input, state);
+  wireRecorder(state);
 
   input.btn.addEventListener("click", () => runConvert(state, input));
 
@@ -120,8 +121,112 @@ function buildInputCard() {
   return el("div", { class: "card" }, [
     el("h2", { class: "card-title" }, ["الملف المصدر", el("span", { class: "sub latin" }, ["Input"])]),
     dropzone,
+    el("div", { class: "record-box mt", id: "convert-record-box" }, [
+      el("div", { class: "row" }, [
+        el("button", { class: "btn", type: "button", id: "convert-record-btn" }, [
+          icon("mic", 16), " تسجيل من الميكروفون",
+        ]),
+        el("button", { class: "btn danger hidden", type: "button", id: "convert-record-stop" }, [
+          icon("stop", 16), " إيقاف التسجيل",
+        ]),
+        el("span", { class: "badge hidden", id: "convert-record-timer" }, ["00:00"]),
+        el("span", { class: "level-meter hidden", id: "convert-record-level" }, [el("span")]),
+      ]),
+      el("p", { class: "hint", id: "convert-record-hint" }, [
+        "بديل عن الملف: سجّل صوتك مباشرة ثم حوّله — يُعامل التسجيل كملف مدخل.",
+      ]),
+    ]),
     el("div", { class: "mt", id: "convert-fileinfo" }, []),
   ]);
+}
+
+/* ------------------------------ mic recording ------------------------------ */
+
+function wireRecorder(state) {
+  const btn = document.getElementById("convert-record-btn");
+  const stopBtn = document.getElementById("convert-record-stop");
+  const timer = document.getElementById("convert-record-timer");
+  const level = document.getElementById("convert-record-level");
+  const hint = document.getElementById("convert-record-hint");
+  if (!btn || !navigator.mediaDevices || !window.MediaRecorder) return;
+
+  let recorder = null;
+  let chunks = [];
+  let stream = null;
+  let tick = null;
+  let audioCtx = null;
+  let analyser = null;
+  let raf = null;
+  let startedAt = 0;
+
+  const supported = MediaRecorder.isTypeSupported
+    && MediaRecorder.isTypeSupported("audio/webm") ? "audio/webm" : "";
+
+  btn.addEventListener("click", async () => {
+    if (recorder && recorder.state === "recording") return;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch (err) {
+      hint.textContent = "تعذّر الوصول إلى الميكروفون (يتطلب HTTPS أو localhost، و إذن المتصفح): " + err.message;
+      toast("تعذّر بدء التسجيل: " + err.message, "error");
+      return;
+    }
+    chunks = [];
+    recorder = new MediaRecorder(stream, supported ? { mimeType: supported } : undefined);
+    recorder.ondataavailable = (ev) => { if (ev.data && ev.data.size) chunks.push(ev.data); };
+    recorder.onstop = () => {
+      const blob = new Blob(chunks, { type: recorder.mimeType || "audio/webm" });
+      const ext = (recorder.mimeType || "audio/webm").includes("ogg") ? "ogg" : "webm";
+      const file = new File([blob], `mic_recording_${Date.now()}.${ext}`, { type: blob.type });
+      // the recording flows through the exact same file-conversion pipeline
+      selectFile(file, state);
+      teardown();
+      toast("تم التسجيل — جاهز للتحويل.", "success");
+    };
+    recorder.start(250);
+    startedAt = Date.now();
+    btn.classList.add("hidden");
+    stopBtn.classList.remove("hidden");
+    timer.classList.remove("hidden");
+    level.classList.remove("hidden");
+    // live timer + level meter
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const src = audioCtx.createMediaStreamSource(stream);
+    analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 256;
+    src.connect(analyser);
+    const buf = new Uint8Array(analyser.frequencyBinCount);
+    const bar = level.querySelector("span");
+    const loop = () => {
+      analyser.getByteTimeDomainData(buf);
+      let peak = 0;
+      for (let i = 0; i < buf.length; i += 1) peak = Math.max(peak, Math.abs(buf[i] - 128));
+      bar.style.width = `${Math.min(100, (peak / 128) * 100)}%`;
+      raf = requestAnimationFrame(loop);
+    };
+    loop();
+    tick = setInterval(() => {
+      const s = Math.floor((Date.now() - startedAt) / 1000);
+      timer.textContent = `${String(Math.floor(s / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
+    }, 500);
+  });
+
+  stopBtn.addEventListener("click", () => {
+    if (recorder && recorder.state === "recording") recorder.stop();
+  });
+
+  function teardown() {
+    if (tick) clearInterval(tick);
+    if (raf) cancelAnimationFrame(raf);
+    if (audioCtx) audioCtx.close().catch(() => {});
+    if (stream) stream.getTracks().forEach((t) => t.stop());
+    recorder = null; stream = null; audioCtx = null; analyser = null; tick = null; raf = null;
+    btn.classList.remove("hidden");
+    stopBtn.classList.add("hidden");
+    timer.classList.add("hidden");
+    level.classList.add("hidden");
+    timer.textContent = "00:00";
+  }
 }
 
 function wireDropzone(input, state) {

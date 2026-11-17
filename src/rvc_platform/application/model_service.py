@@ -20,9 +20,18 @@ logger = logging.getLogger(__name__)
 class ModelService:
     """Facade: list/register/delete models; load/unload into the engine."""
 
-    def __init__(self, repository: ModelRepository, engine: RVCInferenceEngine) -> None:
+    #: hard floor for .pth uploads — trained v2 checkpoints are 80-160 MB and
+    # base-model exports reach ~300 MB, so the floor stays even when
+    # server.max_upload_mb is configured lower for audio.
+    MODEL_UPLOAD_FLOOR_MB = 300
+
+    def __init__(self, repository: ModelRepository, engine: RVCInferenceEngine,
+                 max_upload_mb: int = 200) -> None:
         self.repo = repository
         self.engine = engine
+        self.max_model_upload_mb = max(
+            self.MODEL_UPLOAD_FLOOR_MB, int(max_upload_mb)
+        )
 
     # ------------------------------------------------------------------ listing
     def list(self) -> list[ModelInfo]:
@@ -69,8 +78,10 @@ class ModelService:
 
         if not payload:
             raise SecurityError("empty upload")
-        if len(payload) > 300 * 1024 * 1024:
-            raise SecurityError("model upload exceeds 300 MB")
+        if len(payload) > self.max_model_upload_mb * 1024 * 1024:
+            raise SecurityError(
+                f"model upload exceeds {self.max_model_upload_mb} MB"
+            )
         safe = re.sub(r"[^A-Za-z0-9_.-]", "_", filename or "model.pth")
         if not safe.endswith(".pth"):
             raise SecurityError("model uploads must be .pth files")

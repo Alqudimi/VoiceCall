@@ -14,8 +14,8 @@
 | مدير البيئة | `uv` (يدير البيئة الافتراضية والاعتماديات من `uv.lock`) |
 | GPU (اختياري) | CUDA-compatible (فئة RTX مفضلة للتدريب والبث اللحظي) |
 | ffmpeg (اختياري) | لفك ترميز MP3/M4A/OGG/OPUS/WebM/AAC — WAV/FLAC تعمل بدونه |
-| cloudflared | يثبته المثبت إلى مسار المستخدم لاستخدام النفق المؤقت |
-| مساحة قرص | ~2 GB أصول مدربة مسبقًا + مساحة بياناتك ونماذجك |
+| cloudflared (اختياري) | للنفق العام المؤقت |
+| مساحة قرص | ≈1.3 GB أصول مدربة مسبقًا (قِيست فعليًا: HuBERT 374MB + RMVPE + قواعد v2 الثلاث) + مساحة بياناتك ونماذجك |
 
 **بصراحة:** بدون GPU يعمل كل شيء لكن التدريب بطيء جدًا والبث اللحظي غير متاح.
 مع GPU يصبح التدريب عمليًا والبث ممكنًا (انظر REALTIME.md).
@@ -29,24 +29,27 @@
 ويجهز البيئة:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Alqudimi/VoiceCall/main/scripts/ubuntu/install_ubuntu.sh | bash
+git clone <repository-url> iraqi-voice-platform
+cd iraqi-voice-platform
+bash scripts/ubuntu/install_ubuntu.sh
 ```
 
 أو من خارج المستودع (بعد الاستنساخ):
 
 ```bash
-cd ~/VoiceCall
-bash scripts/ubuntu/install_ubuntu.sh               # يثبت التبعيات وينزل الأصول (حجم كبير)
-bash scripts/ubuntu/install_ubuntu.sh --skip-assets  # يؤجل الأصول
-bash scripts/ubuntu/install_ubuntu.sh --no-apt --skip-assets # إذا ثبتت متطلبات النظام مسبقًا
+cd iraqi-voice-platform
+bash scripts/ubuntu/install_ubuntu.sh            # بيئة CPU (افتراضي torch CPU) + تنزيل الأصول
+bash scripts/ubuntu/install_ubuntu.sh --skip-assets   # بدون تنزيل الأصول
+bash scripts/ubuntu/install_ubuntu.sh --no-apt         # بدون لمس apt (أدوات موجودة مسبقًا)
 ```
 
 المثبّت:
-1. يتحقق من Linux ومعمارية x86_64/aarch64، ثم يستخدم checkout أو يستنسخ VoiceCall إلى `~/VoiceCall` دون حذف مجلد سابق.
-2. يثبت أدوات النظام ومتطلبات البناء، و`uv` وPython 3.12، ثم ينفذ `uv sync --all-groups`.
-3. يفحص GPU عبر `nvidia-smi`؛ يستمر على CPU مع تحذير واضح عند عدم توفره.
-4. ينزل `cloudflared` الرسمي إلى `~/.local/bin` ما لم يستخدم `--skip-tunnel`.
-5. ينزل الأصول افتراضيًا؛ مرر `--skip-assets` لتأجيلها.
+1. يتحقق من Ubuntu المدعوم (20.04+؛ تجاوز القيد بـ `--any-ubuntu`) والمعمارية (amd64/arm64).
+2. يتحقق من `python3` و`uv` ويثبّت الناقص من مستودع النظام أو astral.sh (uv يؤمّن Python 3.12 للمشروع).
+3. يفحص GPU: `nvidia-smi` وإصدار CUDA (اختياري — يستمر بدون GPU مع تحذير صريح).
+4. يثبّت `ffmpeg` و`build-essential` إن كانا ناقصين (via `apt`).
+5. ينشئ البيئة: `uv sync --all-groups`.
+6. ينفّذ `rvc-platform download-models` ثم `install check` + `install doctor` (تحقق كامل).
 
 بعد التثبيت، لو لديك NVIDIA GPU فعّل عجلات CUDA (القسم 5).
 
@@ -58,26 +61,18 @@ bash scripts/ubuntu/install_ubuntu.sh --no-apt --skip-assets # إذا ثبتت �
 `scripts/windows/install_windows.cmd` (غلاف cmd يستدعي PowerShell):
 
 ```bat
-:: من موجه الأوامر (cmd) داخل checkout موجود:
-cd VoiceCall
+:: من موجه الأوامر (cmd) بعد الاستنساخ:
+cd iraqi-voice-platform
 scripts\windows\install_windows.cmd
 ```
 
 ```powershell
-# أو مباشرة من PowerShell داخل checkout موجود:
-cd VoiceCall
+# أو مباشرة من PowerShell:
+cd iraqi-voice-platform
 powershell -ExecutionPolicy Bypass -File scripts\windows\install_windows.ps1
 ```
 
-أو نزّل المثبت من GitHub Raw وشغله مباشرة (يستنسخ المشروع إذا لم يكن موجودًا):
-
-```powershell
-$installer = Join-Path $env:TEMP 'ivs-install-windows.ps1'
-Invoke-WebRequest -UseBasicParsing 'https://raw.githubusercontent.com/Alqudimi/VoiceCall/main/scripts/windows/install_windows.ps1' -OutFile $installer
-powershell -NoProfile -ExecutionPolicy Bypass -File $installer -SkipAssets
-```
-
-السكربت يدعم checkout موجودًا أو تنزيلًا مباشرًا، ويثبت `cloudflared` الرسمي في مسار المستخدم؛ ثم يفحص Windows 10+، المعمارية، Python 3.12، `uv`، `ffmpeg`،
+السكربت يفحص: Windows 10+، المعمارية، Python 3.12، `uv`، `ffmpeg`، `cloudflared`،
 وGPU (اختياري). **بدون NVIDIA GPU** يستمر التثبيت على وضع CPU، ويُوثَّق في السكربت
 أن البث اللحظي لن يعمل وأن التدريب سيكون بطيئًا — التحويل عبر الملفات يبقى متاحًا.
 
@@ -85,7 +80,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File $installer -SkipAssets
 
 ```powershell
 uv run rvc-platform download-models
-uv run rvc-platform web --tunnel
+uv run rvc-platform web
 ```
 
 ---
@@ -95,20 +90,18 @@ uv run rvc-platform web --tunnel
 المثبّت `scripts/colab/install_colab.sh` مصمم للخلية الأولى في Colab:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Alqudimi/VoiceCall/main/scripts/colab/install_colab.sh | bash
+curl -fsSL <repo>/scripts/colab/install_colab.sh | bash
 ```
 
-لتأجيل تنزيل الأصول، نزّل السكربت ثم نفذه مع متغير البيئة:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/Alqudimi/VoiceCall/main/scripts/colab/install_colab.sh -o /tmp/ivs-install.sh
-SKIP_ASSETS=1 bash /tmp/ivs-install.sh
-```
+> ملاحظة مهمة: عنوان السكربت `<repo>` يعتمد على مكان استضافتك للمستودع — على
+> GitHub مثلًا يكون بصيغة raw:
+> `https://raw.githubusercontent.com/<user>/<repo>/main/scripts/colab/install_colab.sh`.
+> استبدل العنوان بما يوافق مستودعك.
 
 ما يفعله المثبّت:
 1. يكتشف بيئة Colab وGPU وCUDA تلقائيًا (T4/L4/A100).
-2. يستنسخ المشروع إلى `/content/VoiceCall` إن لم يكن موجودًا، ويثبت `uv` والتبعيات وعجلات CUDA المناسبة إن أمكن.
-3. يثبت `cloudflared` الرسمي إلى `~/.local/bin`، ثم ينزّل الأصول ما لم تحدد `SKIP_ASSETS=1`.
+2. يستنسخ/ينزّل المشروع ويثبّت `uv` ثم `uv sync --all-groups` مع عجلات CUDA.
+3. ينزّل الأصول المدربة مسبقًا (`download-models`).
 4. يربط Google Drive: مجلد `RVC_Iraqi/` للتجربة، عبر `RVC_PLATFORM_ROOT` و`drive_sync`
    (مزامنة نقاط الحفظ إلى Drive حتى لا تضيع عند انقطاع الجلسة).
 5. يستأنف تلقائيًا من آخر checkpoint موجود عند إعادة التشغيل.
@@ -197,15 +190,14 @@ make check
 | الأداة | الغرض | بدونها |
 |---|---|---|
 | `ffmpeg` | فك ترميز الصيغ غير WAV/FLAC في التحويل والبيانات | WAV/FLAC فقط |
-| `cloudflared` | النفق العام المؤقت | لا يعمل Tunnel؛ ثبت من صفحة Cloudflare الرسمية أو أعد تشغيل المثبت |
+| `cloudflared` | النفق العام المؤقت | لا يوجد نفق (خطأ واضح عند `make tunnel`) |
 | `build-essential` | أدوات بناء native (Ubuntu) | بعض حزم pip قد تفشل بناؤها |
 | `tensorboard` | مراقبة منحنيات التدريب (مجموعة training) | لا توجد لوحة TensorBoard |
 
 ```bash
-# Ubuntu: ثبّت ffmpeg وbuild-essential عبر apt عند الحاجة.
-# cloudflared: يثبته المثبت الرسمي لمسار المستخدم أو نزّله من:
-# https://developers.cloudflare.com/tunnel/downloads/
-# Windows: ffmpeg مستقل، أما cloudflared فيثبته المثبت من أصل Cloudflare الرسمي.
+# Ubuntu
+sudo apt install ffmpeg cloudflared build-essential
+# Windows: ثبّت ffmpeg وcloudflared يدويًا (winget أو Chocolatey أو الموقع الرسمي)
 ```
 
 ---
@@ -265,4 +257,3 @@ iraqi-voice-platform/
 - تجهيز بيانات وتدريب نموذج: [TRAINING.md](TRAINING.md)
 - البث اللحظي وقياس زمن الاستجابة: [REALTIME.md](REALTIME.md)
 - أعطال التثبيت: [TROUBLESHOOTING.md](TROUBLESHOOTING.md)
-- تشغيل Cloudflare Tunnel والمصادقة وأوامر API: [TUNNEL.md](TUNNEL.md)

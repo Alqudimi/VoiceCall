@@ -51,7 +51,7 @@ curl -s http://127.0.0.1:8320/api/health
 | نتيجة تحويل `409` | لا نموذج محمّل | `POST /api/models/{name}/load` أولًا |
 | رفض رفع صوت `400` | فارغ/أكبر من 40MB/صيغة غير مدعومة | ارفع ملفًا أصغر بصيغة مدعومة (WAV/MP3/FLAC/OGG/M4A/OPUS/WebM/AAC) |
 | رفض رفع نموذج `422` | ليس checkpoint RVC صالحًا | النظام يفحص الملف قبل التسجيل — استخدم `.pth` من RVC v1/v2 سليم |
-| `502` عند بدء النفق | cloudflared غائب أو تعذر إنشاء الاتصال | اتبع [TUNNEL.md](TUNNEL.md)؛ تحقق من سجل `logs/processes/cloudflared/cloudflared.log` ومن الاتصال الخارجي |
+| `502` عند بدء النفق | cloudflared غائب أو فشل البدء | ثبّت cloudflared (INSTALLATION.md قسم 7)؛ تُعاد المحاولة 3 مرات تلقائيًا |
 
 ## 5. تحويل الملفات
 
@@ -71,7 +71,8 @@ curl -s http://127.0.0.1:8320/api/health
 | خطأ بصمة البيانات عند الاستئناف | تغيّرت بيانات التجربة عن وقت نقطة الحفظ | كما يقول الخطأ: اسم تجربة جديد أو `--clean-start` (TRAINING.md قسم 5) |
 | التدريب بطيء جدًا | CPU أو GPU ضعيف | تحقق `make doctor`؛ على CPU البطء متوقع — استخدم Colab/GPU |
 | `no existing run and no --dataset given` | تجربة غير موجودة بلا بيانات | مرّر `--dataset` أو ابدأ بـ`prepare-dataset` |
-| انقطاع mid-training | OOM/انقطاع كهرباء | الحفظ ذري؛ أعد `make train-resume` (أو `POST /api/training/resume`) — يكمل من آخر حالة كاملة (epoch/step/RNG/optimizer) |
+| انقطاع mid-training | OOM/انقطاع كهرباء | الحفظ ذري **+ حفظ طارئ عند الاستثناء قبل الفشل**؛ أعد `make train-resume` (أو `POST /api/training/resume`) — يكمل من آخر حالة كاملة (epoch/step/RNG/optimizer) |
+| `Killed` (exit 137) بلا رسالة خطأ | قتل النظام (OOM-Killer) لنفاد RAM — النموذج الكامل v2 يحتاج ~10GB+ | درّب على جهاز ذي RAM أكبر أو Colab T4؛ أو `--batch 1`؛ على Colab اجعل `RVC_RUNS_DIR` يشير إلى Drive (انظر INSTALLATION.md §4) |
 | خسائر لا تنخفض | بيانات قليلة/مختلطة الأصوات | 10–60 دقيقة من صوت واحد نظيف (TRAINING.md قسم 1) |
 | `/api/training/status` يظهر idle رغم تشغيل CLI | التدريب بالـCLI عملية مستقلة عن الخادم | راقب CLI مباشرة أو شغّل التدريب عبر الـAPI/الويب |
 | توقف المدرب برمز 2 | خطأ إعداد | راجع `runs/<exp>/run_config.json` ورسالة الخطأ |
@@ -95,8 +96,7 @@ curl -s http://127.0.0.1:8320/api/health
 
 | العرَض | السبب | الحل |
 |---|---|---|
-| `502 tunnel` عند `/api/tunnel/start` | cloudflared غير مثبت أو فشل اتصال Cloudflare | ثبّته من المثبت الرسمي عبر [TUNNEL.md](TUNNEL.md)، وافحص `logs/processes/cloudflared/cloudflared.log` |
-| عنوان trycloudflare لا يُحل مباشرة بعد التشغيل | DNS لم ينتشر بعد أو DNS الخادم مقيّد | انتظر عدة ثوانٍ، ثم اختبره من شبكة أخرى؛ يجب أن يظهر اتصال Cloudflare مسجل في السجل |
+| `502 tunnel` عند `/api/tunnel/start` | cloudflared غير مثبت | ثبّته — يُعاد المحاولة 3 مرات تلقائيًا قبل الفشل |
 | العنوان تغيّر بعد إعادة التشغيل | طبيعة quick tunnel | العنوان مؤقت بتصميمه (جديد كل تشغيل) — لا يوجد اسم دائم |
 | النفق يعمل لكن API يرفض 401 | المصادقة تفعّلت تلقائيًا مع النفق | مقصود أمنيًا — استخدم التوكن (`logs/auth.token` أو `server.auth_token`) |
 | الخادم محلي يعمل والنفق 502 | الخادم على منفذ مختلف | تأكد `server.port` وتشغيل الويب قبل `make tunnel` |
@@ -135,7 +135,7 @@ curl -s http://127.0.0.1:8320/api/health
 |---|---|
 | المنصة | `logs/platform.log` (يتدور كل 10MB × 5) |
 | التوكن (إن وُلّد) | `logs/auth.token` |
-| النفق | `logs/processes/cloudflared/cloudflared.log` و`GET /api/tunnel/logs` |
+| النفق | `logs/tunnel.log` و`GET /api/tunnel/logs` |
 | العمليات المُدارة | `logs/processes/` |
 | تدريب تجربة | `runs/<exp>/train.log` + `events.jsonl` + `progress.json` |
 
@@ -154,7 +154,7 @@ make clean-all            # + runs/ + data/uploads + data/conversions
 1. `make doctor FIX=1` — فحص شامل مع إصلاح الأصول.
 2. `make logs LINES=200` و`GET /api/logs?lines=200` — السجلات أولًا.
 3. سجلات التدريب: `runs/<exp>/train.log` و`events.jsonl` و`progress.json`.
-4. سجل النفق: `GET /api/tunnel/logs` و`logs/processes/cloudflared/cloudflared.log`.
+4. سجل النفق: `GET /api/tunnel/logs` و`logs/tunnel.log`.
 5. راجع [API.md](API.md) (أكواد الأخطاء) و[REALTIME.md](REALTIME.md) (البروتوكول)
    و[TRAINING.md](TRAINING.md) (دقة الاستئناف) و[CONFIGURATION.md](CONFIGURATION.md).
 

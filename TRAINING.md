@@ -138,6 +138,7 @@ uv run rvc-platform train start \
 | الملف | المعنى |
 |---|---|
 | `G_<step>.pth` / `D_<step>.pth` | لقطات كاملة الحالة: `model`, `optimizer`, `scheduler`, `scaler`, `epoch`, `global_step`, `rng` — للـ Generator/Discriminator |
+| `G_final.pth` / `D_final.pth` | لقطة الاكتمال (أعلى `global_step`) — ترتيبها في اختيار الاستكمال أعلى من المرقّمة |
 | `G_2333333.pth` / `D_2333333.pth` | **مرآة "الأحدث دائمًا"** يُحدّث مع كل حفظ (متوافقة مع تسمية upstream) |
 | `state.json` | `epoch`, `global_step`, **بصمة البيانات (dataset signature)**, `run_config`, ذيل الخسائر, زمن الحفظ |
 
@@ -150,8 +151,16 @@ uv run rvc-platform train start \
 
 - **تلقائي**: إعادة `make train` / `train start --experiment <name>` بدون `--dataset`
   تحمّل آخر حالة كاملة وتكمل من مكانها (epoch/step/RNG/optimizer/scheduler/scaler).
-- عبر الـAPI: `POST /api/training/resume` (بصيغة `?experiment=` اختيارية — بدونها
-  تختار أحدث تجربة).
+- عبر الـAPI: `POST /api/training/resume?experiment=<name>` (بدونها تختار أحدث تجربة)
+  ويدعم أيضًا **نقطة محددة**: `&checkpoint=G_48.pth` (اسم الملف أو مساره) أو
+  `&checkpoint=latest`.
+- **استكمال من نقطة محددة** (CLI):
+  `rvc-platform train start --experiment <name> --resume-from G_48.pth`
+  (يقبل اسم ملف نقطة، مسارًا كاملًا، أو الكلمة `latest`). زر "استكمال من هنا"
+  متاح لكل صف في جدول نقاط الحفظ داخل واجهة الويب.
+- **حفظ طارئ عند الانهيار**: أي استثناء غير متوقع داخل حلقة التدريب (OOM،
+  دفعة فاسدة...) يحفظ checkpoint طارئًا كامل الحالة قبل الإبلاغ عن الفشل —
+  يبقى التدريب قابلًا للاستكمال من آخر خطوة ناجحة.
 - **تعارض بصمة البيانات**: إذا تغيّرت البيانات (ملفات/محتوى) عن التي دربّت عليها
   النقطة، ترفض المنصة الاستئناف بخطأ واضح يطلب إما **تغيير اسم التجربة** أو
   `--clean-start` — هذا يمنع استئنافًا فاسدًا بصمتًا.

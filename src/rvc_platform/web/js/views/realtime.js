@@ -64,6 +64,8 @@ async function mount(root) {
 
   const ui = {
     model: root.querySelector("#rt-model"),
+    micSelect: root.querySelector("#rt-mic"),
+    outSelect: root.querySelector("#rt-out"),
     btnStart: root.querySelector("#rt-start"),
     stateLine: root.querySelector("#rt-state"),
     statusBox: root.querySelector("#rt-status-box"),
@@ -87,6 +89,7 @@ async function mount(root) {
   };
 
   wireLiveControls(ui, state);
+  const offDeviceChange = wireDeviceSelectors(ui);
   ui.btnStart.addEventListener("click", () => {
     if (state.phase === "streaming" || state.phase === "connecting") stopSession(state, ui);
     else startSession(state, ui);
@@ -95,6 +98,7 @@ async function mount(root) {
   await Promise.all([loadModels(state, ui), loadInfo(state, ui)]);
 
   function cleanup() {
+    if (offDeviceChange) offDeviceChange();
     teardownSession(state, ui, false);
   }
   return cleanup;
@@ -128,6 +132,18 @@ function buildControlsCard() {
         el("label", { for: "rt-model" }, ["النموذج (فهرس f0 فقط)"]),
         el("select", { id: "rt-model" }, [
           el("option", { value: "" }, ["جارٍ جلب النماذج…"]),
+        ]),
+      ]),
+      el("div", { class: "field" }, [
+        el("label", { for: "rt-mic" }, ["ميكروفون الإدخال — ", el("span", { class: "opt-latin" }, ["Input"])]),
+        el("select", { id: "rt-mic" }, [
+          el("option", { value: "" }, ["الافتراضي للنظام"]),
+        ]),
+      ]),
+      el("div", { class: "field" }, [
+        el("label", { for: "rt-out" }, ["جهاز الإخراج — ", el("span", { class: "opt-latin" }, ["Output"])]),
+        el("select", { id: "rt-out" }, [
+          el("option", { value: "" }, ["الافتراضي للنظام"]),
         ]),
       ]),
       el("div", { class: "field" }, [
@@ -321,6 +337,50 @@ function settingsPayload(state) {
   };
 }
 
+/* ------------------------------ device selection ------------------------------ */
+
+function wireDeviceSelectors(ui) {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) return null;
+  const refresh = async () => {
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      fillSelect(ui.micSelect, devices.filter((d) => d.kind === "audioinput"), "ميكروفون");
+      fillSelect(ui.outSelect, devices.filter((d) => d.kind === "audiooutput"), "مخرج");
+    } catch { /* permission not granted yet — default device used */ }
+  };
+  refresh();
+  navigator.mediaDevices.addEventListener?.("devicechange", refresh);
+  return () => navigator.mediaDevices.removeEventListener?.("devicechange", refresh);
+}
+
+function fillSelect(select, devices, label) {
+  if (!select) return;
+  const current = select.value;
+  const options = [el("option", { value: "" }, [`الافتراضي للنظام`])];
+  for (const d of devices) {
+    const name = d.label || `${label} ${d.deviceId.slice(0, 8)}`;
+    options.push(el("option", { value: d.deviceId }, [name]));
+  }
+  clear(select);
+  select.append(...options);
+  select.value = options.some((o) => o.value === current) ? current : "";
+}
+
+async function attachOutputSink(outCtx, ui) {
+  const deviceId = ui.outSelect ? ui.outSelect.value : "";
+  if (!deviceId) return; // system default
+  try {
+    if (typeof outCtx.setSinkId === "function") {
+      await outCtx.setSinkId({ type: "audiooutput", deviceId });
+    } else {
+      // older engines: constructing with sinkId (ignored where unsupported)
+      return; // context already created; sink selection unavailable
+    }
+  } catch (err) {
+    toast(`تعذّر اختيار جهاز الإخراج (${err.message}) — سيستخدم الافتراضي.`, "warn");
+  }
+}
+
 /* ------------------------------ session lifecycle ------------------------------ */
 
 async function startSession(state, ui) {
@@ -335,16 +395,19 @@ async function startSession(state, ui) {
   const alive = () => state.sessionId === sessionId && (state.phase === "connecting" || state.phase === "streaming");
   setPhase(state, ui, "connecting", `جارٍ الاتصال والتحميل — ${modelName}`);
 
-  // 1) microphone
+  // 1) microphone (selected device if any)
   let stream;
+  const micId = ui.micSelect ? ui.micSelect.value : "";
   try {
     stream = await navigator.mediaDevices.getUserMedia({
-      audio: {
-        echoCancellation: false,
-        noiseSuppression: false,
-        autoGainControl: false,
-        channelCount: 1,
-      },
+      audio: micId
+        ? { deviceId: { exact: micId }, echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 1 }
+        : {
+            echoCancellation: false,
+            noiseSuppression: false,
+            autoGainControl: false,
+            channelCount: 1,
+          },
     });
   } catch (err) {
     fail(state, ui, `تعذّر الوصول إلى الميكروفون: ${err.name === "NotAllowedError" ? "الإذن مرفوض من المتصفح" : err.message || err.name}`);
@@ -366,6 +429,7 @@ async function startSession(state, ui) {
   // 3) playback context (created under the click gesture, native rate)
   state.outCtx = new AudioContext();
   if (state.outCtx.state === "suspended") { try { await state.outCtx.resume(); } catch { /* retried on play */ } }
+  await attachOutputSink(state.outCtx, ui);
   if (!alive()) { teardownSession(state, ui); return; }
   state.nextTime = 0;
 

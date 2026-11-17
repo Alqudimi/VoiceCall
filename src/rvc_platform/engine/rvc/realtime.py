@@ -55,6 +55,7 @@ class RealTimeRVC:
         crossfade_ms: int = 8,
         extra_ms: int = 2500,
         silence_threshold_db: float = -40.0,
+        f0_method: str = "rmvpe",
     ) -> None:
         self.profile = profile
         self.device = profile.device
@@ -107,7 +108,7 @@ class RealTimeRVC:
         self._settings_lock = threading.Lock()
         self.pitch_shift = 0
         self.index_rate = 0.0
-        self.f0_method = "rmvpe"
+        self.f0_method = str(f0_method or "rmvpe")
         self.rms_mix_rate = 0.0
         self.silence_threshold_db = silence_threshold_db
         # ---- instrumentation ----

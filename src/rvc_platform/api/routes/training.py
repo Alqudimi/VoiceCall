@@ -113,9 +113,11 @@ def stop(request: Request):
 
 
 @router.post("/resume")
-def resume(request: Request, experiment: str | None = None):
+def resume(request: Request, experiment: str | None = None,
+           checkpoint: str | None = None):
+    """Resume the latest run — or an explicit checkpoint (name, path, 'latest')."""
     try:
-        return _svc(request)["training"].resume(experiment)
+        return _svc(request)["training"].resume(experiment, checkpoint)
     except TrainingError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 

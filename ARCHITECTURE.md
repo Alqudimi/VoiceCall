@@ -119,7 +119,7 @@ callbacks, and an honest `realtime-benchmark` command that measures the
 **real** engine with synthetic blocks (no mic needed).
 
 Measured on this build machine (CPU-only, torch 2.7.1+cpu, no GPU):
-avg 528 ms / p95 556 ms per 160 ms block — **above the real-time budget**,
+avg 519 ms / p95 560 ms per 160 ms block (re-measured: vCPU×2, fp32, real v2/40k model; min 464 / max 866) — **above the real-time budget**,
 as physics dictates for a 36M-param synthesiser + HuBERT + RMVPE on CPU.
 Upstream reports 170 ms end-to-end on a suitable CUDA GPU (90 ms with ASIO
 drivers on Windows). The platform surfaces both numbers honestly instead of
@@ -205,5 +205,5 @@ F0 path (`pm`), FAISS, losses, trainer and API are all real.
 
 Additionally verified live in this environment (real HuBERT + RMVPE):
 file conversion of 4 s audio (7.9 s on CPU), realtime benchmark
-(min/avg/p95 = 500/528/556 ms per 160 ms block on CPU — honest verdict),
+(min/avg/p95 = 464/519/560 ms per 160 ms block on CPU, real v2/40k weights — honest verdict),
 API+SPA serving, model load via API, clean shutdown.

@@ -58,14 +58,8 @@ def _port_open(port: int) -> bool:
 def _api(port: int, path: str = "/api/system") -> dict | None:
     try:
         import httpx
-        headers = {}
-        try:
-            token = (get_paths().logs / "auth.token").read_text(encoding="utf-8").splitlines()[0].strip()
-            if token:
-                headers["Authorization"] = f"Bearer {token}"
-        except (OSError, IndexError):
-            pass
-        resp = httpx.get(f"http://127.0.0.1:{port}{path}", headers=headers, timeout=5.0)
+
+        resp = httpx.get(f"http://127.0.0.1:{port}{path}", timeout=5.0)
         return resp.json() if resp.status_code < 500 else None
     except Exception:
         return None
@@ -259,7 +253,8 @@ def preprocess(dataset: Path, experiment: str, sr: str = typer.Option("40k")):
 
 
 @app.command("extract-features")
-def extract_features(experiment: str, method: str = typer.Option("rmvpe")):
+def extract_features(experiment: str, method: str = typer.Option("rmvpe", "--f0-method", "--method")):
+    """Extract F0 (+HuBERT features) for an existing run with the chosen method."""
     from rvc_platform.training.run_config import TrainingRunConfig
 
     cfg = TrainingRunConfig.load(get_paths().runs / experiment)
@@ -268,8 +263,9 @@ def extract_features(experiment: str, method: str = typer.Option("rmvpe")):
 
 
 @app.command("prepare-dataset")
-def prepare_dataset(dataset: Path, experiment: str, sr: str = typer.Option("40k"),
-                    method: str = typer.Option("rmvpe")):
+def prepare_dataset(dataset: Path, experiment: str,
+                    sr: str = typer.Option("40k", "--sr"),
+                    method: str = typer.Option("rmvpe", "--f0-method", "--method")):
     """Full pipeline: check -> preprocess -> F0 -> HuBERT -> filelist -> index."""
     from rvc_platform.training.run_config import TrainingRunConfig
 
@@ -331,6 +327,10 @@ def train_start(
     f0_method: str = typer.Option("rmvpe", "--f0-method"),
     no_pretrained: bool = typer.Option(False, "--no-pretrained"),
     clean_start: bool = typer.Option(False, "--clean-start"),
+    resume_from: Optional[str] = typer.Option(
+        None, "--resume-from",
+        help="explicit checkpoint: G_<step>.pth name, absolute path, or 'latest'",
+    ),
 ):
     """Start (or continue) a training run. Follows live progress on stdout."""
     from rvc_platform.application.training_service import TrainingService
@@ -352,9 +352,14 @@ def train_start(
         console.print("[red]no existing run and no --dataset given[/red]")
         raise typer.Exit(2)
     cfg.resume = not clean_start
+    if resume_from is not None:
+        cfg.resume_from = Path(resume_from)
+        cfg.resume = True
+        console.print(f"[cyan]explicit resume point: {resume_from}[/cyan]")
 
     from rvc_platform.training.worker import main as worker_main
-    # run in-process so the CLI shows live JSONL events
+    # run in-process so the CLI shows live JSONL events; the worker registers
+    # its pid in temp/trainer.pid so `train stop` reaches it from any terminal
     cfg.save()
     import threading
 
@@ -368,7 +373,12 @@ def train_start(
     try:
         _forward_events()
     except KeyboardInterrupt:
-        console.print("[yellow]interrupted — sending cooperative stop[/yellow]")
+        # the worker installs its own SIGINT handler (cooperative stop +
+        # checkpoint save); this branch only guards a race before install
+        console.print("[yellow]interrupted[/yellow]")
+    except SystemExit as exc:
+        if exc.code not in (None, 0):
+            raise
 
 
 @train_app.command("stop")
@@ -418,6 +428,45 @@ def _read_pid(name: str) -> int | None:
     except (OSError, ValueError):
         pass
     return None
+
+
+# --------------------------------------------------------------------------- #
+# colab / drive persistence
+# --------------------------------------------------------------------------- #
+colab_app = typer.Typer(help="Colab/Drive persistence utilities")
+app.add_typer(colab_app, name="colab")
+
+
+@colab_app.command("restore")
+def colab_restore(drive_dir: str = typer.Option("RVC_Iraqi", "--drive-dir")):
+    """Pull runs/ + models/ from Google Drive into this session."""
+    from rvc_platform.colab import colab_runner
+
+    console.print_json(json.dumps(colab_runner.restore(drive_dir), default=str))
+
+
+@colab_app.command("snapshot")
+def colab_snapshot(drive_dir: str = typer.Option("RVC_Iraqi", "--drive-dir")):
+    """Push runs/ + models/ to Google Drive (run before a session ends)."""
+    from rvc_platform.colab import colab_runner
+
+    console.print_json(json.dumps(colab_runner.snapshot(drive_dir), default=str))
+
+
+@colab_app.command("status")
+def colab_status(drive_dir: str = typer.Option("RVC_Iraqi", "--drive-dir")):
+    """Drive availability, active redirects and known checkpoints."""
+    from rvc_platform.colab import colab_runner
+
+    console.print_json(json.dumps(colab_runner.status(drive_dir), default=str))
+
+
+@colab_app.command("env")
+def colab_env(drive_dir: str = typer.Option("RVC_Iraqi", "--drive-dir")):
+    """Print the recommended Drive env wiring for this session."""
+    from rvc_platform.colab import colab_runner
+
+    console.print_json(json.dumps(colab_runner.colab_env(drive_dir), default=str))
 
 
 # --------------------------------------------------------------------------- #
@@ -504,9 +553,7 @@ def web(
     from rvc_platform.infrastructure.config.loader import get_config
 
     config = get_config()
-    # cloudflared connects to loopback; do not bind the origin to every
-    # network interface merely because a tunnel was requested.
-    host = host or config.server.host
+    host = host or (config.server.host if not tunnel else "0.0.0.0")
     port = port or config.server.port
     if _port_open(port):
         console.print(f"[yellow]port {port} already in use — server may be running[/yellow]")
@@ -552,33 +599,48 @@ def _terminate_group(pid: int) -> None:
 
 
 def _start_tunnel(port: int) -> None:
-    import httpx
+    import subprocess as sp
 
-    base = f"http://127.0.0.1:{port}"
+    log = get_paths().logs / "tunnel.log"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    with open(log, "ab") as fh:
+        proc = sp.Popen(
+            ["cloudflared", "tunnel", "--url", f"http://127.0.0.1:{port}",
+             "--no-autoupdate"],
+            stdout=fh, stderr=sp.STDOUT, start_new_session=True,
+        )
+    (get_paths().temp / "tunnel.pid").write_text(str(proc.pid))
+    import re
+
+    url = None
     deadline = time.time() + 30
-    while time.time() < deadline:
-        try:
-            if httpx.get(f"{base}/api/health", timeout=2).status_code == 200:
-                break
-        except httpx.HTTPError:
-            pass
-        time.sleep(0.5)
-    else:
-        console.print("[red]web health check failed; tunnel was not started[/red]")
-        return
-    try:
-        response = httpx.post(f"{base}/api/tunnel/start", timeout=120)
-        response.raise_for_status()
-        result = response.json()
-    except (httpx.HTTPError, ValueError) as exc:
-        console.print(f"[red]tunnel start failed: {exc}[/red]")
-        console.print("[yellow]inspect logs/processes/cloudflared/cloudflared.log[/yellow]")
-        return
-    url = result.get("url")
+    while time.time() < deadline and url is None:
+        data = log.read_text(encoding="utf-8", errors="replace")
+        match = re.search(r"https://[a-z0-9-]+\.trycloudflare\.com", data)
+        url = match.group(0) if match else None
+        if url is None:
+            time.sleep(0.5)
     if url:
         console.print(f"[green]public URL: {url}[/green]")
-        console.print("[yellow]authentication is enabled; read the token from logs/auth.token and enter it in Settings on the public page.[/yellow]")
         (get_paths().temp / "tunnel.url").write_text(url)
+    else:
+        console.print("[red]tunnel URL not detected; see logs/tunnel.log[/red]")
+
+
+def _stop_tunnel() -> bool:
+    """Terminate a CLI-spawned cloudflared (if any). Returns stopped?"""
+    pid_file = get_paths().temp / "tunnel.pid"
+    try:
+        pid = int(pid_file.read_text().strip())
+    except (OSError, ValueError):
+        return False
+    try:
+        _terminate_group(pid)
+    except (ProcessLookupError, PermissionError):
+        pass
+    pid_file.unlink(missing_ok=True)
+    (get_paths().temp / "tunnel.url").unlink(missing_ok=True)
+    return True
 
 
 @app.command("web-status")
@@ -598,6 +660,8 @@ def web_stop(port: Optional[int] = None):
     from rvc_platform.infrastructure.config.loader import get_config
 
     port = port or get_config().server.port
+    if _stop_tunnel():
+        console.print("[green]stopped CLI tunnel[/green]")
     pid = _web_pid()
     if pid and pid != os.getpid():
         try:
@@ -691,6 +755,8 @@ def logs(lines: int = typer.Option(80, "--lines")):
     if log_file.is_file():
         tail = log_file.read_text(encoding="utf-8", errors="replace").splitlines()[-lines:]
         console.print("\n".join(tail))
+    else:
+        console.print("[yellow]no platform.log yet — start the web server (`make web`)[/yellow]")
 
 
 def app_run() -> None:  # entry point

@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import os
 import secrets
-import stat
 from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
@@ -27,19 +26,8 @@ class ServerConfig(BaseModel):
     def effective_token(self, token_file: "os.PathLike | str") -> str:
         if self.auth_token:
             return self.auth_token
-        path = os.fspath(token_file)
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        try:
-            with open(path, "r", encoding="utf-8") as fh:
-                existing = fh.readline().strip()
-            if existing:
-                os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)
-                return existing
-        except FileNotFoundError:
-            pass
-        token = secrets.token_urlsafe(32)
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        token = secrets.token_urlsafe(24)
+        with open(token_file, "a", encoding="utf-8") as fh:
             fh.write(token + "\n")
         return token
 
@@ -72,21 +60,23 @@ class ConversionDefaults(BaseModel):
 
 class RealtimeConfig(BaseModel):
     block_ms: int = Field(default=160, ge=60, le=500)       # audio block granularity
-    lookback_ms: int = Field(default=200, ge=100, le=1000)  # F0 history window
+    lookback_ms: int = Field(default=200, ge=100, le=2500)  # F0 history window
+                                                           # (upstream allows 2500)
     crossfade_ms: int = Field(default=8, ge=0, le=40)       # block-to-block blend
     silence_threshold_db: float = Field(default=-40.0, le=-20.0, ge=-70.0)
     keep_alive_s: float = Field(default=60.0, ge=5.0, le=600.0)
     f0_method: Literal["rmvpe", "fcpe", "pm"] = "rmvpe"
+    max_sessions: int = Field(default=2, ge=1, le=16)       # VRAM guard per server
 
 
 class TrainingDefaults(BaseModel):
     sample_rate: Literal["32k", "40k", "48k"] = "40k"
     version: Literal["v1", "v2"] = "v2"
     f0: bool = True
-    f0_method: Literal["rmvpe", "fcpe", "pm", "harvest", "dio", "crepe"] = "rmvpe"
-    # note: harvest/dio/crepe are accepted as *dataset feature-extraction* options
-    # (librosa backend) for compatibility with existing RVC datasets; the
-    # inference engine itself exposes only rmvpe/fcpe/pm.
+    f0_method: Literal["rmvpe", "fcpe", "pm"] = "rmvpe"
+    # only the methods the extractor registry actually ships are accepted —
+    # crepe/harvest/dio were evaluated and rejected (see docs/ARCHITECTURE.md);
+    # refusing them at config time prevents a late failure mid-pipeline.
     epochs: int = Field(default=200, ge=1, le=10000)
     batch_size: int = Field(default=6, ge=1, le=64)
     learning_rate: float = 1e-4
