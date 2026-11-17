@@ -1,0 +1,84 @@
+# =============================================================================
+# cleanup.yml — repository housekeeping (weekly, Sunday 03:30 UTC)
+#   * delete Actions caches not touched for more than 7 days
+#   * delete completed workflow runs older than 30 days (recent history kept)
+# Uses the built-in GITHUB_TOKEN with `actions: write` permission — no PAT.
+# The filtering logic runs in Python to parse GitHub's ISO timestamps safely.
+# =============================================================================
+name: Cleanup
+
+on:
+  schedule:
+    - cron: "30 3 * * 0"
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: read
+
+concurrency:
+  group: cleanup
+
+env:
+  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+jobs:
+  cleanup:
+    name: Purge old caches & workflow runs
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Delete Actions caches idle for over 7 days
+        run: |
+          gh api --paginate "repos/${GITHUB_REPOSITORY}/actions/caches?per_page=100" > /tmp/caches.json || true
+          python3 - <<'PY'
+          import json, os, subprocess
+          from datetime import datetime, timedelta, timezone
+
+          repo = os.environ["GITHUB_REPOSITORY"]
+          raw = open("/tmp/caches.json").read().strip()
+          if not raw:
+              print("no caches to inspect"); raise SystemExit(0)
+
+          # --paginate concatenates raw JSON arrays; tolerate that shape too
+          raw = raw.replace("][", ",")
+          caches = json.loads(raw).get("actions_caches", [])
+          cutoff = datetime.now(timezone.utc) - timedelta(days=7)
+          deleted = 0
+          for c in caches:
+              accessed = c.get("last_accessed_at")
+              if not accessed:
+                  continue
+              when = datetime.fromisoformat(accessed.replace("Z", "+00:00"))
+              if when < cutoff:
+                  r = subprocess.run(["gh", "api", "-X", "DELETE",
+                                      f"repos/{repo}/actions/caches/{c['id']}"],
+                                     capture_output=True, text=True)
+                  if r.returncode == 0:
+                      deleted += 1
+                      print(f"deleted cache #{c['id']} (last touched {accessed})")
+          print(f"idle caches deleted: {deleted}")
+          PY
+
+      - name: Delete completed workflow runs older than 30 days
+        run: |
+          gh run list --limit 200 --json databaseId,createdAt,status > /tmp/runs.json || true
+          python3 - <<'PY'
+          import json, os, subprocess
+          from datetime import datetime, timedelta, timezone
+
+          repo = os.environ["GITHUB_REPOSITORY"]
+          runs = json.loads(open("/tmp/runs.json").read() or "[]")
+          cutoff = datetime.now(timezone.utc) - timedelta(days=30)
+          deleted = 0
+          for r in runs:
+              created = datetime.fromisoformat(r["createdAt"].replace("Z", "+00:00"))
+              if r.get("status") == "completed" and created < cutoff:
+                  d = subprocess.run(["gh", "api", "-X", "DELETE",
+                                      f"repos/{repo}/actions/runs/{r['databaseId']}"],
+                                     capture_output=True, text=True)
+                  if d.returncode == 0:
+                      deleted += 1
+                      print(f"deleted run #{r['databaseId']} ({r['createdAt']})")
+          print(f"old runs deleted: {deleted}")
+          PY

@@ -7,7 +7,14 @@ build/
 dist/
 .pytest_cache/
 .coverage
+coverage.xml
 htmlcov/
+
+# --- CI/docs build artifacts (mkdocs, lychee, pip-audit) ---
+site/
+docs/
+lychee.out
+dep-drift.patch
 
 # --- runtime artifacts (never commit user data or big weights) ---
 assets/
@@ -32,3 +39,6 @@ configs/user.yaml
 .env
 .colab_env
 .devref/
+
+# --- local lint caches ---
+.ruff_cache/

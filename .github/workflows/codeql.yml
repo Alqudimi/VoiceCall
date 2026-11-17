@@ -1,0 +1,48 @@
+# =============================================================================
+# codeql.yml — GitHub CodeQL security analysis (Python)
+# Scans the whole Python code base (src/, tests/, scripts/) for security
+# weaknesses on every push to main, every PR, and weekly on schedule.
+# Results appear under the repository Security > Code scanning tab.
+# =============================================================================
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "30 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+  security-events: write
+
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CODEQL_PYTHON_LANG: python
+
+jobs:
+  analyze:
+    name: Analyze (python)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ env.CODEQL_PYTHON_LANG }}
+          queries: security-and-quality
+
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:${{ env.CODEQL_PYTHON_LANG }}"

@@ -1,0 +1,71 @@
+# =============================================================================
+# release.yml — tagged release pipeline (push a tag like v1.0.0 to trigger)
+#   1. builds sdist + wheel from the exact tag (uv build, frozen lockfile)
+#   2. smoke-tests the WHEEL in a clean venv (real install, real console script)
+#   3. generates an SPDX SBOM for the release
+#   4. publishes a GitHub Release with dist + SBOM attached and auto notes
+# =============================================================================
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+
+jobs:
+  release:
+    name: Build, verify & publish GitHub release
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Checkout repository (tag)
+        uses: actions/checkout@v4
+
+      - name: Install uv (with dependency cache)
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Build sdist + wheel
+        run: uv build
+
+      - name: Smoke-test the wheel in a clean environment
+        run: |
+          uv venv /tmp/release-venv
+          VIRTUAL_ENV=/tmp/release-venv uv pip install dist/*.whl
+          /tmp/release-venv/bin/rvc-platform --help
+          /tmp/release-venv/bin/python -c "import rvc_platform; print('wheel import OK:', rvc_platform.__name__)"
+
+      - name: Generate SPDX SBOM for the release
+        uses: anchore/sbom-action@v0
+        with:
+          format: spdx-json
+          artifact-name: ""
+          upload-artifact: false
+          output-file: dist/sbom.spdx.json
+
+      - name: Upload dist artifact (sdist, wheel, SBOM)
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-dist-${{ github.sha }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Publish GitHub release (notes + dist + SBOM attached)
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          draft: false
+          prerelease: false
+          files: |
+            dist/*.tar.gz
+            dist/*.whl
+            dist/sbom.spdx.json

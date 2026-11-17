@@ -1,0 +1,6 @@
+# lychee ignore patterns — links that must never be reported as broken
+# (ephemeral hosts documented in the project; regex format, one per line)
+^https?://localhost
+^https?://127\.0\.0\.1
+trycloudflare\.com
+glossary-furnished-phantom-finger

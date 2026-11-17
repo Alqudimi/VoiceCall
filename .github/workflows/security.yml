@@ -1,0 +1,154 @@
+# =============================================================================
+# security.yml — defence-in-depth security scanning pipeline
+#   * gitleaks          : secret/credential leak detection        (blocks)
+#   * pip-audit         : known CVEs in the locked dependency set   (blocks)
+#   * bandit            : static security analysis of src (medium+) (blocks)
+#   * dependency-review : GitHub-native PR dependency diff check   (PR only)
+#   * trivy             : filesystem vuln + secret scan            (main/weekly)
+#   * sbom              : SPDX software bill of materials artifact (main/tags)
+# Notes:
+#   - B324 (hashlib.md5) is skipped ON PURPOSE: MD5 is used only for
+#     non-cryptographic dataset fingerprints / duplicate detection.
+#   - the vendored engine (src/rvc_platform/engine/rvc) is excluded from
+#     bandit: it is upstream-derived numerics code (see ATTRIBUTION.md).
+# =============================================================================
+name: Security
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "0 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  gitleaks:
+    name: Secret scan (gitleaks)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  pip-audit:
+    name: Dependency CVE audit (pip-audit)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Export locked dependency set (flat requirements.txt)
+        run: uv export --frozen --all-groups --all-extras --no-hashes --no-emit-package rvc-platform -o requirements.txt
+
+      - name: Normalise local wheel versions (+cpu → base) for PyPI lookup
+        run: |
+          uv run --no-project python - <<'PY'
+          import re
+          from pathlib import Path
+          req = Path("requirements.txt").read_text(encoding="utf-8")
+          # torch==2.7.1+cpu is the PyTorch-CPU index wheel; the SAME 2.7.1
+          # sources are published on PyPI — strip the local tag so pip-audit
+          # can resolve every pin against the PyPI advisory database.
+          req = re.sub(r"(==[0-9][0-9A-Za-z.~-]*)\+(?:cpu|cu\d+)", r"\1", req)
+          Path("requirements.txt").write_text(req, encoding="utf-8")
+          print("normalised requirements.txt written")
+          PY
+
+      - name: Run pip-audit against OSV/PyPI advisories
+        run: uvx pip-audit -r requirements.txt
+
+      - name: Upload audited requirements artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: audited-requirements-${{ github.run_id }}
+          path: requirements.txt
+          if-no-files-found: warn
+          retention-days: 30
+
+  bandit:
+    name: Static security analysis (bandit)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Run bandit (medium+; MD5 fingerprints excluded by design)
+        run: |
+          find src -name '*.py' -not -path 'src/rvc_platform/engine/rvc/*' -print0 \
+            | xargs -0 uvx bandit -ll --skip B324 -f screen
+
+  dependency-review:
+    name: PR dependency diff review
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Dependency review (new/changed deps vs GitHub advisory DB)
+        uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: high
+
+  trivy:
+    name: Filesystem vuln & secret scan (trivy)
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Run Trivy filesystem scan (HIGH/CRITICAL, fixed only)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,secret
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+          format: table
+
+  sbom:
+    name: SBOM (SPDX)
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Generate SPDX SBOM with Syft
+        uses: anchore/sbom-action@v0
+        with:
+          format: spdx-json
+          artifact-name: sbom-spdx-${{ github.sha }}
+          upload-artifact: true

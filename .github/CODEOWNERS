@@ -1,0 +1,16 @@
+# CODEOWNERS — every change requires review by the repository owner.
+# https://docs.github.com/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+
+# The whole repository
+*                               @Alqudimi
+
+# CI / automation — especially sensitive
+/.github/                       @Alqudimi
+
+# Security-sensitive layers
+/src/rvc_platform/infrastructure/security/   @Alqudimi
+/src/rvc_platform/api/          @Alqudimi
+
+# Colab installer (first-run experience for most users)
+/scripts/colab/                 @Alqudimi
+/notebooks/                     @Alqudimi

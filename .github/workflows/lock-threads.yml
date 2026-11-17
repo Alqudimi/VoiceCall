@@ -1,0 +1,39 @@
+# =============================================================================
+# lock-threads.yml — locks closed issues and PRs that stayed dormant for a
+# year, preventing necro-bumping while keeping the discussion history intact.
+# =============================================================================
+name: Lock threads
+
+on:
+  schedule:
+    - cron: "0 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: lock-threads
+
+jobs:
+  lock:
+    name: Lock dormant closed threads
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Run lock-threads
+        uses: dessant/lock-threads@v5
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          issue-inactive-days: "365"
+          pr-inactive-days: "365"
+          issue-comment: >
+            هذه المشكلة مغلقة منذ زمن دون نشاط إضافي، لذا سيُقفل النقاش
+            تلقائياً للحفاظ على تنظيم المتتبع. للاستفسارات الجديدة افتح
+            مشكلة جديدة واربط هذه.
+          issue-lock-reason: resolved
+          pr-comment: >
+            قُفل هذا النقاش لعدم النشاط لمدة عام بعد إغلاق طلب الدمج.
+            للمتابعة افتح طلباً جديداً مع السياق الكامل.
+          pr-lock-reason: resolved

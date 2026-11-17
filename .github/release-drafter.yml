@@ -1,0 +1,127 @@
+# =============================================================================
+# release-drafter.yml — layout of the auto-generated draft release notes
+# (consumed by release-drafter.yml workflow on every push to main)
+# =============================================================================
+name-template: "v$RESOLVED_VERSION"
+tag-template: "v$MAJOR.$MINOR.$PATCH"
+version-template: "$MAJOR.$MINOR.$PATCH"
+
+categories:
+  - title: "الميزات الجديدة"
+    labels:
+      - "enhancement"
+
+  - title: "إصلاحات الأخطاء"
+    labels:
+      - "bug"
+
+  - title: "تحسينات الأداء"
+    labels:
+      - "performance"
+
+  - title: "الأمان"
+    labels:
+      - "security"
+
+  - title: "التوثيق"
+    labels:
+      - "documentation"
+
+  - title: "CI والبنية التحتية"
+    labels:
+      - "ci"
+      - "docker"
+      - "scripts"
+
+  - title: "التدريب والمحرك"
+    labels:
+      - "training"
+      - "engine"
+
+  - title: "الواجهة والـ API والبث اللحظي"
+    labels:
+      - "web-ui"
+      - "api"
+      - "realtime"
+
+  - title: "تكامل Colab"
+    labels:
+      - "colab"
+
+  - title: "الاختبارات"
+    labels:
+      - "tests"
+
+  - title: "تحديث التبعيات"
+    labels:
+      - "dependencies"
+
+  - title: "أخرى"
+    labels:
+      - "*"
+
+exclude-labels:
+  - "stale"
+  - "duplicate"
+  - "invalid"
+  - "wontfix"
+  - "question"
+  - "size:XS"
+  - "size:S"
+  - "size:M"
+  - "size:L"
+  - "size:XL"
+  - "size:XXL"
+
+change-template: "- $TITLE @$AUTHOR (#$NUMBER)"
+change-title-escapes: '\<*_&'
+no-changes-template: "- لا تغييرات موسومة في هذا الإصدار."
+version-resolver:
+  major:
+    labels:
+      - "breaking"
+  minor:
+    labels:
+      - "enhancement"
+  patch:
+    labels:
+      - "bug"
+      - "security"
+      - "performance"
+  default: "patch"
+
+template: |
+  ## ما الجديد في v$RESOLVED_VERSION
+
+  $CHANGES
+
+  ## تنبيه الترقية
+
+  حزمة بايثون: `uv sync --all-groups` ثم (اختياري) `make env-gpu CUDA=cu128`.
+  على Colab: أعد تشغيل سطر التثبيت الموحد — يكفي ذلك.
+
+autolabeler:
+  - label: "enhancement"
+    branch:
+      - '/^feat[-\/].+/'
+  - label: "bug"
+    branch:
+      - '/^fix[-\/].+/'
+  - label: "documentation"
+    branch:
+      - '/^docs[-\/].+/'
+  - label: "ci"
+    branch:
+      - '/^ci[-\/].+/'
+  - label: "enhancement"
+    title:
+      - '/^feat(\(.+\))?:/'
+  - label: "bug"
+    title:
+      - '/^fix(\(.+\))?:/'
+  - label: "documentation"
+    title:
+      - '/^docs(\(.+\))?:/'
+  - label: "ci"
+    title:
+      - '/^ci(\(.+\))?:/'

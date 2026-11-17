@@ -1,0 +1,75 @@
+name: "تقرير خطأ"
+description: "أبلغ عن شيء لا يعمل كما هو متوقع"
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        شكراً على التبليغ. كلما زادت التفاصيل، أسرع الحل.
+        إن كانت المشكلة أثناء التشغيل على Google Colab، استخدم قالب
+        **«مشكلة Colab»** بدلاً من هذا.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: "ما الذي حدث؟"
+      description: "صف المشكلة: ماذا توقعت، وماذا حصل فعلاً."
+      placeholder: "كان يفترض أن ... لكنني حصلت على ..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: "خطوات إعادة الإنتاج"
+      description: "أدقّ تسلسل أوامر/نقرات يوصل إلى الخطأ."
+      placeholder: |
+        1. uv sync --all-groups
+        2. uv run rvc-platform web --port 8320
+        3. ...
+    validations:
+      required: true
+
+  - type: dropdown
+    id: environment
+    attributes:
+      label: "بيئة التشغيل"
+      options:
+        - "Google Colab"
+        - "Ubuntu + GPU (CUDA)"
+        - "Ubuntu CPU فقط"
+        - "Windows"
+        - "Docker"
+        - "أخرى"
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: "إصدار المنصة"
+      description: "مخرج `uv run rvc-platform install check` أو وسم git."
+      placeholder: "rvc-platform 1.0.0 / torch 2.7.1+cu128"
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: "السجلات / نص الخطأ"
+      description: "الصق النص الكامل (وليس صورة). يمكن طيّه في `<details>`."
+      render: shell
+
+  - type: textarea
+    id: context
+    attributes:
+      label: "سياق إضافي"
+      description: "تكوين configs/default.yaml مخصص؟ GPU من عدمه؟ منذ متى بدأت المشكلة؟"
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: "قبل الإرسال"
+      options:
+        - label: "بحثت في المشاكل المفتوحة/المغلقة ولم أجد تكراراً لها"
+          required: true
+        - label: "راجعت TROUBLESHOOTING.md ولم يحل المشكلة"
+          required: true

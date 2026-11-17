@@ -1,0 +1,47 @@
+# =============================================================================
+# pr-title.yml — enforces Conventional Commits-style PR titles so the
+# generated release notes stay parseable (used by release-drafter):
+#   allowed types: feat, fix, docs, style, refactor, perf, test, build,
+#                  ci, chore, revert — e.g. "feat: دعم استئناف التدريب"
+# =============================================================================
+name: PR title check
+
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: pr-title-${{ github.event.pull_request.number }}
+
+jobs:
+  title:
+    name: Validate PR title (conventional)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check PR title follows conventional commits
+        uses: amannn/action-semantic-pull-request@v5
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          types: |
+            feat
+            fix
+            docs
+            style
+            refactor
+            perf
+            test
+            build
+            ci
+            chore
+            revert
+          requireScope: false
+          subjectPattern: ^(?![A-Z]).+$
+          subjectPatternError: >
+            استخدم صيغة conventional commits مثل: `feat: وصف موجز` أو
+            `fix(api): تصحيح 401` — وابدأ الوصف بحرف صغير.

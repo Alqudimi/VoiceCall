@@ -1,0 +1,53 @@
+# mkdocs configuration — the documentation site is built by
+# .github/workflows/docs-pages.yml and served on GitHub Pages.
+# The build copies the repo's root *.md into docs/ first (README → index.md).
+site_name: Iraqi Voice Studio (VoiceCall)
+site_description: >-
+  منصة تحويل الصوت RVC v2 المتخصصة باللهجة العراقية — تدريب كامل، تحويل
+  ملفات، بث لحظي، وواجهة ويب عربية.
+site_url: https://alqudimi.github.io/VoiceCall/
+repo_name: Alqudimi/VoiceCall
+repo_url: https://github.com/Alqudimi/VoiceCall
+edit_uri: ""
+
+theme:
+  name: material
+  language: en
+  palette:
+    - scheme: default
+      primary: deep purple
+      accent: amber
+      toggle:
+        icon: material/weather-night
+        name: الوضع الداكن
+    - scheme: slate
+      primary: deep purple
+      accent: amber
+      toggle:
+        icon: material/weather-sunny
+        name: الوضع الفاتح
+  features:
+    - navigation.tabs
+    - navigation.top
+    - content.code.copy
+    - search.highlight
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - toc:
+      permalink: true
+
+nav:
+  - الرئيسة: index.md
+  - التثبيت: INSTALLATION.md
+  - التدريب: TRAINING.md
+  - البث اللحظي: REALTIME.md
+  - واجهة API: API.md
+  - الإعداد: CONFIGURATION.md
+  - البنية الداخلية: ARCHITECTURE.md
+  - الأعطال الشائعة: TROUBLESHOOTING.md
+  - المساهمة: CONTRIBUTING.md
+  - CI/CD: CI.md
+  - الأمان: SECURITY.md

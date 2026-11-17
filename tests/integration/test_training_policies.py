@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import gc
 import json
+import time
 
 import numpy as np
 import pytest
@@ -18,7 +19,7 @@ from rvc_platform.engine.rvc.models.commons import get_padding
 from rvc_platform.training import checkpointing
 from rvc_platform.training.run_config import TrainingRunConfig
 from rvc_platform.training.trainer import Trainer
-from rvc_platform.training.utils import HParams, stable_dataset_signature
+from rvc_platform.training.utils import stable_dataset_signature
 
 pytestmark = pytest.mark.slow
 
@@ -64,7 +65,6 @@ def _shrink(hps):
 
 
 def _make_run(project_env, n_chunks: int = 2):
-    from pathlib import Path
 
     sr = 40_000
     run_dir = project_env / "runs" / "policy"
@@ -298,6 +298,15 @@ def test_training_service_resume_with_checkpoint(project_env, tmp_path):
     persisted = json.loads((run_dir / "run_config.json").read_text(encoding="utf-8"))
     assert persisted["resume_from"], "resume_from must be persisted for the worker"
     assert "G_7.pth" in persisted["resume_from"]
+
+    # 'true' exits instantly but the OS may not have reaped it yet — wait for
+    # the worker process to be observed as exited before the next resume,
+    # otherwise ProcessManager.create() correctly refuses (single-instance).
+    trainer = svc.pm.get("trainer")
+    for _ in range(200):  # <= 2s
+        if trainer is None or not trainer.is_running():
+            break
+        time.sleep(0.01)
 
     # a nonexistent run fails cleanly (404 at the API layer)
     from rvc_platform.core.errors import TrainingError

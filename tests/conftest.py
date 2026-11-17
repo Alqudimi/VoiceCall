@@ -1,8 +1,6 @@
 """Shared fixtures: isolated project root per test, config reset, synthetic assets."""
 from __future__ import annotations
 
-import os
-from pathlib import Path
 
 import numpy as np
 import pytest

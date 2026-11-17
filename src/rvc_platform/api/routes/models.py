@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, File, HTTPException, Request, UploadFile
-from fastapi.responses import JSONResponse
 
 from rvc_platform.core.errors import ModelNotFoundError, SecurityError
 

@@ -1,0 +1,68 @@
+# =============================================================================
+# colab.yml — Google Colab integration validation
+# The Colab path (notebooks/RVC_Training_Colab.ipynb + scripts/colab/) is a
+# first-class feature of this platform, so it gets a dedicated gate:
+#   * notebook structure: valid JSON, >= 6 cells, no empty code cells
+#   * notebook must execute the official installer
+#   * every repo-relative file the notebook mentions must exist in the repo
+#   * installer must generate colab_wire_env.py and point at THIS repository
+#   * shellcheck + bash -n on the installer
+#   * (on main / schedule) the raw.githubusercontent installer URL must be
+#     reachable — proves the one-line curl command in the docs actually works
+# =============================================================================
+name: Colab
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "notebooks/**"
+      - "scripts/colab/**"
+      - ".github/workflows/colab.yml"
+      - "scripts/ci/check_colab_assets.py"
+  pull_request:
+    paths:
+      - "notebooks/**"
+      - "scripts/colab/**"
+      - ".github/workflows/colab.yml"
+      - "scripts/ci/check_colab_assets.py"
+  schedule:
+    - cron: "10 4 * * 1" # weekly: keep checking that the raw URL stays live
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: colab-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  colab-validation:
+    name: Notebook & installer consistency
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Run consistency checks (notebook ↔ installer ↔ repo)
+        run: python3 scripts/ci/check_colab_assets.py
+
+      - name: bash -n the installer
+        run: bash -n scripts/colab/install_colab.sh && echo "bash -n OK"
+
+      - name: shellcheck the installer
+        run: shellcheck scripts/colab/install_colab.sh && echo "shellcheck OK"
+
+      - name: Check the public one-line install URL is reachable
+        if: github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        run: |
+          url="https://raw.githubusercontent.com/${{ github.repository }}/main/scripts/colab/install_colab.sh"
+          echo "checking: $url"
+          if curl -fsSI --max-time 30 "$url" > /dev/null; then
+            echo "REACHABLE: $url"
+          else
+            echo "NOT REACHABLE: $url — was the installer pushed to main?"
+            exit 1
+          fi

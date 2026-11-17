@@ -1,0 +1,39 @@
+# =============================================================================
+# first-interaction.yml — a friendly welcome for first-time contributors,
+# on their first issue OR first pull request.
+# =============================================================================
+name: First interaction
+
+on:
+  issues:
+    types: [opened]
+  pull_request:
+    types: [opened]
+
+permissions:
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: first-interaction-${{ github.actor }}
+
+jobs:
+  greet:
+    name: Welcome message
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Greet the contributor
+        uses: actions/first-interaction@v1
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          issue-message: >
+            أهلاً وسهلاً! شكراً لفتحك أول مشكلة في هذا المستودع.
+            لتسريع المساعدة يرجى إرفاق: خطوات إعادة الإنتاج، مقتطف من
+            السجلات/الخطأ، وبيئة التشغيل (Colab / Ubuntu / Windows، إصدار
+            Python، وجود GPU من عدمه). راجع أيضاً TROUBLESHOOTING.md
+            و INSTALLATION.md فقد يكون الحل موجوداً فيها.
+          pr-message: >
+            شكراً لمساهمتك الأولى! رجاءً تأكد أن الاختبارات خضراء
+            (`make test` أو CI في طلب الدمج)، وحدّث التوثيق إن غيّرت
+            السلوك، وراجع CONTRIBUTING.md للتفاصيل.

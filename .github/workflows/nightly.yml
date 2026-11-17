@@ -1,0 +1,86 @@
+# =============================================================================
+# nightly.yml — daily health check of the platform (3:00 UTC)
+#   * tests        : the full suite again on the latest runner image — this
+#                    catches runner/OS drift and dependency rot between PRs
+#   * dep-drift    : `uv lock --upgrade` dry-run; if the lockfile can move,
+#                    the diff is attached as an artifact so the maintainer can
+#                    refresh dependencies deliberately (dependabot handles
+#                    per-package updates)
+#   * smoke        : `uv build` + wheel sanity from a fresh resolve
+# =============================================================================
+name: Nightly
+
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly
+  cancel-in-progress: false
+
+jobs:
+  tests:
+    name: Full test suite (nightly)
+    uses: ./.github/workflows/reusable-tests.yml
+
+  dependency-drift:
+    name: Dependency drift report
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Try upgrading the lockfile
+        run: uv lock --upgrade
+
+      - name: Check for drift
+        run: |
+          if git diff --quiet uv.lock; then
+            echo "No dependency drift — lockfile is already at the newest resolvable set."
+          else
+            echo "Dependency drift detected — full diff attached as artifact."
+            git diff uv.lock > dep-drift.patch
+            echo "### Dependency drift detected" >> "$GITHUB_STEP_SUMMARY"
+            echo '```diff' >> "$GITHUB_STEP_SUMMARY"
+            head -100 dep-drift.patch >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload drift patch artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dep-drift-${{ github.run_id }}
+          path: dep-drift.patch
+          if-no-files-found: ignore
+          retention-days: 30
+
+  packaging-smoke:
+    name: Packaging smoke (nightly)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Sync + build sdist/wheel
+        run: |
+          uv sync --frozen --all-groups --all-extras
+          uv build
+
+      - name: CLI smoke
+        run: uv run rvc-platform install check

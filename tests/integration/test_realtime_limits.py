@@ -5,7 +5,7 @@ import time
 
 import pytest
 
-from rvc_platform.application.realtime_service import RealtimeService, RealtimeSession
+from rvc_platform.application.realtime_service import RealtimeService
 from rvc_platform.core.errors import RealtimeError
 from rvc_platform.infrastructure.config.schema import RealtimeConfig
 from rvc_platform.infrastructure.persistence.model_repository import ModelRepository

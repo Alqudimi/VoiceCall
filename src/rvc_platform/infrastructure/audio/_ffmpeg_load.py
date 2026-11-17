@@ -9,11 +9,11 @@
 #   * asset paths routed through rvc_platform.infrastructure.paths
 #   * no algorithmic changes to numerics or model structure
 # --------------------------------------------------------------------------- #
-import platform, os
+import platform
+import os
 import ffmpeg
 import numpy as np
 import av
-from io import BytesIO
 import threading
 
 

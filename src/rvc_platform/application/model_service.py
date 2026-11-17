@@ -2,17 +2,14 @@
 from __future__ import annotations
 
 import logging
-import threading
 from pathlib import Path
 from typing import Any
 
 from rvc_platform.core.entities import ModelInfo
-from rvc_platform.core.errors import ModelNotFoundError, SecurityError
+from rvc_platform.core.errors import SecurityError
 from rvc_platform.engine.rvc import checkpoint as engine_ckpt
-from rvc_platform.infrastructure.audio.pipeline import AudioProcessingEngine
 from rvc_platform.infrastructure.persistence.model_repository import ModelRepository
 from rvc_platform.engine.rvc.inference import RVCInferenceEngine
-from rvc_platform.utils.device import DeviceProfile
 
 logger = logging.getLogger(__name__)
 

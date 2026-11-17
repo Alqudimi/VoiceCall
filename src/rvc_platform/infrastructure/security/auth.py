@@ -2,12 +2,10 @@
 from __future__ import annotations
 
 import secrets
-from pathlib import Path
 
 from fastapi import HTTPException, Request, WebSocket
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from fastapi.security import HTTPBearer
 
-from rvc_platform.core.errors import SecurityError
 
 _bearer = HTTPBearer(auto_error=False)
 

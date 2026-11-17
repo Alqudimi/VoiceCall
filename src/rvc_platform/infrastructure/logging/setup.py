@@ -4,7 +4,6 @@ from __future__ import annotations
 import logging
 import logging.handlers
 import sys
-from pathlib import Path
 
 from rvc_platform.infrastructure.config.loader import get_config
 from rvc_platform.infrastructure.paths import get_paths

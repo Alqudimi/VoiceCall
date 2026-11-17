@@ -12,7 +12,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Annotated, Optional
+from typing import Optional
 
 import typer
 from rich.console import Console
@@ -201,7 +201,7 @@ def env_gpu(cuda: str = typer.Argument("cu128", help="cu118|cu126|cu128")):
         console.print(f"[red]torch/torchaudio import failed after GPU install:\n"
                       f"{check.stderr.strip()[:500]}[/red]")
         raise typer.Exit(1)
-    out_lines = [l for l in check.stdout.strip().splitlines() if l]
+    out_lines = [line for line in check.stdout.strip().splitlines() if line]
     torch_ver = out_lines[0] if out_lines else "?"
     cuda_ok = len(out_lines) > 1 and out_lines[1].endswith("True")
     gpu_name = out_lines[2] if len(out_lines) > 2 else "-"
@@ -377,8 +377,6 @@ def train_start(
     ),
 ):
     """Start (or continue) a training run. Follows live progress on stdout."""
-    from rvc_platform.application.training_service import TrainingService
-    from rvc_platform.infrastructure.processes.manager import ProcessManager
     from rvc_platform.training.run_config import TrainingRunConfig
 
     paths = get_paths()
@@ -405,9 +403,6 @@ def train_start(
     # run in-process so the CLI shows live JSONL events; the worker registers
     # its pid in temp/trainer.pid so `train stop` reaches it from any terminal
     cfg.save()
-    import threading
-
-    stop_requested = {"flag": False}
 
     def _forward_events() -> None:
         # the trainer runs in this process; worker_main blocks until done

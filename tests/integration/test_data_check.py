@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import numpy as np
-import pytest
 import soundfile as sf
 
 from rvc_platform.training.preprocess import DatasetChecker

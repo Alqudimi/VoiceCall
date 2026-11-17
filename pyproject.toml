@@ -86,3 +86,19 @@ markers = [
     "gpu: requires a physical CUDA GPU (skipped automatically otherwise)",
     "slow: long-running integration test",
 ]
+
+# --------------------------------------------------------------------------
+# Linting (used by .github/workflows/lint.yml — runs via `uvx ruff`)
+# Deliberately minimal & explicit: real defects only (unused imports,
+# undefined names, syntax errors). Stylistic rules are NOT enforced.
+# src/rvc_platform/engine/rvc is vendored upstream-derived code (see its
+# ATTRIBUTION.md) and is intentionally excluded from lint expectations.
+# --------------------------------------------------------------------------
+[tool.ruff]
+target-version = "py312"
+line-length = 120
+extend-exclude = ["src/rvc_platform/engine/rvc", "notebooks"]
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]
+ignore = ["E501"]

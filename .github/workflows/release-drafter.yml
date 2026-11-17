@@ -1,0 +1,36 @@
+# =============================================================================
+# release-drafter.yml — keeps a draft "next release" note updated on main
+# Pull requests labeled by labeler.yml / reviewers are automatically grouped
+# into a running draft (see .github/release-drafter.yml for the layout).
+# When you are ready to ship: publish the draft, then tag it `vX.Y.Z` to run
+# the real release pipeline (release.yml).
+# =============================================================================
+name: Release drafter
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: read
+
+concurrency:
+  group: release-drafter
+
+jobs:
+  draft:
+    name: Update next-release draft
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Draft (or update) the next release
+        uses: release-drafter/release-drafter@v6
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          config-name: release-drafter.yml

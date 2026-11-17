@@ -1,0 +1,56 @@
+name: "طلب ميزة"
+description: "اقترح تحسيناً أو ميزة جديدة للمنصة"
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        صف المشكلة/الحاجة أولاً ثم الحل المقترح. الميزات التي تخدم
+        التدريب والتحويل والبث اللحظي باللهجة العراقية أولوية.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: "المشكلة أو الحاجة"
+      description: "ما الذي يصعب أو يستحيل إنجازه اليوم؟"
+      placeholder: "أحتاج أن ..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: "الحل المقترح"
+      description: "كيف تريد أن تعمل؟ سلوك واجهة/CLI/API."
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: "بدائل جرّبتها"
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: "الجزء المعني"
+      options:
+        - "التدريب (train / checkpoints / استئناف)"
+        - "تحويل الملفات (inference)"
+        - "البث اللحظي (realtime / WebSocket)"
+        - "واجهة الويب"
+        - "CLI"
+        - "REST/API"
+        - "تكامل Colab"
+        - "التثبيت/البيئة"
+        - "أخرى"
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: "قبل الإرسال"
+      options:
+        - label: "بحثت في المشاكل والطلبات السابقة ولم أجد تكراراً"
+          required: true

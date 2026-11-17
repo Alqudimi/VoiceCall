@@ -10,7 +10,6 @@ import json
 import threading
 import time
 from pathlib import Path
-from typing import Any
 
 from rvc_platform.core.entities import JobState, TrainingProgress
 from rvc_platform.core.errors import TrainingError
@@ -19,7 +18,6 @@ from rvc_platform.infrastructure.processes.manager import ProcessManager
 from rvc_platform.training import checkpointing
 from rvc_platform.training.data_pipeline import DataPipeline
 from rvc_platform.training.run_config import TrainingRunConfig
-from rvc_platform.training.checkpointing import read_state
 
 _PY = "python"
 

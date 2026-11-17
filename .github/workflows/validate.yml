@@ -1,0 +1,162 @@
+# =============================================================================
+# validate.yml — structural validation of every non-Python asset in the repo
+#   * shellcheck + bash -n : all committed shell scripts
+#   * PowerShell parser    : scripts/windows/install_windows.ps1
+#   * node --check         : every web UI JS file (syntax level)
+#   * python compileall    : byte-compiles ALL Python (incl. vendored engine)
+#   * config parsing       : configs/default.yaml + configs/training/*.json
+#   * notebook JSON        : valid JSON, non-empty cells
+#   * actionlint           : validates every .github/workflows/*.yml file
+# =============================================================================
+name: Validate repo
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: validate-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  shell-scripts:
+    name: Shell & PowerShell scripts
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: bash -n (syntax) on all shell scripts
+        run: |
+          status=0
+          for f in $(git ls-files '*.sh'); do
+            bash -n "$f" && echo "bash -n OK: $f" || { echo "bash -n FAILED: $f"; status=1; }
+          done
+          exit $status
+
+      - name: shellcheck (static analysis) on all shell scripts
+        run: |
+          status=0
+          for f in $(git ls-files '*.sh'); do
+            shellcheck "$f" && echo "shellcheck OK: $f" || { echo "shellcheck FAILED: $f"; status=1; }
+          done
+          exit $status
+
+      - name: Parse PowerShell installer (syntax check)
+        shell: pwsh
+        run: |
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path 'scripts/windows/install_windows.ps1'),
+            [ref]$null, [ref]$errors) | Out-Null
+          if ($errors -and $errors.Count -gt 0) {
+            Write-Host "PowerShell parse errors:"
+            $errors | ForEach-Object { Write-Host " - $($_.Message)" }
+            exit 1
+          }
+          Write-Host "PowerShell syntax OK: scripts/windows/install_windows.ps1"
+
+  python-compile:
+    name: Byte-compile all Python
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: compileall (catches SyntaxError anywhere, vendored included)
+        run: uv run --no-project python -m compileall -q src tests scripts/dev_vendor_rvc.py
+
+  web-ui-js:
+    name: Web UI JavaScript
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: node --check every web JS file
+        run: |
+          status=0
+          files=$(git ls-files 'src/rvc_platform/web/**/*.js')
+          if [ -z "$files" ]; then echo "no JS files found"; exit 1; fi
+          for f in $files; do
+            node --check "$f" && echo "node --check OK: $f" || { echo "node --check FAILED: $f"; status=1; }
+          done
+          exit $status
+
+  configs-and-notebook:
+    name: Configs & notebook JSON
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Parse configs (YAML + JSON) and the Colab notebook
+        run: |
+          uv run --no-project --with pyyaml python - <<'PY'
+          import json
+          from pathlib import Path
+          import yaml
+
+          failures = []
+
+          for yml in sorted(Path("configs").rglob("*.yaml")):
+              try:
+                  yaml.safe_load(yml.read_text(encoding="utf-8"))
+                  print(f"yaml OK: {yml}")
+              except Exception as exc:
+                  failures.append(f"{yml}: {exc}")
+
+          for jsn in sorted(Path("configs").rglob("*.json")):
+              try:
+                  json.loads(jsn.read_text(encoding="utf-8"))
+                  print(f"json OK: {jsn}")
+              except Exception as exc:
+                  failures.append(f"{jsn}: {exc}")
+
+          nb = Path("notebooks/RVC_Training_Colab.ipynb")
+          try:
+              parsed = json.loads(nb.read_text(encoding="utf-8"))
+              cells = parsed.get("cells", [])
+              assert cells, "notebook has no cells"
+              assert parsed.get("nbformat") in (3, 4), f"nbformat={parsed.get('nbformat')}"
+              empty = [i for i, c in enumerate(cells)
+                       if c.get("cell_type") == "code"
+                       and not "".join(c.get("source", [])).strip()]
+              assert not empty, f"empty code cells at indices {empty}"
+              print(f"notebook OK: {len(cells)} cells")
+          except Exception as exc:
+              failures.append(f"notebook: {exc}")
+
+          if failures:
+              print("FAILURES:")
+              for f in failures:
+                  print(" -", f)
+              raise SystemExit(1)
+          print("ALL CONFIGS & NOTEBOOK OK")
+          PY
+
+  actionlint:
+    name: Validate workflow files (actionlint)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install actionlint (official installer script)
+        run: bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
+
+      - name: Run actionlint on .github/workflows
+        run: actionlint -color

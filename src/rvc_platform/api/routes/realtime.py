@@ -8,7 +8,6 @@ import secrets
 
 from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
 
-from rvc_platform.core.errors import RealtimeError
 
 logger = logging.getLogger(__name__)
 
@@ -59,7 +58,6 @@ async def realtime_ws(ws: WebSocket) -> None:
         return
     await ws.accept()
     session = None
-    loop = asyncio.get_running_loop()
     try:
         while True:
             message = await ws.receive()

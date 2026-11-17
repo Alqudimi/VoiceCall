@@ -1,0 +1,41 @@
+# =============================================================================
+# size-label.yml — adds size/XS..XXL labels to PRs from the number of changed
+# lines, so reviewers can triage quickly. Labels are also created upfront by
+# label-sync.yml so they exist before first use.
+# =============================================================================
+name: PR size label
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: size-label-${{ github.event.pull_request.number }}
+
+jobs:
+  size-label:
+    name: Apply size label
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Label PR by size (lines changed)
+        uses: Codelytv/pr-size-labeler@v1
+        with:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          xs_label: "size:XS"
+          xs_max_label: "0"
+          s_label: "size:S"
+          s_max_label: "10"
+          m_label: "size:M"
+          m_max_label: "50"
+          l_label: "size:L"
+          l_max_label: "200"
+          xl_label: "size:XL"
+          xl_max_label: "800"
+          message_if_xl: >
+            شكراً على مساهمتك! هذا طلب دمج كبير جداً (>800 سطر) — يرجى تقسيمه
+            إن أمكن لتسهيل المراجعة.

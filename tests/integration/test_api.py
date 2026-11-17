@@ -1,12 +1,9 @@
 """API integration tests via FastAPI TestClient (real service graph)."""
 from __future__ import annotations
 
-import numpy as np
 import pytest
-import soundfile as sf
 from fastapi.testclient import TestClient
 
-from rvc_platform.core.errors import ModelNotFoundError
 
 
 @pytest.fixture()

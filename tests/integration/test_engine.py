@@ -9,10 +9,8 @@ documented in tests/conftest.py.
 """
 from __future__ import annotations
 
-import time
 
 import numpy as np
-import pytest
 import torch
 
 from rvc_platform.core.entities import ConversionSettings

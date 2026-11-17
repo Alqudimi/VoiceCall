@@ -1,7 +1,6 @@
 """Audio I/O + path/security validation tests."""
 from __future__ import annotations
 
-from pathlib import Path
 
 import numpy as np
 import pytest
@@ -9,7 +8,7 @@ import soundfile as sf
 
 from rvc_platform.core.errors import ConversionError, SecurityError
 from rvc_platform.infrastructure.audio import io as audio_io
-from rvc_platform.infrastructure.paths import Paths, get_paths
+from rvc_platform.infrastructure.paths import get_paths
 
 
 def test_paths_redirect_and_singleton(project_env, monkeypatch):

@@ -1,0 +1,54 @@
+# =============================================================================
+# stale.yml — marks dormant issues/PRs as stale and closes them after a grace
+# period, keeping the tracker actionable (GitHub's classic bot, actions/stale)
+#   * 30 days without activity  → labelled "stale" + a reminder comment
+#   * +7 more days without reply → closed (issues) / closed (PRs)
+# Exemptions: pinned, security, upstream-blocked, and draft PRs.
+# =============================================================================
+name: Stale
+
+on:
+  schedule:
+    - cron: "30 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: stale
+
+jobs:
+  stale:
+    name: Mark & close stale items
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Run stale bot (issues)
+        uses: actions/stale@v9
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          days-before-stale: 30
+          days-before-close: 7
+          stale-issue-message: >
+            بوت تلقائي: لم يظهر أي نشاط على هذه المشكلة خلال 30 يوماً،
+            لذلك وُسمت بـ "stale". أضف تعليقاً أو أزل الوسم لإبقائها مفتوحة،
+            وستُغلق تلقائياً بعد 7 أيام دون تفاعل.
+          close-issue-message: >
+            بوت تلقائي: أُغلقت هذه المشكلة لعدم النشاط (7 أيام بعد وسم stale).
+            إن كانت ما تزال قائمة، أعد فتحها مع تفاصيل محدّثة — يسرّنا المتابعة.
+          stale-issue-label: stale
+          exempt-issue-labels: pinned,security,upstream,lifecycle/keep
+          stale-pr-message: >
+            بوت تلقائي: لم يظهر أي نشاط على طلب الدمج خلال 30 يوماً، فوسِم بـ "stale".
+            حدّثه أو أضف تعليقاً لإبقائه حياً، وإلا أُغلق بعد 7 أيام.
+          close-pr-message: >
+            بوت تلقائي: أُغلق طلب الدمج لعدم النشاط. افتحه مجدداً عندما تجهز
+            لاستكماله.
+          stale-pr-label: stale
+          exempt-pr-labels: pinned,security,upstream,dependencies,lifecycle/keep
+          exempt-draft-pr: true
+          exempt-milestones: true
+          days-before-issue-close: 7
+          days-before-pr-close: 7

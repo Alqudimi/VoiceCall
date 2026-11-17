@@ -47,7 +47,6 @@ def denoise_spectral_gate(
     frame = int(sr * frame_ms / 1000)
     if frame < 64:
         frame = 256
-    hop = frame
     # pad to frame multiple
     pad = (-len(audio)) % frame
     padded = np.pad(audio, (0, pad))

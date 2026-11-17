@@ -1,0 +1,70 @@
+# =============================================================================
+# dependabot.yml — automated dependency updates for all ecosystems in the repo
+#   * uv             : python dependencies (uv.lock / pyproject.toml)
+#   * github-actions : versions of the actions used by .github/workflows/*
+#   * docker         : base images referenced by Dockerfile
+# Patch/minor dependabot PRs are auto-merged by auto-merge.yml once CI is green;
+# major version bumps are left for a human review.
+# =============================================================================
+version: 2
+
+updates:
+  - package-ecosystem: "uv"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "saturday"
+      time: "05:00"
+      timezone: "Asia/Baghdad"
+    open-pull-requests-limit: 10
+    target-branch: "main"
+    commit-message:
+      prefix: "chore(deps)"
+      prefix-development: "chore(deps-dev)"
+    labels:
+      - "dependencies"
+    groups:
+      python-major-langs:
+        patterns:
+          - "torch"
+          - "torchaudio"
+          - "numpy"
+          - "scipy"
+          - "librosa"
+      python-web:
+        patterns:
+          - "fastapi"
+          - "uvicorn"
+          - "pydantic"
+          - "typer"
+          - "rich"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "saturday"
+      time: "05:00"
+      timezone: "Asia/Baghdad"
+    open-pull-requests-limit: 10
+    target-branch: "main"
+    commit-message:
+      prefix: "chore(ci)"
+    labels:
+      - "dependencies"
+      - "ci"
+
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "saturday"
+      time: "05:00"
+      timezone: "Asia/Baghdad"
+    open-pull-requests-limit: 5
+    target-branch: "main"
+    commit-message:
+      prefix: "chore(docker)"
+    labels:
+      - "dependencies"
+      - "docker"

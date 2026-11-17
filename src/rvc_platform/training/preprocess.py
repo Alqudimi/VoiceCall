@@ -22,7 +22,7 @@ from scipy import signal
 from scipy.io import wavfile
 
 from rvc_platform.core.errors import DatasetError
-from rvc_platform.infrastructure.audio.io import load_audio, probe_ffmpeg
+from rvc_platform.infrastructure.audio.io import load_audio
 from rvc_platform.infrastructure.audio.slicer import Slicer
 
 logger = logging.getLogger(__name__)
@@ -221,7 +221,7 @@ class DatasetPreprocessor:
         for i, path in enumerate(files):
             try:
                 chunks += self.process_file(path, str(i))
-            except Exception as exc:
+            except Exception:
                 logger.exception("preprocess failed: %s", path)
                 failed.append(path.name)
             if progress:

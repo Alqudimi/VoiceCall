@@ -1,0 +1,41 @@
+# Keep the image minimal — only what hatchling needs to build the package
+.git
+.github
+.venv
+**/__pycache__
+**/*.pyc
+**/*.pyo
+.pytest_cache
+.coverage
+coverage.xml
+dist
+site
+docs
+
+# test & dev trees (not shipped in the image)
+tests
+notebooks
+scripts
+Makefile
+
+# never bake models / user data / big binaries
+logs
+runs
+data
+assets
+models
+*.pth
+*.pt
+*.onnx
+*.index
+*.ckpt
+
+# docs — README.md is required by hatchling metadata, everything else is not
+*.md
+!README.md
+
+# local overrides / secrets
+configs/user.yaml
+.env
+.colab_env
+.devref

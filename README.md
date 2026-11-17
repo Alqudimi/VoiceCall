@@ -2,6 +2,15 @@
 
 **الإصدار:** 1.0.0 | **اسم الحزمة:** `rvc-platform` | **الترخيص:** MIT
 
+[![CI](https://github.com/Alqudimi/VoiceCall/actions/workflows/ci.yml/badge.svg)](https://github.com/Alqudimi/VoiceCall/actions/workflows/ci.yml)
+[![Lint](https://github.com/Alqudimi/VoiceCall/actions/workflows/lint.yml/badge.svg)](https://github.com/Alqudimi/VoiceCall/actions/workflows/lint.yml)
+[![Colab](https://github.com/Alqudimi/VoiceCall/actions/workflows/colab.yml/badge.svg)](https://github.com/Alqudimi/VoiceCall/actions/workflows/colab.yml)
+[![Security](https://github.com/Alqudimi/VoiceCall/actions/workflows/security.yml/badge.svg)](https://github.com/Alqudimi/VoiceCall/actions/workflows/security.yml)
+[![CodeQL](https://github.com/Alqudimi/VoiceCall/actions/workflows/codeql.yml/badge.svg)](https://github.com/Alqudimi/VoiceCall/actions/workflows/codeql.yml)
+[![Docker](https://github.com/Alqudimi/VoiceCall/actions/workflows/docker.yml/badge.svg)](https://github.com/Alqudimi/VoiceCall/actions/workflows/docker.yml)
+[![Docs](https://github.com/Alqudimi/VoiceCall/actions/workflows/docs-pages.yml/badge.svg)](https://github.com/Alqudimi/VoiceCall/actions/workflows/docs-pages.yml)
+[![Nightly](https://github.com/Alqudimi/VoiceCall/actions/workflows/nightly.yml/badge.svg)](https://github.com/Alqudimi/VoiceCall/actions/workflows/nightly.yml)
+
 منصة إنتاجية (production-grade) لتحويل الصوت (Voice Conversion) مبنية على محرك RVC v2،
 متخصصة في اللهجة العراقية: خط تدريب كامل، تحويل ملفات، بث لحظي عبر WebSocket،
 وواجهة ويب عربية بواجهة RTL، مع واجهة سطر أوامر موحدة وواجهة API كاملة.
@@ -23,6 +32,8 @@
 | [CONFIGURATION.md](CONFIGURATION.md) | كل مفاتيح الإعداد ومتغيرات البيئة |
 | [TROUBLESHOOTING.md](TROUBLESHOOTING.md) | الأعطال الشائعة وحلولها |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | دليل المساهمة في الكود |
+| [CI.md](CI.md) | منظومة GitHub Actions الكاملة (CI/CD/الأمان) |
+| [SECURITY.md](SECURITY.md) | سياسة الأمان والإبلاغ عن الثغرات |
 | ARCHITECTURE.md | بنية النظام الداخلية (وثيقة مستقلة) |
 
 ---

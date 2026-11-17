@@ -13,7 +13,6 @@ from typing import Callable
 
 from rvc_platform.core.errors import DatasetError
 from rvc_platform.engine.rvc.index import build_index, newest_added_index
-from rvc_platform.infrastructure.paths import get_paths
 from rvc_platform.training import feature_extract
 from rvc_platform.training.preprocess import DatasetChecker, DatasetPreprocessor
 from rvc_platform.training.run_config import TrainingRunConfig
@@ -92,7 +91,6 @@ class DataPipeline:
     def persist_config(self) -> dict:
         cfg_path = self.config.save()
         hps = self.config.to_hparams()
-        import json
 
         model_json = {
             "train": hps.train,

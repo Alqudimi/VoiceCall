@@ -22,7 +22,7 @@ def _make_fake_binary(path, script: str) -> None:
 def fake_cloudflared(tmp_path, monkeypatch):
     """A cloudflared stub that prints a trycloudflare URL then sleeps."""
     bin_dir = tmp_path / "bin"
-    script = f"""\
+    script = """\
     #!/usr/bin/env bash
     echo "2024-01-01T00:00:00Z INF +--------------------------------------------------------------------------------------------+"
     echo "2024-01-01T00:00:00Z INF |  Your quick Tunnel has been created! Visit it at: https://demo-test-quick.trycloudflare.com     |"
@@ -99,7 +99,7 @@ def test_start_fails_without_binary(tmp_path, monkeypatch):
 def test_custom_binary_name(tmp_path):
     pm = ProcessManager(tmp_path / "logs")
     svc = TunnelService(pm, 8320, binary="my-cloudflared-x")
-    assert svc.binary is "my-cloudflared-x"
+    assert svc.binary == "my-cloudflared-x"
     # not installed -> unavailable
     assert svc.binary_available() is False
 

@@ -1,0 +1,46 @@
+# =============================================================================
+# auto-merge.yml — automatic merge of GREEN Dependabot PRs.
+# When dependabot opens a dependency update (patch/minor) and CI passes on it,
+# this workflow enables GitHub auto-merge; the PR merges itself the moment
+# all required checks and approvals are satisfied. Major bumps always need a
+# human. (Dependabot PRs receive the `dependencies` label automatically.)
+# =============================================================================
+name: Dependabot auto-merge
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: write
+  pull-requests: write
+  checks: read
+
+concurrency:
+  group: auto-merge-${{ github.event.pull_request.number }}
+
+jobs:
+  auto-merge:
+    name: Enable auto-merge for safe dependabot updates
+    if: github.actor == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Fetch dependabot metadata
+        id: metadata
+        uses: dependabot/fetch-metadata@v2
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          skip-commit-verification: true
+
+      - name: Enable auto-merge for patch/minor updates
+        if: steps.metadata.outputs.update-type == 'version-update:semver-patch'
+             || steps.metadata.outputs.update-type == 'version-update:semver-minor'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: |
+          echo "update-type: ${{ steps.metadata.outputs.update-type }}"
+          gh pr edit "$PR_URL" --add-label "dependencies" || true
+          gh pr merge --auto --merge "$PR_URL"
+          echo "auto-merge enabled — the PR merges itself once CI is green."

@@ -19,9 +19,8 @@ import threading
 import time
 import warnings
 from pathlib import Path
-from typing import Any, Callable
+from typing import Callable
 
-import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
@@ -436,7 +435,7 @@ class Trainer:
     # ------------------------------------------------------------------ checkpointing
     def _checkpoint(self, net_g, net_d, optim_g, optim_d, sched_g, sched_d,
                     scaler, epoch: int, final: bool, emergency: bool = False) -> dict:
-        step_name = self.global_step if not final else f"final"
+        step_name = self.global_step if not final else "final"
         g_path = self.checkpoint_dir / f"G_{step_name}.pth"
         d_path = self.checkpoint_dir / f"D_{step_name}.pth"
         checkpointing.save_full(g_path, net_g, optim_g, sched_g, scaler,

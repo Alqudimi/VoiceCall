@@ -1,0 +1,72 @@
+name: "مشكلة Colab"
+description: "أبلغ عن فشل أثناء التشغيل على Google Colab"
+labels: ["bug", "colab"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        هذا القالب مخصص لمشاكل Google Colab تحديداً (المُثبّت الموحد،
+        الـ notebook الرسمي، Drive، الـ tunnel). الصق النص كما هو —
+        الرسائل التي تبدأ بـ `[colab]` مهمة جداً للتشخيص.
+
+  - type: dropdown
+    id: stage
+    attributes:
+      label: "في أي مرحلة حدثت المشكلة؟"
+      options:
+        - "سطر التثبيت الموحد (curl ... install_colab.sh | bash)"
+        - "خلية التثبيت داخل الـ notebook (!bash scripts/colab/install_colab.sh)"
+        - "خلية exec(open('colab_wire_env.py').read()) — ربط Drive"
+        - "تنزيل الأصول (HuBERT / RMVPE / pretrained_v2)"
+        - "تحضير البيانات (data-check / prepare-dataset)"
+        - "التدريب (train start)"
+        - "تشغيل الويب (rvc-platform web --tunnel)"
+        - "فتح الموقع العام (الـ tunnel)"
+        - "أخرى"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: gpu
+    attributes:
+      label: "نوع الـ runtime"
+      options:
+        - "GPU — T4"
+        - "GPU — A100/L4"
+        - "CPU (بدون تسريع)"
+        - "غير متأكد"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: drive
+    attributes:
+      label: "هل ربطت Google Drive؟"
+      options:
+        - "نعم — وأريد الاستمرارية (checkpoints/بيانات على Drive)"
+        - "لا — جلسة مؤقتة فقط"
+        - "حاولت وظهر خطأ الربط"
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: "السجل الكامل / رسالة الخطأ"
+      description: "من فتح الخلية حتى الفشل — الصق النص الكامل. الرسائل التي تبدأ بـ [colab] أساسية."
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: "ماذا كان يُفترض أن يحدث؟"
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: "قبل الإرسال"
+      options:
+        - label: "راجعت TROUBLESHOOTING.md وقسم Colab في INSTALLATION.md"
+          required: true
+        - label: "أعدت تشغيل الخلية/الـ runtime مرة أخرى قبل الإبلاغ"
+          required: true

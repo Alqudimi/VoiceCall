@@ -1,0 +1,49 @@
+# =============================================================================
+# lint.yml — static quality gates for the Python code base
+#   * ruff  : real defects only (unused imports, undefined names, E7/E9)
+#             config lives in pyproject.toml [tool.ruff] — deliberately minimal;
+#             the vendored engine (src/rvc_platform/engine/rvc) is excluded.
+#   * codespell: typo scanning for source + docs (config: .codespellrc)
+# Triggers: every push to main and every pull request.
+# =============================================================================
+name: Lint
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lint-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  ruff:
+    name: ruff (defects only)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Run ruff via uvx (no project env needed)
+        run: uvx ruff check .
+
+      - name: Ruff statistics (informational)
+        if: always()
+        run: uvx ruff check . --statistics || true
+
+  codespell:
+    name: codespell (typos)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Run codespell (config from .codespellrc)
+        run: uvx codespell .

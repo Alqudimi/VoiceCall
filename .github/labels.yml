@@ -1,0 +1,129 @@
+# =============================================================================
+# labels.yml — the canonical label set for the repository.
+# label-sync.yml creates / updates these on GitHub automatically.
+# The same names are referenced by: labeler.yml (area labels),
+# release-drafter.yml (release sections), stale.yml (exemptions),
+# size-label.yml (size labels).
+# =============================================================================
+- name: bug
+  color: "d73a4a"
+  description: "شيء لا يعمل كما هو متوقع"
+
+- name: enhancement
+  color: "a2eeef"
+  description: "ميزة جديدة أو تحسين وظيفي"
+
+- name: performance
+  color: "0e8a16"
+  description: "تحسين الأداء أو زمن الاستجابة"
+
+- name: documentation
+  color: "0075ca"
+  description: "تحسينات على التوثيق"
+
+- name: security
+  color: "d94c2e"
+  description: "مسألة أمنية أو تعزيز أمني"
+
+- name: question
+  color: "d876e3"
+  description: "استفسار يحتاج توضيحاً"
+
+- name: duplicate
+  color: "cfd3d7"
+  description: "مشكلة أو طلب مكرر"
+
+- name: invalid
+  color: "e4e669"
+  description: "بلاغ غير صحيح أو بلا معلومات كافية"
+
+- name: wontfix
+  color: "ffffff"
+  description: "لن يُعالج — خارج النطاق الحالي"
+
+- name: upstream
+  color: "5319e7"
+  description: "محجوز بانتظار مشروع/مكتبة خارجية"
+
+- name: pinned
+  color: "b60205"
+  description: "مثبت — لا يُغلق تلقائياً (مستثنى من stale)"
+
+- name: "lifecycle/keep"
+  color: "b0b814"
+  description: "إبقاء مفتوحاً رغم عدم النشاط (مستثنى من stale)"
+
+- name: stale
+  color: "cccccc"
+  description: "بلا نشاط مؤخراً — يُغلق إن لم يُتفاعل معه"
+
+# ---- area labels (applied automatically by labeler.yml) ----
+- name: ci
+  color: "e99695"
+  description: "تغيير في GitHub Actions / البنية التحتية للبناء"
+
+- name: colab
+  color: "fbca04"
+  description: "تكامل Google Colab (notebook / installer)"
+
+- name: web-ui
+  color: "c5def5"
+  description: "واجهة الويب (HTML/CSS/JS)"
+
+- name: api
+  color: "1d76db"
+  description: "واجهة REST/WebSocket"
+
+- name: realtime
+  color: "5ebef0"
+  description: "البث اللحظي وزمن الاستجابة"
+
+- name: training
+  color: "5319e7"
+  description: "خط التدريب (preprocess/features/GAN)"
+
+- name: engine
+  color: "b03060"
+  description: "محرك التحويل RVC (incl. vendored)"
+
+- name: tests
+  color: "26a69a"
+  description: "الاختبارات و fixtures"
+
+- name: scripts
+  color: "f9d0c4"
+  description: "سكربتات التثبيت والأدوات"
+
+- name: docker
+  color: "0db7ed"
+  description: "صورة الحاوية Dockerfile"
+
+- name: dependencies
+  color: "0366d6"
+  description: "تحديث تبعيات (dependabot)"
+
+# ---- size labels (applied by size-label.yml) ----
+- name: "size:XS"
+  color: "ededed"
+  description: "0–9 سطراً"
+- name: "size:S"
+  color: "ededed"
+  description: "10–49 سطراً"
+- name: "size:M"
+  color: "ededed"
+  description: "50–199 سطراً"
+- name: "size:L"
+  color: "ededed"
+  description: "200–799 سطراً"
+- name: "size:XL"
+  color: "ededed"
+  description: "800+ سطراً"
+
+# ---- contribution friendliness ----
+- name: "good first issue"
+  color: "7057ff"
+  description: "بداية جيدة للمساهمين الجدد"
+
+- name: "help wanted"
+  color: "008672"
+  description: "نبحث عن مساعدة في إنجازه"

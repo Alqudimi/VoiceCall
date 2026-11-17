@@ -1,0 +1,44 @@
+# =============================================================================
+# todo-to-issue.yml — scans code changes for TODO/ FIXME/ NOTE: markers and
+# turns them into tracked issues, so known gaps are never forgotten.
+#   * runs on pushes to main that touch src/ or scripts/
+#   * closes the issue automatically if the marker is later removed
+#   * Arabic markers are NOT recognised — use TODO/FIXME in English inside code
+# =============================================================================
+name: TODO → issue
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "scripts/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: todo-to-issue
+
+jobs:
+  todos:
+    name: Convert TODO/FIXME markers to issues
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Scan for TODO markers
+        uses: alstr/todo-to-issue-action@master
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          AUTO_ASSIGN: "false"
+          CLOSE_ISSUES: "true"
+          IDENTIFIER: "TODO"
+          LABEL: |
+            enhancement
+          EXCLUDE_PATTERN: "^(uv\\.lock|\\.venv|dist)/"

@@ -1,0 +1,63 @@
+# =============================================================================
+# markdown-links.yml — weekly link health check across all documentation,
+# using lychee. ADVISORY ONLY (continue-on-error): external links rot for
+# reasons outside our control, so this reports without failing the pipeline.
+# =============================================================================
+name: Markdown links
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "*.md"
+  schedule:
+    - cron: "20 4 * * 2"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: markdown-links
+  cancel-in-progress: true
+
+jobs:
+  links:
+    name: lychee link check (advisory)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    continue-on-error: true
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Run lychee on all markdown files
+        uses: lycheeverse/lychee-action@v1
+        with:
+          args: >-
+            --verbose --no-progress --max-retries 2 --timeout 20
+            --exclude "localhost|127\.0\.0\.1|trycloudflare\.com"
+            --exclude-file .lychee-ignore
+            "./**/*.md"
+          output: lychee.out
+          format: markdown
+          fail: false
+
+      - name: Upload lychee report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lychee-report-${{ github.run_id }}
+          path: lychee.out
+          if-no-files-found: ignore
+          retention-days: 30
+
+      - name: Link check summary
+        if: always()
+        run: |
+          if [ -f lychee.out ]; then
+            echo "### Link check (advisory)" >> "$GITHUB_STEP_SUMMARY"
+            echo '```text' >> "$GITHUB_STEP_SUMMARY"
+            tail -30 lychee.out >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+          fi

@@ -1,0 +1,100 @@
+# =============================================================================
+# ci.yml — main continuous integration
+#   * full test suite (unit + integration) with coverage  [via reusable-tests]
+#   * packaging smoke: `uv build` wheel/sdist sanity + CLI/import smoke
+# Triggers: every push to main and every pull request.
+# =============================================================================
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  tests:
+    name: Tests (unit + integration)
+    uses: ./.github/workflows/reusable-tests.yml
+
+  smoke:
+    name: Packaging & CLI smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install uv (with dependency cache)
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Sync environment from lockfile
+        run: uv sync --frozen --all-groups --all-extras
+
+      - name: Build distribution (sdist + wheel)
+        run: uv build
+
+      - name: Inspect wheel contents & entry points
+        run: |
+          uv run python - <<'PY'
+          import glob, zipfile
+          wheel = glob.glob("dist/*.whl")[0]
+          names = zipfile.ZipFile(wheel).namelist()
+          assert any(n == "rvc_platform/__init__.py" for n in names), "wheel is missing the package"
+          ep = [n for n in names if n.endswith("entry_points.txt")]
+          assert ep, "wheel is missing entry_points.txt"
+          content = zipfile.ZipFile(wheel).read(ep[0]).decode()
+          assert "rvc-platform" in content, f"console script rvc-platform missing: {content!r}"
+          print(f"wheel OK: {wheel} ({len(names)} files, entry point present)")
+          PY
+
+      - name: CLI smoke — help / version / env info / install check
+        run: |
+          uv run rvc-platform --help
+          uv run rvc-platform install check
+          uv run rvc-platform env info
+
+      - name: Import smoke — API app, Colab runner, web assets
+        run: |
+          uv run python - <<'PY'
+          import rvc_platform.api.app
+          import rvc_platform.colab.colab_runner
+          from rvc_platform.infrastructure.paths import paths
+          print("IMPORT SMOKE OK")
+          print("web ui present:", (paths.static_dir / "index.html").exists() if hasattr(paths, "static_dir") else "n/a")
+          PY
+
+      - name: Upload dist artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-smoke-${{ github.sha }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
+
+  summary:
+    name: CI summary
+    needs: [tests, smoke]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Report job statuses
+        run: |
+          echo "tests:  ${{ needs.tests.result }}"
+          echo "smoke:  ${{ needs.smoke.result }}"
+          if [ "${{ needs.tests.result }}" != "success" ] || [ "${{ needs.smoke.result }}" != "success" ]; then
+            echo "CI FAILED"
+            exit 1
+          fi
+          echo "CI PASSED"

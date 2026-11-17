@@ -1,0 +1,14 @@
+blank_issues_enabled: false
+contact_links:
+  - name: التوثيق الكامل للمنصة
+    url: https://github.com/Alqudimi/VoiceCall/blob/main/README.md
+    about: ابدأ من README ثم INSTALLATION.md — معظم أسئلة الإعداد موجودة هناك.
+  - name: حلول الأعطال الشائعة
+    url: https://github.com/Alqudimi/VoiceCall/blob/main/TROUBLESHOOTING.md
+    about: أخطاء CUDA/torch، 401 Unauthorized، مشاكل Drive وغيرها — قبل فتح مشكلة.
+  - name: تشغيل المنصة على Google Colab
+    url: https://github.com/Alqudimi/VoiceCall/blob/main/INSTALLATION.md
+    about: قسم Colab في INSTALLATION.md مع الـ notebook الرسمي.
+  - name: أسئلة ونقاش عام
+    url: https://github.com/Alqudimi/VoiceCall/discussions
+    about: استخدم Discussions للاستفسارات العامة وتبادل النماذج والتجارب.

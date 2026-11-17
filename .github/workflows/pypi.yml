@@ -1,0 +1,53 @@
+# =============================================================================
+# pypi.yml — optional publication of the `rvc-platform` package to PyPI
+# OFF by default: it only runs when BOTH are configured by the maintainer —
+#   1. repository variable  PYPI_PUBLISH == "true"   (Settings > Secrets and
+#      variables > Actions > Variables)
+#   2. repository secret    PYPI_API_TOKEN            (a PyPI API token)
+# Trigger: a published GitHub release (created by release.yml) or manual run.
+# =============================================================================
+name: PyPI publish
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: Publish rvc-platform to PyPI
+    if: vars.PYPI_PUBLISH == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: pypi
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download release dist artifact
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-dist-*
+          path: dist
+          merge-multiple: true
+
+      - name: Show what will be uploaded
+        run: ls -l dist/
+
+      - name: Build only if artifact missing (manual dispatch fallback)
+        run: |
+          if ! ls dist/*.whl >/dev/null 2>&1; then
+            echo "no release artifact found — building from source"
+            curl -LsSf https://astral.sh/uv/install.sh | sh
+            echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+            uv build
+          fi
+
+      - name: Upload distributions to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          password: ${{ secrets.PYPI_API_TOKEN }}
+          print-hash: true

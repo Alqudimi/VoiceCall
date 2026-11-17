@@ -11,18 +11,18 @@ from __future__ import annotations
 import gc
 import json
 import time
+from pathlib import Path
 
 import numpy as np
 import pytest
 import soundfile as sf
 import torch
 from torch import nn
-from torch.nn import Conv1d, Conv2d
+from torch.nn import Conv2d
 from torch.nn.utils import weight_norm
 
 from rvc_platform.engine.rvc.models import models as rvc_models
 from rvc_platform.engine.rvc.models.commons import get_padding
-from rvc_platform.training import checkpointing
 from rvc_platform.training.run_config import TrainingRunConfig
 from rvc_platform.training.trainer import Trainer
 from rvc_platform.training.utils import HParams, stable_dataset_signature
@@ -73,7 +73,6 @@ def _shrink(hps):
 
 
 def _make_run(project_env, n_chunks: int = 3) -> tuple[TrainingRunConfig, HParams, Path]:
-    from pathlib import Path
 
     sr = 40_000
     run_dir = project_env / "runs" / "smoke"

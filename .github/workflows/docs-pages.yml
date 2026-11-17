@@ -1,0 +1,90 @@
+# =============================================================================
+# docs-pages.yml — publishes the project documentation to GitHub Pages
+# The docs are the repo's own markdown files (README/INSTALLATION/TRAINING/…).
+# The build copies every root *.md into a mkdocs tree (README → index.md),
+# renders with mkdocs-material, and deploys via the official Pages workflow.
+#   * PRs  : build only (no deploy) so doc regressions are caught early
+#   * main : build + deploy to https://<owner>.github.io/<repo>/
+# =============================================================================
+name: Docs (GitHub Pages)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "*.md"
+      - "mkdocs.yml"
+      - ".github/workflows/docs-pages.yml"
+  pull_request:
+    paths:
+      - "*.md"
+      - "mkdocs.yml"
+      - ".github/workflows/docs-pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build:
+    name: Build docs site (mkdocs)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install mkdocs + material theme
+        run: pip install mkdocs mkdocs-material
+
+      - name: Assemble docs tree from root markdown
+        run: |
+          mkdir -p docs
+          cp README.md docs/index.md
+          for f in INSTALLATION TRAINING REALTIME API CONFIGURATION \
+                   ARCHITECTURE TROUBLESHOOTING CONTRIBUTING CI SECURITY; do
+            [ -f "$f.md" ] && cp "$f.md" "docs/$f.md"
+          done
+          ls -1 docs/
+
+      - name: Build site
+        run: mkdocs build --site-dir site
+
+      - name: Report site pages
+        run: find site -name '*.html' | head -20
+
+      - name: Upload Pages artifact (deploy from main only)
+        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    name: Deploy to GitHub Pages
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    permissions:
+      pages: write
+      id-token: write
+    steps:
+      - name: Configure Pages
+        id: pages
+        uses: actions/configure-pages@v5
+
+      - name: Deploy site to Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

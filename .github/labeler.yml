@@ -1,0 +1,81 @@
+# =============================================================================
+# labeler.yml — path→label mapping used by actions/labeler (labeler.yml workflow)
+# A label is applied when ANY of the listed globs matches the PR diff.
+# =============================================================================
+ci:
+  - changed-files:
+      - any-glob-to-any-file:
+          - ".github/**"
+          - "CI.md"
+
+colab:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "notebooks/**"
+          - "scripts/colab/**"
+          - "src/rvc_platform/colab/**"
+
+docs:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "*.md"
+          - "mkdocs.yml"
+          - "docs/**"
+
+web-ui:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "src/rvc_platform/web/**"
+
+api:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "src/rvc_platform/api/**"
+          - "API.md"
+
+realtime:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "src/rvc_platform/realtime/**"
+          - "REALTIME.md"
+
+training:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "src/rvc_platform/training/**"
+          - "configs/**"
+          - "TRAINING.md"
+
+engine:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "src/rvc_platform/engine/**"
+
+security:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "src/rvc_platform/infrastructure/security/**"
+          - "SECURITY.md"
+
+tests:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "tests/**"
+
+scripts:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "scripts/**"
+          - "Makefile"
+
+docker:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "Dockerfile"
+          - ".dockerignore"
+
+dependencies:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "pyproject.toml"
+          - "uv.lock"

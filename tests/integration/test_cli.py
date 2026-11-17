@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import json
 
-import pytest
 from typer.testing import CliRunner
 
 from rvc_platform.cli.main import app
@@ -89,6 +88,7 @@ def test_train_resume_from_persisted_in_run_config(project_env, tmp_path):
     ])
     # G_5.pth does not exist -> the worker fails with exit code 3, but the
     # run_config on disk must already carry the explicit resume point.
+    assert result.exit_code == 3
     assert (run_dir / "run_config.json").is_file()
     persisted = json.loads((run_dir / "run_config.json").read_text(encoding="utf-8"))
     assert persisted.get("resume_from") == "G_5.pth"

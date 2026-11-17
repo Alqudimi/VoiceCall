@@ -1,0 +1,60 @@
+# =============================================================================
+# reusable-tests.yml — reusable full test job (called by ci.yml & nightly.yml)
+# Runs the complete unit + integration suite with coverage, from the frozen
+# uv.lock, on Python 3.12, exactly as the project pins it.
+# =============================================================================
+name: Reusable tests
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+env:
+  FORCE_COLOR: "1"
+  # Keep Hermetic test runs quiet on stdout metadata noise
+  UV_NO_PROGRESS: "1"
+
+jobs:
+  tests:
+    name: pytest (unit + integration, coverage)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install uv (with dependency cache)
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Sync environment from lockfile (all groups + all extras)
+        run: uv sync --frozen --all-groups --all-extras
+
+      - name: Show environment versions (torch/faiss/librosa/transformers)
+        run: |
+          uv run rvc-platform install check || true
+          uv run python - <<'PY'
+          import sys, torch
+          print(f"python {sys.version.split()[0]} | torch {torch.__version__} | cuda {torch.cuda.is_available()}")
+          PY
+
+      - name: Run full test suite with coverage
+        run: |
+          uv run --with pytest-cov pytest \
+            --cov=rvc_platform \
+            --cov-report=xml:coverage.xml \
+            --cov-report=term-missing \
+            --durations=15
+
+      - name: Upload coverage report artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report-${{ github.run_id }}
+          path: coverage.xml
+          if-no-files-found: warn
+          retention-days: 14
