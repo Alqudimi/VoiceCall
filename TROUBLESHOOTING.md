@@ -51,7 +51,7 @@ curl -s http://127.0.0.1:8320/api/health
 | نتيجة تحويل `409` | لا نموذج محمّل | `POST /api/models/{name}/load` أولًا |
 | رفض رفع صوت `400` | فارغ/أكبر من 40MB/صيغة غير مدعومة | ارفع ملفًا أصغر بصيغة مدعومة (WAV/MP3/FLAC/OGG/M4A/OPUS/WebM/AAC) |
 | رفض رفع نموذج `422` | ليس checkpoint RVC صالحًا | النظام يفحص الملف قبل التسجيل — استخدم `.pth` من RVC v1/v2 سليم |
-| `502` عند بدء النفق | cloudflared غائب أو فشل البدء | ثبّت cloudflared (INSTALLATION.md قسم 7)؛ تُعاد المحاولة 3 مرات تلقائيًا |
+| `502` عند بدء النفق | cloudflared غائب أو تعذر إنشاء الاتصال | اتبع [TUNNEL.md](TUNNEL.md)؛ تحقق من سجل `logs/processes/cloudflared/cloudflared.log` ومن الاتصال الخارجي |
 
 ## 5. تحويل الملفات
 
@@ -95,7 +95,8 @@ curl -s http://127.0.0.1:8320/api/health
 
 | العرَض | السبب | الحل |
 |---|---|---|
-| `502 tunnel` عند `/api/tunnel/start` | cloudflared غير مثبت | ثبّته — يُعاد المحاولة 3 مرات تلقائيًا قبل الفشل |
+| `502 tunnel` عند `/api/tunnel/start` | cloudflared غير مثبت أو فشل اتصال Cloudflare | ثبّته من المثبت الرسمي عبر [TUNNEL.md](TUNNEL.md)، وافحص `logs/processes/cloudflared/cloudflared.log` |
+| عنوان trycloudflare لا يُحل مباشرة بعد التشغيل | DNS لم ينتشر بعد أو DNS الخادم مقيّد | انتظر عدة ثوانٍ، ثم اختبره من شبكة أخرى؛ يجب أن يظهر اتصال Cloudflare مسجل في السجل |
 | العنوان تغيّر بعد إعادة التشغيل | طبيعة quick tunnel | العنوان مؤقت بتصميمه (جديد كل تشغيل) — لا يوجد اسم دائم |
 | النفق يعمل لكن API يرفض 401 | المصادقة تفعّلت تلقائيًا مع النفق | مقصود أمنيًا — استخدم التوكن (`logs/auth.token` أو `server.auth_token`) |
 | الخادم محلي يعمل والنفق 502 | الخادم على منفذ مختلف | تأكد `server.port` وتشغيل الويب قبل `make tunnel` |
@@ -134,7 +135,7 @@ curl -s http://127.0.0.1:8320/api/health
 |---|---|
 | المنصة | `logs/platform.log` (يتدور كل 10MB × 5) |
 | التوكن (إن وُلّد) | `logs/auth.token` |
-| النفق | `logs/tunnel.log` و`GET /api/tunnel/logs` |
+| النفق | `logs/processes/cloudflared/cloudflared.log` و`GET /api/tunnel/logs` |
 | العمليات المُدارة | `logs/processes/` |
 | تدريب تجربة | `runs/<exp>/train.log` + `events.jsonl` + `progress.json` |
 
@@ -153,7 +154,7 @@ make clean-all            # + runs/ + data/uploads + data/conversions
 1. `make doctor FIX=1` — فحص شامل مع إصلاح الأصول.
 2. `make logs LINES=200` و`GET /api/logs?lines=200` — السجلات أولًا.
 3. سجلات التدريب: `runs/<exp>/train.log` و`events.jsonl` و`progress.json`.
-4. سجل النفق: `GET /api/tunnel/logs` و`logs/tunnel.log`.
+4. سجل النفق: `GET /api/tunnel/logs` و`logs/processes/cloudflared/cloudflared.log`.
 5. راجع [API.md](API.md) (أكواد الأخطاء) و[REALTIME.md](REALTIME.md) (البروتوكول)
    و[TRAINING.md](TRAINING.md) (دقة الاستئناف) و[CONFIGURATION.md](CONFIGURATION.md).
 

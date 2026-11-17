@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # Iraqi Voice Studio — Google Colab installer.
 # Run inside a Colab cell:
-#   !curl -fsSL <your-hosted-copy>/scripts/colab/install_colab.sh | bash
+#   !curl -fsSL https://raw.githubusercontent.com/Alqudimi/VoiceCall/main/scripts/colab/install_colab.sh | bash
 # Or after cloning the repo:
 #   !bash scripts/colab/install_colab.sh
 #
 # Environment variables:
-#   IRAQI_VOICE_REPO   git URL of the project (required when not run inside
-#                      an existing checkout; clone target /content/iraqi-voice-platform)
+#   IRAQI_VOICE_REPO   override git URL (defaults to Alqudimi/VoiceCall)
+#   RVC_INSTALL_DIR    clone path (default /content/VoiceCall)
 #   MOUNT_DRIVE=1      mount Google Drive and wire runs/ + models/ to it (default 1)
 #   DRIVE_DIR=RVC_Iraqi  folder name inside MyDrive (default RVC_Iraqi)
 #   SKIP_ASSETS=1      do not download pretrained weights (default 0)
@@ -19,6 +19,9 @@ ok()   { printf '\033[1;32m[colab-ok]\033[0m %s\n' "$*"; }
 MOUNT_DRIVE="${MOUNT_DRIVE:-1}"
 DRIVE_DIR="${DRIVE_DIR:-RVC_Iraqi}"
 SKIP_ASSETS="${SKIP_ASSETS:-0}"
+SKIP_TUNNEL="${SKIP_TUNNEL:-0}"
+REPO_URL="${IRAQI_VOICE_REPO:-https://github.com/Alqudimi/VoiceCall.git}"
+INSTALL_DIR="${RVC_INSTALL_DIR:-/content/VoiceCall}"
 
 # ------------------------------------------------------------- environment --
 log "detecting execution environment"
@@ -37,15 +40,16 @@ EOF
 if [[ -f "pyproject.toml" && -d "src/rvc_platform" ]]; then
   PROJECT_ROOT="$(pwd)"
   log "already inside the project: $PROJECT_ROOT"
-elif [[ -n "${IRAQI_VOICE_REPO:-}" ]]; then
-  log "cloning $IRAQI_VOICE_REPO"
-  rm -rf /content/iraqi-voice-platform
-  git clone --depth 1 "$IRAQI_VOICE_REPO" /content/iraqi-voice-platform
-  cd /content/iraqi-voice-platform
-  PROJECT_ROOT=/content/iraqi-voice-platform
+elif [[ -f "$INSTALL_DIR/pyproject.toml" ]]; then
+  PROJECT_ROOT="$INSTALL_DIR"
+  cd "$PROJECT_ROOT"
+  log "using existing checkout: $PROJECT_ROOT"
 else
-  echo "[colab][error] run this from the repo root or set IRAQI_VOICE_REPO=<git-url>" >&2
-  exit 2
+  [[ ! -e "$INSTALL_DIR" ]] || { echo "[colab][error] install path exists but is not VoiceCall: $INSTALL_DIR (set RVC_INSTALL_DIR)" >&2; exit 2; }
+  log "cloning $REPO_URL into $INSTALL_DIR"
+  git clone --depth 1 "$REPO_URL" "$INSTALL_DIR"
+  cd "$INSTALL_DIR"
+  PROJECT_ROOT="$INSTALL_DIR"
 fi
 
 # ---------------------------------------------------------------- drive -----
@@ -61,6 +65,15 @@ if [[ "$MOUNT_DRIVE" == "1" && -d /content/drive/MyDrive ]]; then
   DRIVE_ROOT="/content/drive/MyDrive/$DRIVE_DIR"
   mkdir -p "$DRIVE_ROOT/runs" "$DRIVE_ROOT/models" "$DRIVE_ROOT/datasets"
   ok "Drive workspace: $DRIVE_ROOT"
+fi
+
+# ---------------------------------------------------------------- Tunnel ----
+if [[ "$SKIP_TUNNEL" == "0" ]]; then
+  # shellcheck source=../common/install_cloudflared.sh
+  source scripts/common/install_cloudflared.sh
+  install_cloudflared_user "$HOME/.local/bin"
+else
+  log 'skipping cloudflared install (SKIP_TUNNEL=1)'
 fi
 
 # ---------------------------------------------------------------- uv + env --
@@ -105,7 +118,7 @@ export RVC_RUNS_DIR="$DRIVE_ROOT/runs"        # checkpoints written straight to 
 export RVC_MODELS_DIR="$DRIVE_ROOT/models"    # exported models land in Drive
 export RVC_DATA_DIR="/content/iraqi_data"     # ephemeral fast disk for datasets
 EOF
-  ok "wrote .colab_env — 'source .colab_env' in training cells"
+  ok "wrote .colab_env — source it before running training cells"
 fi
 
 # ---------------------------------------------------------------- verify ----
@@ -118,7 +131,8 @@ echo "  next steps (in a new cell):"
 echo "    %cd $PROJECT_ROOT"
 echo "    !uv run rvc-platform prepare-dataset /content/drive/MyDrive/$DRIVE_DIR/datasets/my_voice iraqi_voice"
 echo "    !uv run rvc-platform train start --experiment iraqi_voice"
-echo "    !uv run rvc-platform web --host 0.0.0.0 --tunnel   # public UI via quick tunnel"
+echo "    !uv run rvc-platform web --host 0.0.0.0 --tunnel   # protected quick tunnel"
+echo "  Authentication: token saved in logs/auth.token; open Settings on the shared page and paste it."
 echo
 echo "  training auto-resumes the latest checkpoint on every rerun;"
 echo "  checkpoints/models persist to Drive via RVC_RUNS_DIR/RVC_MODELS_DIR."

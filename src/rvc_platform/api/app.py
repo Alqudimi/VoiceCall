@@ -70,6 +70,7 @@ def create_app() -> FastAPI:
     tunnel_service = TunnelService(
         process_manager, config.server.port, retries=config.tunnel.retries,
         start_timeout_s=config.tunnel.start_timeout_s,
+        binary=config.tunnel.binary,
     )
 
     system_service = SystemService(
@@ -83,8 +84,14 @@ def create_app() -> FastAPI:
 
     def enable_auth_for_tunnel() -> None:
         if not auth.enabled:
-            auth.enabled = True
-            logger.warning("tunnel active: API authentication is now REQUIRED")
+            token = config.server.auth_token or config.server.effective_token(
+                paths.logs / "auth.token"
+            )
+            auth.enable(token)
+            logger.warning(
+                "tunnel authentication enabled; token is stored in %s",
+                paths.logs / "auth.token",
+            )
 
     tunnel_service.auth_enabler = enable_auth_for_tunnel
 

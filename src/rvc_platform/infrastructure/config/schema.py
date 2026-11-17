@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import secrets
+import stat
 from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
@@ -26,8 +27,19 @@ class ServerConfig(BaseModel):
     def effective_token(self, token_file: "os.PathLike | str") -> str:
         if self.auth_token:
             return self.auth_token
-        token = secrets.token_urlsafe(24)
-        with open(token_file, "a", encoding="utf-8") as fh:
+        path = os.fspath(token_file)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                existing = fh.readline().strip()
+            if existing:
+                os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)
+                return existing
+        except FileNotFoundError:
+            pass
+        token = secrets.token_urlsafe(32)
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.write(token + "\n")
         return token
 

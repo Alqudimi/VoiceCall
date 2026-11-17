@@ -24,6 +24,13 @@ class TokenAuth:
         self._token = token
         self.enabled = enabled
 
+    def enable(self, token: str) -> None:
+        """Enable authentication only after a non-empty secret is available."""
+        if not token:
+            raise SecurityError("refusing to enable authentication with an empty token")
+        self._token = token
+        self.enabled = True
+
     def check_header(self, header: str | None) -> bool:
         if not self.enabled:
             return True

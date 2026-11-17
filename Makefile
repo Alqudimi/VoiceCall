@@ -80,7 +80,7 @@ export: ## Export a trained run into models/ (EXPERIMENT=, EPOCH= optional)
 model-list: ## List available voice models
 	$(CLI) model list
 model-load: ## (API) load MODEL= into the engine of a running server
-	curl -s -X POST http://127.0.0.1:$(PORT)/api/models/$(MODEL)/load | head -c 400; echo
+	@if [ -s logs/auth.token ]; then curl -sS -X POST http://127.0.0.1:$(PORT)/api/models/$(MODEL)/load -H "Authorization: Bearer $$(head -n1 logs/auth.token)"; else curl -sS -X POST http://127.0.0.1:$(PORT)/api/models/$(MODEL)/load; fi | head -c 400; echo
 model-info: ## Inspect MODEL= checkpoint metadata
 	$(CLI) model info $(MODEL)
 inference: ## Convert INPUT= audio with MODEL= (Audio-to-Audio)
@@ -104,16 +104,16 @@ realtime: ## Latency benchmark of MODEL= with synthetic blocks (real engine)
 realtime-stop: ## Real-time runs inside the web session; stopping web stops it
 	$(CLI) web-stop
 realtime-status: ## Latency stats of live realtime sessions
-	@curl -s http://127.0.0.1:$(PORT)/api/realtime/stats | head -c 600; echo
+	@if [ -s logs/auth.token ]; then curl -sS http://127.0.0.1:$(PORT)/api/realtime/stats -H "Authorization: Bearer $$(head -n1 logs/auth.token)"; else curl -sS http://127.0.0.1:$(PORT)/api/realtime/stats; fi | head -c 600; echo
 
 # ---------------------------------------------------------------- tunnel ----
 .PHONY: tunnel tunnel-stop tunnel-status
 tunnel: ## Expose the running web server via a free Cloudflare quick tunnel
-	@curl -s -X POST http://127.0.0.1:$(PORT)/api/tunnel/start | head -c 300; echo
+	@if [ -s logs/auth.token ]; then curl -sS -X POST http://127.0.0.1:$(PORT)/api/tunnel/start -H "Authorization: Bearer $$(head -n1 logs/auth.token)"; else curl -sS -X POST http://127.0.0.1:$(PORT)/api/tunnel/start; fi; echo
 tunnel-stop: ## Stop the tunnel
-	@curl -s -X POST http://127.0.0.1:$(PORT)/api/tunnel/stop; echo
+	@if [ -s logs/auth.token ]; then curl -sS -X POST http://127.0.0.1:$(PORT)/api/tunnel/stop -H "Authorization: Bearer $$(head -n1 logs/auth.token)"; else curl -sS -X POST http://127.0.0.1:$(PORT)/api/tunnel/stop; fi; echo
 tunnel-status: ## Tunnel state + public URL
-	@curl -s http://127.0.0.1:$(PORT)/api/tunnel/status; echo
+	@if [ -s logs/auth.token ]; then curl -sS http://127.0.0.1:$(PORT)/api/tunnel/status -H "Authorization: Bearer $$(head -n1 logs/auth.token)"; else curl -sS http://127.0.0.1:$(PORT)/api/tunnel/status; fi; echo
 
 # ------------------------------------------------------------- lifecycle ----
 .PHONY: start stop restart status logs

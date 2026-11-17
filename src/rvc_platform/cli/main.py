@@ -58,8 +58,14 @@ def _port_open(port: int) -> bool:
 def _api(port: int, path: str = "/api/system") -> dict | None:
     try:
         import httpx
-
-        resp = httpx.get(f"http://127.0.0.1:{port}{path}", timeout=5.0)
+        headers = {}
+        try:
+            token = (get_paths().logs / "auth.token").read_text(encoding="utf-8").splitlines()[0].strip()
+            if token:
+                headers["Authorization"] = f"Bearer {token}"
+        except (OSError, IndexError):
+            pass
+        resp = httpx.get(f"http://127.0.0.1:{port}{path}", headers=headers, timeout=5.0)
         return resp.json() if resp.status_code < 500 else None
     except Exception:
         return None
@@ -498,7 +504,9 @@ def web(
     from rvc_platform.infrastructure.config.loader import get_config
 
     config = get_config()
-    host = host or (config.server.host if not tunnel else "0.0.0.0")
+    # cloudflared connects to loopback; do not bind the origin to every
+    # network interface merely because a tunnel was requested.
+    host = host or config.server.host
     port = port or config.server.port
     if _port_open(port):
         console.print(f"[yellow]port {port} already in use — server may be running[/yellow]")
@@ -544,31 +552,33 @@ def _terminate_group(pid: int) -> None:
 
 
 def _start_tunnel(port: int) -> None:
-    import subprocess as sp
+    import httpx
 
-    log = get_paths().logs / "tunnel.log"
-    log.parent.mkdir(parents=True, exist_ok=True)
-    with open(log, "ab") as fh:
-        proc = sp.Popen(
-            ["cloudflared", "tunnel", "--url", f"http://127.0.0.1:{port}",
-             "--no-autoupdate"],
-            stdout=fh, stderr=sp.STDOUT, start_new_session=True,
-        )
-    import re
-
-    url = None
+    base = f"http://127.0.0.1:{port}"
     deadline = time.time() + 30
-    while time.time() < deadline and url is None:
-        data = log.read_text(encoding="utf-8", errors="replace")
-        match = re.search(r"https://[a-z0-9-]+\.trycloudflare\.com", data)
-        url = match.group(0) if match else None
-        if url is None:
-            time.sleep(0.5)
+    while time.time() < deadline:
+        try:
+            if httpx.get(f"{base}/api/health", timeout=2).status_code == 200:
+                break
+        except httpx.HTTPError:
+            pass
+        time.sleep(0.5)
+    else:
+        console.print("[red]web health check failed; tunnel was not started[/red]")
+        return
+    try:
+        response = httpx.post(f"{base}/api/tunnel/start", timeout=120)
+        response.raise_for_status()
+        result = response.json()
+    except (httpx.HTTPError, ValueError) as exc:
+        console.print(f"[red]tunnel start failed: {exc}[/red]")
+        console.print("[yellow]inspect logs/processes/cloudflared/cloudflared.log[/yellow]")
+        return
+    url = result.get("url")
     if url:
         console.print(f"[green]public URL: {url}[/green]")
+        console.print("[yellow]authentication is enabled; read the token from logs/auth.token and enter it in Settings on the public page.[/yellow]")
         (get_paths().temp / "tunnel.url").write_text(url)
-    else:
-        console.print("[red]tunnel URL not detected; see logs/tunnel.log[/red]")
 
 
 @app.command("web-status")

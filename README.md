@@ -17,6 +17,7 @@
 | الملف | الموضوع |
 |---|---|
 | [INSTALLATION.md](INSTALLATION.md) | التثبيت خطوة بخطوة (Ubuntu / Windows / Colab / GPU) |
+| [TUNNEL.md](TUNNEL.md) | تثبيت وتشغيل Cloudflare Tunnel والمصادقة والاختبار |
 | [TRAINING.md](TRAINING.md) | تدريب نموذج صوتي جديد من بياناتك |
 | [REALTIME.md](REALTIME.md) | البث اللحظي عبر WebSocket وقياس زمن الاستجابة |
 | [API.md](API.md) | توثيق كامل لواجهة REST/WebSocket |
@@ -49,8 +50,8 @@
 curl -LsSf https://astral.sh/uv/install.sh | sh
 
 # 2) جلب المشروع
-git clone <repository-url> iraqi-voice-platform
-cd iraqi-voice-platform
+git clone https://github.com/Alqudimi/VoiceCall.git
+cd VoiceCall
 
 # 3) إنشاء البيئة وتثبيت كل المجموعات (dev + training)
 make install          # = uv sync --all-groups
@@ -61,6 +62,8 @@ make download-models  # HuBERT + RMVPE + قواعد pretrained_v2
 # 5) تشغيل لوحة التحكم
 make web              # http://127.0.0.1:8320  (يعمل بالحظر؛ Ctrl-C للإيقاف)
 ```
+
+لتشغيل واجهة عامة مؤقتة عبر Cloudflare، ثبّت `cloudflared` بمثبت النظام ثم شغّل `uv run rvc-platform web --tunnel`. يُفعّل التطبيق المصادقة تلقائيًا؛ اقرأ الرمز من `logs/auth.token` وأدخله في تبويب الإعدادات. رابط Quick Tunnel مؤقت وغير مناسب للإنتاج؛ راجع [دليل النفق](TUNNEL.md).
 
 بعد ذلك، أول تحويل ملف (بنموذج جاهز أو مرفوع):
 

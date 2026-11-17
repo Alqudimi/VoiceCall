@@ -147,3 +147,18 @@ def test_logs_endpoint(auth_client, project_env):
     token = (project_env / "logs" / "auth.token").read_text().strip().splitlines()[-1]
     resp = auth_client.get("/api/logs?lines=10", headers={"Authorization": f"Bearer {token}"})
     assert resp.status_code == 200 and "lines" in resp.json()
+
+
+def test_tunnel_auth_enabler_creates_real_token(client, project_env):
+    # The web server starts without auth on localhost; tunnel startup must
+    # activate a generated token before the public endpoint is reachable.
+    services = client.app.state.services
+    auth = services["auth"]
+    assert auth.enabled is False
+    services["tunnel"].auth_enabler()
+    assert auth.enabled is True
+    token = (project_env / "logs" / "auth.token").read_text().strip()
+    assert token and auth.check_header(f"Bearer {token}")
+    assert (project_env / "logs" / "auth.token").stat().st_mode & 0o777 == 0o600
+    assert client.get("/api/system").status_code == 401
+    assert client.get("/api/system", headers={"Authorization": f"Bearer {token}"}).status_code == 200
