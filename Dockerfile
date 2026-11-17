@@ -8,7 +8,7 @@
 # Build:  docker build -t iraqi-voice-studio .
 # Run:    docker run -p 8320:8320 -v rvc-data:/data iraqi-voice-studio
 # =============================================================================
-FROM python:3.12-slim
+FROM python:3.15-slim
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
