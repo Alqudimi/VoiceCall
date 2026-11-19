@@ -131,9 +131,53 @@ def extract_f0(run_dir: Path, method: str, device: str, is_half: bool,
     return report
 
 
+def _hubert_forward(model, source: torch.Tensor, version: str) -> torch.Tensor:
+    """Padding-free batched forward (equal-length clips only).
+
+    With identical clip lengths there is no padding and no attention mask, so
+    this is the same computation the single-clip path performs — batching
+    only reduces kernel-launch counts and raises GPU utilisation.
+    """
+    if version == "v1":
+        outputs = model(
+            input_values=source, attention_mask=None,
+            output_hidden_states=True, return_dict=True,
+        )
+        return model.final_proj(outputs.hidden_states[9])
+    return model(
+        input_values=source, attention_mask=None,
+        output_hidden_states=False, return_dict=True,
+    ).last_hidden_state
+
+
+def _extract_one(model, wav_path: Path, out_dir: Path, version: str, device: str,
+                 is_half: bool, normalize: bool) -> bool:
+    """Single-clip extraction (original CUDA-graph path). Returns success."""
+    source = _read_16k(wav_path, normalize)
+    padding_mask = torch.BoolTensor(source.shape).fill_(False)
+    source = (source.half().to(device) if is_half else source.to(device))
+    with torch.no_grad():
+        feats = extract_hubert_features(
+            model, source, version, padding_mask=padding_mask.to(device)
+        )
+    feats = feats.squeeze(0).float().cpu().numpy()
+    if np.isnan(feats).sum() != 0:
+        logger.warning("NaN features in %s", wav_path.name)
+        return False
+    _atomic_save_npy(out_dir / f"{wav_path.stem}.npy", feats)
+    return True
+
+
 def extract_features(run_dir: Path, version: str, device: str, is_half: bool,
                      progress: ProgressFn | None = None) -> dict:
-    """Compute HuBERT content features (3_feature768 for v2 / 3_feature256 v1)."""
+    """Compute HuBERT content features (3_feature768 for v2 / 3_feature256 v1).
+
+    Speed-up: clips are grouped by exact sample count (header-only probe) and
+    pushed through the model in padding-free batches — the same numerics path
+    as one-by-one processing (no padding, no attention mask) with far fewer
+    kernel launches and much better GPU utilisation. Any batch failure falls
+    back to per-file extraction, so this can never lose a clip.
+    """
     run_dir = Path(run_dir)
     wav_dir = run_dir / "1_16k_wavs"
     out_dir = run_dir / ("3_feature768" if version == "v2" else "3_feature256")
@@ -152,27 +196,61 @@ def extract_features(run_dir: Path, version: str, device: str, is_half: bool,
     todo = [f for f in files if not _valid_npy(out_dir / f"{f.stem}.npy")]
     success = failed = 0
     started = time.time()
-    for idx, wav_path in enumerate(todo):
+
+    # group by exact frame count so every batch is padding-free
+    by_len: dict[int, list[Path]] = {}
+    for f in todo:
         try:
-            source = _read_16k(wav_path, normalize)
-            padding_mask = torch.BoolTensor(source.shape).fill_(False)
-            source = (source.half().to(device) if is_half else source.to(device))
-            with torch.no_grad():
-                feats = extract_hubert_features(
-                    model, source, version, padding_mask=padding_mask.to(device)
-                )
-            feats = feats.squeeze(0).float().cpu().numpy()
-            if np.isnan(feats).sum() == 0:
-                _atomic_save_npy(out_dir / f"{wav_path.stem}.npy", feats)
-                success += 1
-            else:
-                failed += 1
-                logger.warning("NaN features in %s", wav_path.name)
+            by_len.setdefault(int(sf.info(str(f)).frames), []).append(f)
         except Exception:
-            failed += 1
-            logger.exception("feature extraction failed: %s", wav_path.name)
-        if progress:
-            progress((idx + 1) / max(1, len(todo)), wav_path.name)
+            by_len.setdefault(-1, []).append(f)
+
+    processed = 0
+    for n, group in sorted(by_len.items(), key=lambda kv: kv[0]):
+        # ~12 clips of 3.7 s per batch keeps activations well inside 16 GB
+        max_batch = max(1, min(12, 700_000 // max(1, n)))
+        for start in range(0, len(group), max_batch):
+            batch = group[start : start + max_batch]
+            batched_ok = False
+            if n > 0:
+                try:
+                    rows = [_read_16k(p, normalize).squeeze(0) for p in batch]
+                    source = torch.stack(rows, 0)
+                    source = (source.half() if is_half else source).to(device)
+                    with torch.no_grad():
+                        feats = _hubert_forward(model, source, version)
+                    feats = feats.float().cpu()
+                    if feats.size(0) != len(batch):
+                        raise RuntimeError("unexpected HuBERT output shape")
+                    for i, p in enumerate(batch):
+                        arr = feats[i].numpy()
+                        if np.isnan(arr).sum() == 0:
+                            _atomic_save_npy(out_dir / f"{p.stem}.npy", arr)
+                            success += 1
+                        else:
+                            failed += 1
+                            logger.warning("NaN features in %s", p.name)
+                    batched_ok = True
+                except Exception:
+                    logger.warning(
+                        "batched extraction failed (%s..%s) — per-file retry",
+                        batch[0].name, batch[-1].name, exc_info=True,
+                    )
+            if not batched_ok:
+                for p in batch:
+                    try:
+                        if _extract_one(model, p, out_dir, version, device,
+                                        is_half, normalize):
+                            success += 1
+                        else:
+                            failed += 1
+                    except Exception:
+                        failed += 1
+                        logger.exception("feature extraction failed: %s", p.name)
+            processed += len(batch)
+            if progress:
+                progress(processed / max(1, len(todo)), batch[-1].name)
+
     report = {
         "files": len(files), "processed": len(todo), "success": success,
         "skipped": len(files) - len(todo), "failed": failed,

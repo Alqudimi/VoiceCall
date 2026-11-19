@@ -258,10 +258,13 @@ uv run rvc-platform train start --experiment iraqi_voice --epochs 200 --batch 6
 
 - **GPU واحد فقط** للتدريب؛ لا يوجد DDP. على CPU يعمل الكود لكن بطيئًا جدًا
   (احسب ساعات إلى أيام لكل epoch).
-- افتراضيًا يستخدم DataLoader نفس سياسة المشروع السابقة: عاملان على CUDA وصفر
-  على CPU، مع `pin_memory` و`non_blocking`، ولا يغيّر sampler أو ترتيب الدفعات.
-  يمكن إجراء benchmark اختياري عبر `RVC_NUM_WORKERS` و`RVC_PREFETCH_FACTOR` و
-  `RVC_PERSISTENT_WORKERS=1`، لكن زيادة هذه القيم قد تستهلك RAM في Colab.
+- يضبط DataLoader عدد عمال التحميل تلقائيًا حسب الجهاز (عاملان على Colab
+  المجاني T4، وحتى 6 على أجهزة أكثر)، مع `pin_memory` و`non_blocking` وعمال
+  دائمين بين الحقب و`prefetch_factor=4`، ولا يغيّر sampler أو ترتيب الدفعات.
+  يمكن ضبط كل قيمة عبر `RVC_NUM_WORKERS` و`RVC_PREFETCH_FACTOR` و
+  `RVC_PERSISTENT_WORKERS` (للعودة للسلوك القديم:
+  `RVC_NUM_WORKERS=2 RVC_PERSISTENT_WORKERS=0 RVC_PREFETCH_FACTOR=2`)،
+  لكن زيادة هذه القيم قد تستهلك RAM في Colab.
 - استخراج F0 وHuBERT يكتب ملفات NPY ذريًا عبر ملف `.part` ثم `os.replace`،
   ويتحقق من صحة الملفات قبل اعتبارها cache مكتملة؛ لذلك إعادة التشغيل بعد انقطاع
   لا تعتمد على ملف جزئي.

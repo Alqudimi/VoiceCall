@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -89,6 +90,28 @@ class DatasetChecker:
     def __init__(self, audio_loader=load_audio) -> None:
         self._loader = audio_loader
 
+    def _probe_files(self, audio_files: list[Path]) -> list[tuple]:
+        """Per-file (path, audio|None, md5, silence-ratio) probes.
+
+        Threaded only for the real ffmpeg-backed loader (decoding releases the
+        GIL); injected loaders (tests) and small scans stay sequential.
+        """
+
+        def probe(path: Path):
+            try:
+                audio = self._loader(path, 16_000)
+            except Exception:
+                return (path, None, None, None)
+            return (path, audio, file_md5(path), _silence_ratio(audio))
+
+        if self._loader is not load_audio or len(audio_files) <= 16:
+            return [probe(p) for p in audio_files]
+        from concurrent.futures import ThreadPoolExecutor
+
+        workers = min(8, max(2, (os.cpu_count() or 2) * 2))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            return list(pool.map(probe, audio_files))
+
     def check(self, dataset_path: Path, max_files: int = 5000,
               recursive: bool = True) -> DatasetReport:
         dataset_path = Path(dataset_path)
@@ -106,25 +129,28 @@ class DatasetChecker:
         seen_hashes: dict[str, str] = {}
         durations: list[float] = []
         silence_ratios: list[float] = []
+        # decode + md5 + silence ratio per file (thread pool when probing the
+        # real loader — ffmpeg decoding releases the GIL); results are
+        # consumed in file order so the report matches the sequential scan.
+        probes = self._probe_files([
+            p for p in files if p.suffix.lower() in AUDIO_EXTS
+        ])
         for path in files:
             if path.suffix.lower() not in AUDIO_EXTS:
                 report.unsupported.append(path.name)
-                continue
-            try:
-                audio = self._loader(path, 16_000)
-            except Exception:
+        for path, audio, digest, silence in probes:
+            if audio is None:
                 report.corrupt.append(path.name)
                 continue
             if audio.size < 1600:  # < 0.1 s of samples
                 report.empty_audio.append(path.name)
                 continue
-            digest = file_md5(path)
             if digest in seen_hashes:
                 report.duplicates.append((seen_hashes[digest], path.name))
             else:
                 seen_hashes[digest] = path.name
             durations.append(audio.size / 16_000)
-            silence_ratios.append(_silence_ratio(audio))
+            silence_ratios.append(silence)
         report.usable_files = len(durations)
         if durations:
             report.total_duration_s = float(sum(durations))
@@ -144,6 +170,65 @@ def _silence_ratio(audio: np.ndarray, threshold_db: float = -40.0) -> float:
     rms = np.sqrt((frames ** 2).mean(axis=1))
     db = 20.0 * np.log10(np.maximum(rms, 1e-9))
     return float(np.mean(db < threshold_db))
+
+
+def _norm_write(tmp_audio: np.ndarray, key: str, idx: int, sr: int, max_peak: float,
+                alpha: float, gt_wavs_dir: Path, wavs16k_dir: Path) -> bool:
+    """Peak-normalise one chunk and write it at target-sr + 16 kHz (upstream)."""
+    tmp_max = float(np.abs(tmp_audio).max()) if tmp_audio.size else 0.0
+    if not np.isfinite(tmp_max) or tmp_max <= 0 or tmp_max > 2.5:
+        logger.warning("skipping invalid chunk %s_%s (peak=%s)", key, idx, tmp_max)
+        return False
+    tmp_audio = (tmp_audio / tmp_max * (max_peak * alpha)) + (1 - alpha) * tmp_audio
+    wavfile.write(str(gt_wavs_dir / f"{key}_{idx}.wav"), sr,
+                  tmp_audio.astype(np.float32))
+    audio16k = librosa.resample(tmp_audio, orig_sr=sr, target_sr=16_000)
+    wavfile.write(str(wavs16k_dir / f"{key}_{idx}.wav"), 16_000,
+                  audio16k.astype(np.float32))
+    return True
+
+
+def _slice_file(path: Path, key: str, sr: int, per: float, overlap: float,
+                max_peak: float, alpha: float, bh, ah,
+                gt_wavs_dir: Path, wavs16k_dir: Path) -> int:
+    """Slice + normalise + dual-rate write for one dataset file (upstream logic)."""
+    slicer = Slicer(
+        sr=sr, threshold=-42, min_length=1500, min_interval=400,
+        hop_size=15, max_sil_kept=500,
+    )
+    audio = load_audio(path, sr)
+    if audio.size == 0:
+        return 0
+    audio = signal.lfilter(bh, ah, audio)  # causal high-pass
+    tail = per + overlap
+    idx = 0
+    produced = 0
+    for sliced in slicer.slice(audio):
+        i = 0
+        while True:
+            start = int(sr * (per - overlap) * i)
+            i += 1
+            if len(sliced[start:]) > tail * sr:
+                tmp = sliced[start : start + int(per * sr)]
+                if _norm_write(tmp, key, idx, sr, max_peak, alpha,
+                               gt_wavs_dir, wavs16k_dir):
+                    produced += 1
+                idx += 1
+            else:
+                tmp = sliced[start:]
+                idx += 1
+                break
+        if _norm_write(tmp, key, idx, sr, max_peak, alpha, gt_wavs_dir, wavs16k_dir):
+            produced += 1
+    return produced
+
+
+def _preprocess_task(task: tuple) -> int:
+    """Process-pool entry point: unpack args and slice exactly one file."""
+    (path_str, key, sr, per, overlap, max_peak, alpha, bh, ah,
+     gt_str, wavs16k_str) = task
+    return _slice_file(Path(path_str), key, sr, per, overlap, max_peak, alpha,
+                       bh, ah, Path(gt_str), Path(wavs16k_str))
 
 
 class DatasetPreprocessor:
@@ -169,42 +254,13 @@ class DatasetPreprocessor:
         self._progress = progress
 
     def _norm_write(self, tmp_audio: np.ndarray, key: str, idx: int) -> bool:
-        tmp_max = float(np.abs(tmp_audio).max()) if tmp_audio.size else 0.0
-        if not np.isfinite(tmp_max) or tmp_max <= 0 or tmp_max > 2.5:
-            logger.warning("skipping invalid chunk %s_%s (peak=%s)", key, idx, tmp_max)
-            return False
-        tmp_audio = (tmp_audio / tmp_max * (self.max * self.alpha)) + (1 - self.alpha) * tmp_audio
-        wavfile.write(str(self.gt_wavs_dir / f"{key}_{idx}.wav"), self.sr,
-                      tmp_audio.astype(np.float32))
-        audio16k = librosa.resample(tmp_audio, orig_sr=self.sr, target_sr=16_000)
-        wavfile.write(str(self.wavs16k_dir / f"{key}_{idx}.wav"), 16_000,
-                      audio16k.astype(np.float32))
-        return True
+        return _norm_write(tmp_audio, key, idx, self.sr, self.max, self.alpha,
+                           self.gt_wavs_dir, self.wavs16k_dir)
 
     def process_file(self, path: Path, key: str) -> int:
-        audio = load_audio(path, self.sr)
-        if audio.size == 0:
-            return 0
-        audio = signal.lfilter(self.bh, self.ah, audio)  # causal high-pass
-        idx = 0
-        produced = 0
-        for sliced in self.slicer.slice(audio):
-            i = 0
-            while True:
-                start = int(self.sr * (self.per - self.overlap) * i)
-                i += 1
-                if len(sliced[start:]) > self.tail * self.sr:
-                    tmp = sliced[start : start + int(self.per * self.sr)]
-                    if self._norm_write(tmp, key, idx):
-                        produced += 1
-                    idx += 1
-                else:
-                    tmp = sliced[start:]
-                    idx += 1
-                    break
-            self._norm_write(tmp, key, idx)
-            produced += 1
-        return produced
+        return _slice_file(path, key, self.sr, self.per, self.overlap, self.max,
+                           self.alpha, self.bh, self.ah,
+                           self.gt_wavs_dir, self.wavs16k_dir)
 
     def run(self, dataset_path: Path, progress=None) -> dict:
         dataset_path = Path(dataset_path)
@@ -218,6 +274,50 @@ class DatasetPreprocessor:
         chunks = 0
         failed: list[str] = []
         started = time.time()
+        workers = min(4, os.cpu_count() or 1)
+        if workers > 1 and total >= 4:
+            # parallel slicing (CPU-bound decode + filter + resample); output
+            # stays deterministic because chunk names key off the sorted-file
+            # index, and a partial pool failure falls back to a full sequential
+            # pass that simply overwrites identical chunk files.
+            tasks = [
+                (str(p), str(i), self.sr, self.per, self.overlap, self.max,
+                 self.alpha, self.bh, self.ah,
+                 str(self.gt_wavs_dir), str(self.wavs16k_dir))
+                for i, p in enumerate(files)
+            ]
+            try:
+                from concurrent.futures import ProcessPoolExecutor, as_completed
+
+                with ProcessPoolExecutor(max_workers=workers) as pool:
+                    futures = {pool.submit(_preprocess_task, t): t for t in tasks}
+                    for done, fut in enumerate(as_completed(futures), start=1):
+                        task = futures[fut]
+                        try:
+                            chunks += fut.result()
+                        except Exception:
+                            logger.exception("preprocess failed: %s", task[0])
+                            failed.append(Path(task[0]).name)
+                        if progress:
+                            progress(done / total, Path(task[0]).name)
+                report = {
+                    "files": total,
+                    "chunks": chunks,
+                    "failed": failed,
+                    "seconds": round(time.time() - started, 1),
+                    "gt_wavs": str(self.gt_wavs_dir),
+                    "wavs16k": str(self.wavs16k_dir),
+                    "parallel_workers": workers,
+                }
+                logger.info("preprocess complete: %s", report)
+                return report
+            except Exception:
+                logger.warning(
+                    "parallel preprocessing unavailable — sequential fallback",
+                    exc_info=True,
+                )
+                chunks = 0
+                failed = []
         for i, path in enumerate(files):
             try:
                 chunks += self.process_file(path, str(i))

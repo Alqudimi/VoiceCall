@@ -125,33 +125,102 @@ class Trainer:
             num_replicas=1, rank=0, shuffle=True,
         )
         use_cuda = self.device.startswith("cuda")
-        num_workers = int(os.environ.get("RVC_NUM_WORKERS", "2" if use_cuda else "0"))
+        # Fast defaults merged with env-var overrides: workers auto-scale with
+        # the machine (Colab free T4 has 2 vCPU -> 2 workers; L4/A100 runtimes
+        # get more), stay alive across epochs (fork cost paid once) and
+        # prefetch ahead. RVC_NUM_WORKERS / RVC_PERSISTENT_WORKERS /
+        # RVC_PREFETCH_FACTOR let anyone benchmark or clamp these per session
+        # without touching code (sampler order is unaffected either way).
+        cpu = os.cpu_count() or 2
+        default_workers = min(6, max(2, cpu)) if use_cuda else 0
+        num_workers = int(os.environ.get("RVC_NUM_WORKERS", str(default_workers)))
         num_workers = max(0, min(num_workers, 16))
-        persistent = os.environ.get("RVC_PERSISTENT_WORKERS", "0") == "1" and num_workers > 0
-        loader_kwargs = {}
+        persistent = (
+            os.environ.get("RVC_PERSISTENT_WORKERS", "1") == "1" and num_workers > 0
+        )
+        loader_kwargs = dict(num_workers=num_workers, persistent_workers=persistent)
         if num_workers > 0:
             loader_kwargs["prefetch_factor"] = max(
-                1, min(int(os.environ.get("RVC_PREFETCH_FACTOR", "2")), 8)
+                1, min(int(os.environ.get("RVC_PREFETCH_FACTOR", "4")), 8)
             )
         loader = DataLoader(
             dataset,
-            # Defaults preserve the historical project behavior. These flags are
-            # opt-in so Colab users can benchmark without changing sampler order.
-            num_workers=num_workers,
             shuffle=False,
             pin_memory=use_cuda,
             collate_fn=collate,
             batch_sampler=sampler,
-            persistent_workers=persistent,
             **loader_kwargs,
         )
         net_g = net_g.to(self.device)
         net_d = disc_cls(hps.model["use_spectral_norm"]).to(self.device)
-        optim_g = torch.optim.AdamW(net_g.parameters(), hps.train["learning_rate"],
-                                    betas=hps.train["betas"], eps=hps.train["eps"])
-        optim_d = torch.optim.AdamW(net_d.parameters(), hps.train["learning_rate"],
-                                     betas=hps.train["betas"], eps=hps.train["eps"])
+        optim_g = self._make_optimizer(net_g, hps)
+        optim_d = self._make_optimizer(net_d, hps)
         return dataset, loader, net_g, net_d, optim_g, optim_d
+
+    @staticmethod
+    def _make_optimizer(module: torch.nn.Module, hps) -> torch.optim.AdamW:
+        """AdamW with the fused CUDA kernel when available.
+
+        The fused implementation is the same update rule executed in a single
+        kernel launch (vertically fused), and it natively supports AMP
+        gradient scaling (checks inf/unscale inside the kernel). Falls back to
+        the default implementation anywhere else.
+        """
+        kwargs = dict(betas=hps.train["betas"], eps=hps.train["eps"])
+        if next(module.parameters()).is_cuda:
+            try:
+                return torch.optim.AdamW(
+                    module.parameters(), hps.train["learning_rate"],
+                    fused=True, **kwargs,
+                )
+            except (TypeError, RuntimeError):
+                logger.info("fused AdamW unavailable — default implementation")
+        return torch.optim.AdamW(
+            module.parameters(), hps.train["learning_rate"], **kwargs
+        )
+
+    @staticmethod
+    def _unwrap(module: torch.nn.Module) -> torch.nn.Module:
+        """Underlying module of a torch.compile wrapper (weights are shared)."""
+        return getattr(module, "_orig_mod", module)
+
+    def _maybe_compile(self, net_g, net_d):
+        """Optional torch.compile for both networks.
+
+        Default "auto": enabled on CUDA, disabled elsewhere. Set
+        RVC_TORCH_COMPILE=0 to force off, =1 to force on. dynamo's
+        suppress_errors turns any compile failure into a silent fall-back to
+        eager execution, so a compile bug can never crash a training run.
+        Checkpoints keep byte-identical keys because state dicts are always
+        read from the unwrapped module (see _unwrap / _checkpoint).
+        """
+        choice = os.environ.get("RVC_TORCH_COMPILE", "auto").strip().lower()
+        if choice in ("0", "off", "false", "no", "none"):
+            return net_g, net_d
+        if choice in ("1", "on", "true", "yes"):
+            enabled = True
+        else:  # auto
+            enabled = self.device.startswith("cuda")
+        if not enabled:
+            return net_g, net_d
+        try:
+            import torch._dynamo
+
+            torch._dynamo.config.suppress_errors = True
+            # bucketing yields a handful of distinct shape sets; allow one
+            # compiled graph per shape instead of reverting to eager at the
+            # default recompile limit (8).
+            torch._dynamo.config.cache_size_limit = max(
+                torch._dynamo.config.cache_size_limit, 32
+            )
+            compiled_g = torch.compile(net_g)
+            compiled_d = torch.compile(net_d)
+            logger.info("torch.compile enabled for G and D (auto eager fallback)")
+            return compiled_g, compiled_d
+        except Exception:
+            logger.warning("torch.compile unavailable — continuing in eager mode",
+                           exc_info=True)
+            return net_g, net_d
 
     # ------------------------------------------------------------------ resume
     def _resolve_explicit(self) -> Path | None:
@@ -279,6 +348,17 @@ class Trainer:
             raise TrainingError("trainer already running")
         self.dataset_signature = dataset_signature
         torch.manual_seed(self.hps.train.get("seed", 1234))
+        if self.device.startswith("cuda"):
+            # cuDNN autotuner: the bucket sampler yields a small, repeating
+            # set of shapes, so benchmarking cost is paid once per shape.
+            # TF32 matmuls ("high") engage on Ampere+ (L4/A100); a no-op on
+            # T4. Neither changes the training math beyond float rounding,
+            # and the fp16 autocast paths are untouched.
+            torch.backends.cudnn.benchmark = True
+            try:
+                torch.set_float32_matmul_precision("high")
+            except Exception:  # pragma: no cover — very old torch
+                pass
         (dataset, loader, net_g, net_d,
          optim_g, optim_d) = self._build()
         self.steps_per_epoch = len(loader)
@@ -296,6 +376,7 @@ class Trainer:
 
         self._restore(net_g, net_d, optim_g, optim_d, sched_g, sched_d, scaler,
                       dataset_signature)
+        net_g, net_d = self._maybe_compile(net_g, net_d)
         start_epoch = self.epoch + 1
         if start_epoch > self.hps.total_epoch:
             logger.info("already past total_epoch (%s > %s) — nothing to do",
@@ -402,7 +483,9 @@ class Trainer:
                 optim_d.zero_grad(set_to_none=True)
                 scaler.scale(loss_disc).backward()
                 scaler.unscale_(optim_d)
-                commons.clip_grad_value_(net_d.parameters(), None)
+                # upstream "clips" with value None — a no-op whose per-parameter
+                # .item() norm bookkeeping forces a GPU->CPU sync every step;
+                # skipped with identical numerics (no clamping happens anyway).
                 scaler.step(optim_d)
 
                 with torch.autocast("cuda" if self.is_half else "cpu",
@@ -417,7 +500,7 @@ class Trainer:
                 optim_g.zero_grad(set_to_none=True)
                 scaler.scale(loss_gen_all).backward()
                 scaler.unscale_(optim_g)
-                commons.clip_grad_value_(net_g.parameters(), None)
+                # see the D-side note: None-clipping is a no-op, skipped.
                 scaler.step(optim_g)
                 scaler.update()
 
@@ -455,6 +538,8 @@ class Trainer:
         step_name = self.global_step if not final else "final"
         g_path = self.checkpoint_dir / f"G_{step_name}.pth"
         d_path = self.checkpoint_dir / f"D_{step_name}.pth"
+        net_g = self._unwrap(net_g)  # compiled wrappers share the raw weights
+        net_d = self._unwrap(net_d)
         checkpointing.save_full(g_path, net_g, optim_g, sched_g, scaler,
                                  epoch, self.global_step)
         checkpointing.save_full(d_path, net_d, optim_d, sched_d, None,
@@ -488,7 +573,7 @@ class Trainer:
         # here we only export the final inference model when completed.
         if completed:
             export = engine_ckpt.export_inference_checkpoint(
-                net_g.state_dict(), self.hps, epoch, self.hps.version,
+                self._unwrap(net_g).state_dict(), self.hps, epoch, self.hps.version,
                 self.exports_dir / f"{self.config.experiment_name}.pth",
                 self.hps.sample_rate, self.hps.if_f0,
             )
