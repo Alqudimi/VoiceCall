@@ -230,6 +230,7 @@ Windows/Colab حيث لا يوجد make. المجموعات: `install`, `env`, `
 | إعادة إنتاج من lockfile | `make verify` | `uv run rvc-platform env verify` |
 | تنزيل الأصول | `make download-models` | `uv run rvc-platform download-models` |
 | فحص بيانات | `make data-check DATASET=...` | `uv run rvc-platform data-check <dataset>` |
+| استيراد مجلد صوت وتجهيزه | `make prepare-audio-dataset SOURCE=... NAME=... SR=40k` | `uv run rvc-platform prepare-audio-dataset <source> <name> --sr 40k` |
 | تقطيع/تطبيع فقط | `make preprocess DATASET=... EXPERIMENT=... SR=40k` | `uv run rvc-platform preprocess <dataset> <exp> --sr 40k` |
 | استخراج ميزات تجربة قائمة | `make extract-features EXPERIMENT=... F0_METHOD=rmvpe` | `uv run rvc-platform extract-features <exp> --f0-method rmvpe` |
 | خط البيانات الكامل | `make prepare-dataset DATASET=... EXPERIMENT=... SR=40k F0_METHOD=rmvpe` | `uv run rvc-platform prepare-dataset <dataset> <exp> --sr 40k --f0-method rmvpe` |

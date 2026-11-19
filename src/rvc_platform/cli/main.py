@@ -287,6 +287,35 @@ def data_check(dataset: Path):
                       "(collect 10-60 min of clean Iraqi speech)[/yellow]")
 
 
+@app.command("prepare-audio-dataset")
+def prepare_audio_dataset(
+    source: Path = typer.Argument(..., help="External folder containing audio files (recursive)"),
+    dataset_name: str = typer.Argument(..., help="Safe dataset name, e.g. my_voice"),
+    sr: str = typer.Option("40k", "--sr", help="Output rate: 32k, 40k, or 48k"),
+    min_duration: float = typer.Option(0.35, "--min-duration", help="Minimum usable clip duration in seconds"),
+    trim_margin_ms: int = typer.Option(120, "--trim-margin-ms", help="Silence margin kept around speech"),
+    force: bool = typer.Option(False, "--force", help="Replace an existing data/raw/<name> directory"),
+):
+    """Decode, clean, deduplicate, and install an external audio folder in data/raw."""
+    from rvc_platform.training.dataset_import import AudioDatasetImporter, parse_sample_rate
+
+    importer = AudioDatasetImporter(
+        target_sr=parse_sample_rate(sr),
+        min_duration_s=min_duration,
+        trim_margin_ms=trim_margin_ms,
+    )
+    report = importer.import_folder(
+        source, dataset_name, force=force,
+        progress=lambda frac, name: console.print(f"[dim]import: {frac * 100:.0f}% ({name})[/dim]"),
+    )
+    console.print_json(json.dumps(report.to_dict(), ensure_ascii=False))
+    console.print(f"[green]dataset ready: {report.output_path}[/green]")
+    console.print(
+        f"Next: make prepare-dataset DATASET={report.output_path} "
+        f"EXPERIMENT={dataset_name} SR={sr} F0_METHOD=rmvpe"
+    )
+
+
 @app.command("preprocess")
 def preprocess(dataset: Path, experiment: str, sr: str = typer.Option("40k")):
     from rvc_platform.training.run_config import TrainingRunConfig

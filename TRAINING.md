@@ -36,6 +36,26 @@ make data-check DATASET=data/raw/myvoice
 md5**، المدد (كلية/أدنى/أقصى)، والملفات الفارغة. إن كانت المدة أقل من 10 دقائق
 تحذّرك المنصة صراحة من تدهور الجودة.
 
+## 2.5 استيراد مجلد صوت خارجي وتجهيزه تلقائيًا
+
+إذا كانت تسجيلاتك موزعة في مجلد خارجي وبصيغ مختلفة، استخدم وحدة الاستيراد الجديدة.
+تبحث الوحدة داخل المجلد والمجلدات الفرعية، تفك الترميز عبر FFmpeg، تحول الصوت إلى
+Mono بمعدل التدريب، تقص الصمت من البداية والنهاية مع هامش يحافظ على بدايات الكلمات،
+تحذف التكرارات بعد فك الترميز، وتتجاوز الملفات التالفة أو الصامتة أو القصيرة. الناتج
+يوضع تلقائيًا في `data/raw/<اسم_المجموعة>`، مع `import_report.json` و
+`import_manifest.csv` يشرحان كل ملف تم قبوله أو استبعاده.
+
+```bash
+uv run rvc-platform prepare-audio-dataset /path/to/recordings my_voice --sr 40k
+# أو عبر Make:
+make prepare-audio-dataset SOURCE=/path/to/recordings NAME=my_voice SR=40k
+```
+
+الصيغ الشائعة المدعومة تشمل WAV وFLAC وMP3 وOGG/Opus وM4A/AAC وWMA وWebM وAIFF
+وAMR وAPE وAC3 وDTS وMKA وغيرها مما يستطيع FFmpeg فك ترميزه. لا يستبدل الأمر
+مجموعة موجودة تلقائيًا؛ استخدم `--force` أو `FORCE=--force` فقط إذا كنت متأكدًا.
+بعد نجاحه شغّل `make data-check DATASET=data/raw/my_voice` ثم `make prepare-dataset`.
+
 ---
 
 ## 3. خط تجهيز البيانات (Pipeline)
