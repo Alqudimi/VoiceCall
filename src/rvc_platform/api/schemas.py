@@ -48,6 +48,8 @@ class TrainingStartRequest(BaseModel):
     save_every_epoch: int = Field(default=10, ge=1, le=200)
     save_every_weights: bool = True
     save_latest: bool = True
+    save_best: bool = True
+    val_split: float = Field(default=0.0, ge=0.0, le=0.5)
     cache_in_gpu: bool = False
     preload_base_models: bool = True
     gpu: int | None = None

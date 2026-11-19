@@ -244,7 +244,9 @@ curl -s $API/api/training/status
 ### GET /api/training/runs — كل التجارب
 
 - الاستجابة: مصفوفة: `experiment`, `run_dir`, `epoch`, `global_step`,
-  `updated_at`, `has_checkpoints`.
+  `updated_at`, `has_checkpoints`, `hf_repo_id`, `hf_url`,
+  `best` (`{epoch, global_step, metric, score, improved_at}` أو null)،
+  و`hf_best` (بيانات أفضل نموذج المرفوع إلى `best/` في المستودع، إن وُجد).
 
 ```bash
 curl -s $API/api/training/runs
@@ -297,6 +299,8 @@ curl -s "$API/api/training/prepare/status?experiment=iraqi_voice"
 | `lr_decay` | 0.999875 | معامل ExponentialLR |
 | `save_every_epoch` | 10 | 1..200 |
 | `save_every_weights` / `save_latest` | true | نقاط التصدير/المرآة |
+| `save_best` | true | تتبّع أفضل نموذج ورفعه إلى `best/` |
+| `val_split` | 0.0 | 0..0.5 — نسبة بيانات التحقق لقياس الأفضل |
 | `cache_in_gpu` | false | تخزين الميزات على GPU |
 | `preload_base_models` | true | قواعد pretrained_v2 |
 | `gpu` | null | فهرس GPU |

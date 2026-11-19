@@ -63,6 +63,8 @@ async function mount(root) {
     lrDecay: root.querySelector("#tr-lr-decay"),
     saveEvery: root.querySelector("#tr-save-every"),
     hfRepo: root.querySelector("#tr-hf-repo"),
+    saveBest: root.querySelector("#tr-save-best"),
+    valSplit: root.querySelector("#tr-val-split"),
     cleanStart: root.querySelector("#tr-clean-start"),
     f0: root.querySelector("#tr-f0"),
     f0Method: root.querySelector("#tr-f0-method"),
@@ -159,6 +161,9 @@ function buildFormCard() {
       field("tr-hf-repo", "مستودع Hugging Face خاص (اختياري)", el("input", {
         type: "text", id: "tr-hf-repo", placeholder: "username/my-private-voice", dir: "ltr",
       }), "الصيغة owner/repository؛ عرّف HF_TOKEN على خادم التدريب. لا تضع الرمز هنا."),
+      field("tr-val-split", "نسبة بيانات التحقق ( % )", el("input", {
+        type: "number", id: "tr-val-split", min: "0", max: "50", step: "1", value: "5", dir: "ltr",
+      }), "تُحجز لقياس جودة كل Epoch واختيار أفضل نموذج (موصى به 5). 0 = الاعتماد على خسارة التدريب."),
     ]),
     el("div", { class: "row mt" }, [
       el("label", { class: "check" }, [
@@ -166,9 +171,15 @@ function buildFormCard() {
         el("span", {}, ["تدريب بالطبقة ", el("span", { class: "opt-latin" }, ["f0"])]),
       ]),
       el("label", { class: "check" }, [
+        el("input", { type: "checkbox", id: "tr-save-best", checked: true }),
+        el("span", {}, ["تتبّع أفضل نموذج ورفعه تلقائيًا إلى ", el("span", { class: "opt-latin" }, ["best/"]), " في المستودع"]),
+      ]),
+      el("label", { class: "check" }, [
         el("input", { type: "checkbox", id: "tr-clean-start" }),
         el("span", {}, ["إعادة التدريب بالكامل من البداية"]),
       ]),
+    ]),
+    el("div", { class: "row mt" }, [
       el("div", { class: "field grow" }, [
         el("label", { for: "tr-f0-method" }, ["طريقة f0"]),
         el("select", { id: "tr-f0-method" }, [
@@ -447,6 +458,8 @@ async function runStart(state, ui) {
       speaker_id: payload.speaker_id,
       resume: true,
       clean_start: ui.cleanStart.checked,
+      save_best: ui.saveBest.checked,
+      val_split: Math.max(0, Math.min(0.5, Number(ui.valSplit.value || 0) / 100)),
       hf_repo_id: ui.hfRepo.value.trim() || null,
     });
     state.currentExperiment = res?.run || payload.experiment_name;
@@ -518,10 +531,16 @@ function renderMonitor(state, ui, status) {
 
   const meta = document.getElementById("tr-monitor-meta");
   clear(meta);
+  const best = training.best;
   meta.append(
     el("span", { class: "badge" }, [`خطوة عامة: ${fmtNum(training.global_step || 0, 0)}`]),
     training.steps_per_epoch ? el("span", { class: "badge" }, [`خطوات/دورة: ${fmtNum(training.steps_per_epoch, 0)}`]) : null,
     training.updated_at ? el("span", { class: "badge" }, [`آخر تحديث: ${fmtTime(training.updated_at)}`]) : null,
+    (best && best.epoch) ? el("span", { class: "badge ok" }, [
+      `أفضل نموذج: Epoch ${fmtNum(best.epoch, 0)} — ${best.metric || "metric"} ${
+        typeof best.score === "number" ? best.score.toFixed(4) : ""
+      }`,
+    ]) : null,
     (training.message && training.message.includes(" ")) ? el("span", { class: "badge info" }, [training.message]) : null,
   );
 
@@ -665,6 +684,12 @@ async function loadRuns(state, ui) {
         el("td", { class: "num" }, [String(run.epoch ?? 0)]),
         el("td", { class: "num" }, [String(run.global_step ?? 0)]),
         el("td", { class: "latin small" }, [fmtTime(run.updated_at)]),
+        el("td", { class: "latin small" }, [
+          run.best && run.best.epoch
+            ? `E${run.best.epoch} · ${run.best.metric || ""} ${
+                typeof run.best.score === "number" ? run.best.score.toFixed(4) : ""}`
+            : "—",
+        ]),
         el("td", {}, [run.hf_url ? el("a", {
           href: run.hf_url, target: "_blank", rel: "noopener noreferrer", class: "latin",
         }, ["مستودع النموذج"]) : el("span", { class: "muted" }, ["—"])]),
@@ -685,6 +710,7 @@ async function loadRuns(state, ui) {
           el("th", {}, ["الدورة"]),
           el("th", {}, ["الخطوة"]),
           el("th", {}, ["آخر تحديث"]),
+          el("th", {}, ["أفضل نموذج"]),
           el("th", {}, ["Hugging Face"]),
           el("th", {}, ["نقاط حفظ"]),
           el("th", {}, [""]),

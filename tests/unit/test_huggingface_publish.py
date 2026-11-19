@@ -11,6 +11,12 @@ from rvc_platform.training.run_config import TrainingRunConfig
 from rvc_platform.training.worker import _clear_previous_training
 
 
+class FakeCommitOperationAdd:
+    def __init__(self, path_in_repo, path_or_fileobj):
+        self.path_in_repo = path_in_repo
+        self.path_or_fileobj = path_or_fileobj
+
+
 def test_publish_private_models_only(tmp_path, monkeypatch):
     run_dir = tmp_path / "run"
     exports = run_dir / "exports"
@@ -19,7 +25,7 @@ def test_publish_private_models_only(tmp_path, monkeypatch):
     (run_dir / "added_IVF1.index").write_bytes(b"index")
     (run_dir / "source.wav").write_bytes(b"private audio")
     (run_dir / "filelist.txt").write_text("private dataset paths")
-    calls = {"created": [], "uploaded": []}
+    calls = {"created": [], "commits": []}
 
     class FakeHfApi:
         def __init__(self, token):
@@ -31,20 +37,25 @@ def test_publish_private_models_only(tmp_path, monkeypatch):
         def repo_info(self, **kwargs):
             return SimpleNamespace(private=True)
 
-        def upload_file(self, **kwargs):
-            calls["uploaded"].append(kwargs)
+        def create_commit(self, **kwargs):
+            calls["commits"].append(kwargs)
 
-    monkeypatch.setitem(sys.modules, "huggingface_hub", SimpleNamespace(HfApi=FakeHfApi))
+    monkeypatch.setitem(sys.modules, "huggingface_hub",
+                        SimpleNamespace(HfApi=FakeHfApi,
+                                        CommitOperationAdd=FakeCommitOperationAdd))
     monkeypatch.setenv("HF_TOKEN", "hf-secret")
     url = publish_run(run_dir, "owner/private-voice")
 
     assert url == "https://huggingface.co/owner/private-voice"
     assert calls["created"][0]["private"] is True
     assert calls["created"][0]["exist_ok"] is True
-    assert {Path(call["path_or_fileobj"]).name for call in calls["uploaded"]} == {
-        "voice.pth", "added_IVF1.index"
-    }
-    assert all("source.wav" not in call["path_in_repo"] for call in calls["uploaded"])
+    # one atomic commit carrying model + index together
+    assert len(calls["commits"]) == 1
+    (commit,) = calls["commits"]
+    paths_in_repo = {op.path_in_repo for op in commit["operations"]}
+    assert paths_in_repo == {"models/voice.pth", "indexes/added_IVF1.index"}
+    assert all("source.wav" not in path for path in paths_in_repo)
+    assert commit["repo_type"] == "model"
 
 
 def test_publish_refuses_existing_public_repository(tmp_path, monkeypatch):
@@ -62,7 +73,9 @@ def test_publish_refuses_existing_public_repository(tmp_path, monkeypatch):
         def repo_info(self, **kwargs):
             return SimpleNamespace(private=False)
 
-    monkeypatch.setitem(sys.modules, "huggingface_hub", SimpleNamespace(HfApi=PublicRepoApi))
+    monkeypatch.setitem(sys.modules, "huggingface_hub",
+                        SimpleNamespace(HfApi=PublicRepoApi,
+                                        CommitOperationAdd=FakeCommitOperationAdd))
     monkeypatch.setenv("HF_TOKEN", "hf-secret")
     with pytest.raises(RuntimeError, match="is public"):
         publish_run(tmp_path, "owner/public-repo")
@@ -71,6 +84,9 @@ def test_publish_refuses_existing_public_repository(tmp_path, monkeypatch):
 def test_publish_requires_token(tmp_path, monkeypatch):
     monkeypatch.delenv("HF_TOKEN", raising=False)
     monkeypatch.delenv("HUGGINGFACE_HUB_TOKEN", raising=False)
+    exports = tmp_path / "exports"
+    exports.mkdir()
+    (exports / "voice.pth").write_bytes(b"weights")
     with pytest.raises(RuntimeError, match="Set HF_TOKEN"):
         publish_run(tmp_path, "owner/repo")
 
@@ -90,12 +106,21 @@ def test_clean_start_clears_old_artifacts_but_keeps_prepared_data(project_env):
     prepared = config.run_dir / "3_feature768" / "feature.npy"
     prepared.parent.mkdir(parents=True, exist_ok=True)
     prepared.write_bytes(b"keep")
+    # best-model + validation-split artifacts must be cleared too
+    (config.run_dir / "checkpoints" / "best.json").write_text("{}")
+    (config.run_dir / "filelist_train.txt").write_text("a")
+    (config.run_dir / "filelist_val.txt").write_text("b")
+    (config.run_dir / "validation_split.json").write_text("{}")
 
     _clear_previous_training(config)
 
     assert not list(layout["checkpoints"].glob("*.pth"))
+    assert not (config.run_dir / "checkpoints" / "best.json").exists()
     assert not list(layout["exports"].glob("*.pth"))
     assert all(not layout[key].exists() for key in ("progress", "events", "train_log"))
+    assert not (config.run_dir / "filelist_train.txt").exists()
+    assert not (config.run_dir / "filelist_val.txt").exists()
+    assert not (config.run_dir / "validation_split.json").exists()
     assert prepared.is_file()
     assert config.resume is False and config.resume_from is None
 
@@ -110,6 +135,25 @@ def test_hf_repo_id_validation(project_env):
         TrainingRunConfig(
             experiment_name="invalid", dataset_path=project_env / "dataset",
             hf_repo_id="not-a-repo-id",
+        )
+
+
+def test_run_config_best_model_fields(project_env):
+    config = TrainingRunConfig(
+        experiment_name="bestcfg", dataset_path=project_env / "dataset",
+    )
+    # smart defaults: tracking on, no data-pipeline change out of the box
+    assert config.save_best is True
+    assert config.val_split == 0.0
+    config2 = TrainingRunConfig(
+        experiment_name="bestcfg2", dataset_path=project_env / "dataset",
+        save_best=False, val_split=0.25,
+    )
+    assert config2.save_best is False and config2.val_split == 0.25
+    with pytest.raises(ValueError):
+        TrainingRunConfig(
+            experiment_name="badcfg", dataset_path=project_env / "dataset",
+            val_split=0.9,
         )
 
 

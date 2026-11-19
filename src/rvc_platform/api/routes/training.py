@@ -21,6 +21,15 @@ def _svc(request: Request):
     return request.app.state.services
 
 
+def _read_json(path: Path) -> dict:
+    try:
+        if path.is_file():
+            return json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        pass
+    return {}
+
+
 @router.get("/status")
 def status(request: Request):
     return _svc(request)["training"].status().to_dict()
@@ -32,27 +41,11 @@ def runs(request: Request):
     out = []
     for cfg_path in sorted(runs_root.glob("*/run_config.json")):
         run_dir = cfg_path.parent
-        state_file = run_dir / "checkpoints" / "state.json"
-        progress_file = run_dir / "progress.json"
-        state = {}
-        if state_file.is_file():
-            try:
-                state = json.loads(state_file.read_text(encoding="utf-8"))
-            except json.JSONDecodeError:
-                state = {}
-        progress = {}
-        if progress_file.is_file():
-            try:
-                progress = json.loads(progress_file.read_text(encoding="utf-8"))
-            except json.JSONDecodeError:
-                progress = {}
-        hf_publish = {}
-        hf_file = run_dir / "huggingface.json"
-        if hf_file.is_file():
-            try:
-                hf_publish = json.loads(hf_file.read_text(encoding="utf-8"))
-            except json.JSONDecodeError:
-                hf_publish = {}
+        state = _read_json(run_dir / "checkpoints" / "state.json")
+        progress = _read_json(run_dir / "progress.json")
+        hf_publish = _read_json(run_dir / "huggingface.json")
+        best = _read_json(run_dir / "checkpoints" / "best.json")
+        run_cfg = _read_json(cfg_path)
         out.append(
             {
                 "experiment": run_dir.name,
@@ -65,8 +58,14 @@ def runs(request: Request):
                 ),
                 "has_checkpoints": (run_dir / "checkpoints").is_dir()
                 and any((run_dir / "checkpoints").glob("G_*.pth")),
-                "hf_repo_id": hf_publish.get("repo_id"),
+                "hf_repo_id": hf_publish.get("repo_id") or run_cfg.get("hf_repo_id"),
                 "hf_url": hf_publish.get("url"),
+                "best": {
+                    key: best.get(key)
+                    for key in ("epoch", "global_step", "metric", "score",
+                                "improved_at")
+                } if best else None,
+                "hf_best": hf_publish.get("best"),
             }
         )
     return out

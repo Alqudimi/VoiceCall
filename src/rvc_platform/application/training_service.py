@@ -144,6 +144,8 @@ class TrainingService:
             progress.latest_losses = chosen.get("latest_losses", {}) or {}
             progress.updated_at = chosen.get("ts")
             progress.message = chosen_dir.name if chosen_dir else ""
+            best = chosen.get("best")
+            progress.best = best if isinstance(best, dict) and best.get("epoch") else None
         progress.state = JobState.RUNNING if running else (
             progress.state if progress.state not in (JobState.RUNNING,) else JobState.IDLE
         )

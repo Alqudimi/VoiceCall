@@ -197,6 +197,7 @@ class TrainingProgress:
     started_at: float | None = None
     updated_at: float | None = None
     message: str = ""
+    best: dict[str, Any] | None = None      # best-so-far model (metric/score/epoch)
 
     @property
     def epoch_fraction(self) -> float:
@@ -213,6 +214,7 @@ class TrainingProgress:
             "started_at": self.started_at,
             "updated_at": self.updated_at,
             "message": self.message,
+            "best": self.best,
         }
 
 

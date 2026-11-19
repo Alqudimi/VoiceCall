@@ -10,7 +10,13 @@ ExponentialLR decay, AdamW betas) with an engineered shell around it:
   * dataset-signature guard before resume;
   * periodic inference-checkpoint export;
   * cooperative stop (finishes current step, saves, exits 0);
-  * progress events (epoch/step/losses/lr/eta) via callback.
+  * progress events (epoch/step/losses/lr/eta) via callback;
+  * ALL disk writes (checkpoints, mirrors, state.json, exports) and the
+    best-model bookkeeping run through a background I/O worker — the loop
+    only pays for a CPU snapshot of live state, never for serialization;
+  * best-so-far model tracking: per-epoch held-out validation (or the
+    epoch-mean training mel loss as fallback) with a persisted best bar
+    (checkpoints/best.json) and best-model inference exports.
 """
 from __future__ import annotations
 
@@ -29,6 +35,8 @@ from rvc_platform.core.entities import JobState
 from rvc_platform.core.errors import CheckpointError, TrainingError
 from rvc_platform.engine.rvc import checkpoint as engine_ckpt
 from rvc_platform.engine.rvc.models import commons
+from rvc_platform.training import background_io
+from rvc_platform.training import best_model
 from rvc_platform.training import checkpointing
 from rvc_platform.training import losses as L
 from rvc_platform.training import mel_processing
@@ -56,6 +64,8 @@ class Trainer:
         device: str,
         training_dtype: torch.dtype,
         event_cb: Callable[[dict], None] | None = None,
+        best_export_cb: Callable[[str, dict], None] | None = None,
+        io_worker: background_io.BackgroundIOWorker | None = None,
     ) -> None:
         self.config = config
         self.hps = hps
@@ -63,6 +73,7 @@ class Trainer:
         self.dtype = training_dtype
         self.is_half = training_dtype == torch.float16
         self._event = event_cb or (lambda payload: None)
+        self._best_export_cb = best_export_cb
         self._stop = threading.Event()
         self.state: JobState = JobState.IDLE
         self.global_step = 0
@@ -74,12 +85,22 @@ class Trainer:
         self.exports_dir = Path(hps.model_dir) / "exports"
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
         self.exports_dir.mkdir(parents=True, exist_ok=True)
+        # background I/O: every disk write leaves the training thread here
+        self._io = io_worker or background_io.BackgroundIOWorker(
+            name=f"io-{getattr(config, 'experiment_name', 'trainer')}",
+        )
+        # best-model tracking state
+        self._tracker: best_model.BestModelTracker | None = None
+        self._validator: best_model.ValidationEvaluator | None = None
+        self._epoch_mel_acc: torch.Tensor | None = None
+        self._epoch_start_step = 0
 
     # ------------------------------------------------------------------ events
     def emit(self, topic: str, **payload) -> None:
         self._event({"topic": topic, **payload})
 
     def progress_payload(self) -> dict:
+        best = self._tracker.best.to_dict() if self._tracker and self._tracker.best else None
         return {
             "state": self.state.value,
             "epoch": self.epoch,
@@ -87,6 +108,7 @@ class Trainer:
             "global_step": self.global_step,
             "steps_per_epoch": self.steps_per_epoch,
             "latest_losses": self.last_losses,
+            "best": best,
         }
 
     # ------------------------------------------------------------------ build
@@ -341,6 +363,108 @@ class Trainer:
         self._load_pretrained(net_g, net_d, optim_d)
         return False
 
+    # ----------------------------------------------------------- best tracking
+    def _setup_best_tracking(self) -> None:
+        """Derive the validation split (pinned on disk), build the validator
+        and restore the persisted best bar. Must run before _build() so the
+        training loader sees filelist_train.txt."""
+        if not getattr(self.config, "save_best", True):
+            return
+        val_split = float(getattr(self.config, "val_split", 0.0) or 0.0)
+        split = None
+        validator = None
+        if val_split > 0:
+            training_files = Path(self.hps.data["training_files"])
+            split = best_model.derive_validation_split(training_files, val_split)
+            if split is not None and split.n_val > 0:
+                # train on the held-out-free manifest from now on
+                self.hps.data["training_files"] = str(split.train_path)
+                try:
+                    validator = best_model.ValidationEvaluator(
+                        self.hps, self.device, self.is_half, split.val_path,
+                    )
+                except Exception:
+                    logger.exception("validation evaluator unavailable; "
+                                     "falling back to train-mel scoring")
+                    validator = None
+        metric = "val_mel" if validator is not None else "train_mel"
+        self._tracker = best_model.BestModelTracker(
+            self.checkpoint_dir / best_model.BEST_STATE_NAME,
+            metric=metric, mode="min",
+        )
+        had_best = self._tracker.load()
+        if split is not None and split.rederived and had_best:
+            # scores across different data splits are not comparable
+            self._tracker.reset()
+            logger.info("validation split changed; best-model bar reset")
+        self._validator = validator
+        logger.info("best-model tracking enabled: metric=%s (validator=%s)",
+                    metric, validator is not None)
+
+    def _after_epoch(self, net_g, epoch: int) -> None:
+        """Score the epoch, update the best bar, export on improvement."""
+        if self._tracker is None:
+            return
+        scores: dict = {}
+        if self._validator is not None:
+            try:
+                scores = self._validator.evaluate(self._unwrap(net_g))
+            except Exception:
+                logger.exception("validation failed; using train-mel fallback")
+                scores = {}
+        if not scores:
+            steps = max(1, self.global_step - self._epoch_start_step)
+            if self._epoch_mel_acc is None:
+                return
+            c_mel = float(self.hps.train.get("c_mel", 1.0) or 1.0)
+            scores = {"train_mel": float(self._epoch_mel_acc) / steps / c_mel}
+        info = self._tracker.update(scores, epoch, self.global_step)
+        best = self._tracker.best.to_dict() if self._tracker.best else None
+        self.emit("training.validation", epoch=epoch,
+                  metric=self._tracker.metric,
+                  scores={k: (round(v, 6) if isinstance(v, float) else v)
+                          for k, v in scores.items()},
+                  best=best)
+        if info is not None:
+            logger.info("new best model: epoch=%s %s=%.6f",
+                        epoch, info.metric, info.score)
+            self._export_best(net_g, info)
+
+    def _export_best(self, net_g, info: best_model.BestModelInfo) -> None:
+        """Snapshot G and queue the best-model export + best.json on the
+        background I/O worker; the on_done chain hands the landed file to the
+        HF publisher (via best_export_cb) only after it exists on disk."""
+        snapshot = background_io.snapshot_to_cpu(self._unwrap(net_g).state_dict())
+        out_path = self.exports_dir / (
+            f"{self.config.experiment_name}_best_e{info.epoch}_s{info.global_step}.pth"
+        )
+        metadata = {
+            **info.to_dict(),
+            "experiment": self.config.experiment_name,
+            "sample_rate": self.hps.sample_rate,
+            "version": self.hps.version,
+            "f0": bool(int(self.hps.if_f0)),
+            "export": out_path.name,
+        }
+        best_json = self.checkpoint_dir / best_model.BEST_STATE_NAME
+
+        def _on_done(_export: Path) -> None:
+            self.emit("training.best_model", path=str(out_path),
+                      epoch=info.epoch, global_step=info.global_step,
+                      metric=info.metric, score=info.score)
+            if self._best_export_cb is not None:
+                try:
+                    self._best_export_cb(str(out_path), metadata)
+                except Exception:
+                    logger.exception("best-export callback failed")
+
+        self._io.submit(
+            f"best-export-e{info.epoch}",
+            best_model.write_best_artifacts,
+            snapshot, self.hps, metadata, out_path, best_json,
+            on_done=_on_done,
+        )
+
     # ------------------------------------------------------------------ run
     def run(self, dataset_signature: dict | None = None) -> bool:
         """Train to configured epoch count. Returns completed (not stopped)."""
@@ -359,6 +483,7 @@ class Trainer:
                 torch.set_float32_matmul_precision("high")
             except Exception:  # pragma: no cover — very old torch
                 pass
+        self._setup_best_tracking()
         (dataset, loader, net_g, net_d,
          optim_g, optim_d) = self._build()
         self.steps_per_epoch = len(loader)
@@ -378,32 +503,41 @@ class Trainer:
                       dataset_signature)
         net_g, net_d = self._maybe_compile(net_g, net_d)
         start_epoch = self.epoch + 1
-        if start_epoch > self.hps.total_epoch:
-            logger.info("already past total_epoch (%s > %s) — nothing to do",
-                        start_epoch, self.hps.total_epoch)
-            self._finalize(net_g, self.epoch, completed=True)
-            self.state = JobState.COMPLETED
-            return True
-
+        flush_timeout = float(os.environ.get("RVC_IO_FLUSH_TIMEOUT", "900"))
+        completed: bool
         try:
-            completed = self._loop(
-                net_g, net_d, optim_g, optim_d, sched_g, sched_d, scaler,
-                loader, start_epoch,
-            )
-        except Exception as exc:
-            # crash-save: persist an emergency checkpoint so the run stays
-            # resumable even after an unexpected failure (OOM, bad batch...)
-            self.state = JobState.FAILED
-            try:
-                self._checkpoint(net_g, net_d, optim_g, optim_d, sched_g, sched_d,
-                                 scaler, self.epoch, final=False, emergency=True)
-            except Exception:
-                logger.exception("emergency crash-save also failed")
-            self.emit("training.failed", error=str(exc),
-                      emergency_checkpoint=bool(self.global_step))
-            logger.exception("training failed")
-            raise
-        self._finalize(net_g, self.epoch, completed=completed)
+            if start_epoch > self.hps.total_epoch:
+                logger.info("already past total_epoch (%s > %s) — nothing to do",
+                            start_epoch, self.hps.total_epoch)
+                completed = True
+            else:
+                try:
+                    completed = self._loop(
+                        net_g, net_d, optim_g, optim_d, sched_g, sched_d, scaler,
+                        loader, start_epoch,
+                    )
+                except Exception as exc:
+                    # crash-save: persist an emergency checkpoint so the run stays
+                    # resumable even after an unexpected failure (OOM, bad batch...)
+                    self.state = JobState.FAILED
+                    try:
+                        self._checkpoint(net_g, net_d, optim_g, optim_d, sched_g,
+                                         sched_d, scaler, self.epoch,
+                                         final=False, emergency=True)
+                    except Exception:
+                        logger.exception("emergency crash-save also failed")
+                    # the crash-save must land on disk before we report failure
+                    self._io.wait_idle(60.0)
+                    self.emit("training.failed", error=str(exc),
+                              emergency_checkpoint=bool(self.global_step))
+                    logger.exception("training failed")
+                    raise
+            self._finalize(net_g, self.epoch, completed=completed)
+        finally:
+            # drain every queued write (checkpoints/mirrors/state/exports)
+            # before the run ends — nothing is left to a daemon-thread race
+            self._io.wait_idle(flush_timeout)
+            self._io.close(timeout=60.0)
         self.state = JobState.COMPLETED if completed else JobState.STOPPED
         self.emit("training.finished", completed=completed,
                   epoch=self.epoch, seconds=round(time.time() - started, 1))
@@ -420,6 +554,8 @@ class Trainer:
             net_g.train()
             net_d.train()
             epoch_start = time.time()
+            self._epoch_start_step = self.global_step
+            self._epoch_mel_acc = None
             for batch_idx, info in enumerate(loader):
                 if self._stop.is_set():
                     logger.info("stop requested at epoch %s batch %s", epoch, batch_idx)
@@ -497,6 +633,12 @@ class Trainer:
                         loss_fm = L.feature_loss(fmap_r, fmap_g)
                         loss_gen, losses_gen = L.generator_loss(y_d_hat_g)
                         loss_gen_all = loss_gen + loss_fm + loss_mel + loss_kl
+                if self._tracker is not None and self._validator is None:
+                    # GPU-side accumulation for the train_mel fallback metric;
+                    # a single host sync happens at the end of the epoch
+                    detached = loss_mel.detach()
+                    self._epoch_mel_acc = (detached if self._epoch_mel_acc is None
+                                           else self._epoch_mel_acc + detached)
                 optim_g.zero_grad(set_to_none=True)
                 scaler.scale(loss_gen_all).backward()
                 scaler.unscale_(optim_g)
@@ -522,6 +664,9 @@ class Trainer:
 
             sched_g.step()
             sched_d.step()
+            # score the epoch (held-out validation or train-mel fallback) and
+            # export/publish the best-so-far model when the bar is beaten
+            self._after_epoch(net_g, epoch)
             if epoch % hps.save_every_epoch == 0:
                 self._checkpoint(net_g, net_d, optim_g, optim_d, sched_g, sched_d,
                                  scaler, epoch, final=False)
@@ -535,18 +680,20 @@ class Trainer:
     # ------------------------------------------------------------------ checkpointing
     def _checkpoint(self, net_g, net_d, optim_g, optim_d, sched_g, sched_d,
                     scaler, epoch: int, final: bool, emergency: bool = False) -> dict:
+        """Queue a full-state checkpoint on the background I/O worker.
+
+        The only work on the training thread is building CPU snapshots of the
+        G/D state (build_full_payload); serialization, mirror refreshes and
+        the state.json update happen off-thread, strictly FIFO."""
         step_name = self.global_step if not final else "final"
         g_path = self.checkpoint_dir / f"G_{step_name}.pth"
         d_path = self.checkpoint_dir / f"D_{step_name}.pth"
-        net_g = self._unwrap(net_g)  # compiled wrappers share the raw weights
-        net_d = self._unwrap(net_d)
-        checkpointing.save_full(g_path, net_g, optim_g, sched_g, scaler,
-                                 epoch, self.global_step)
-        checkpointing.save_full(d_path, net_d, optim_d, sched_d, None,
-                                epoch, self.global_step)
-        if int(self.hps.if_latest) == 1:
-            # upstream-compatible always-latest mirrors (G_2333333/D_2333333)
-            checkpointing.write_latest_mirrors(self.checkpoint_dir, g_path, d_path)
+        net_g_raw = self._unwrap(net_g)   # compiled wrappers share raw weights
+        net_d_raw = self._unwrap(net_d)
+        payload_g = checkpointing.build_full_payload(
+            net_g_raw, optim_g, sched_g, scaler, epoch, self.global_step)
+        payload_d = checkpointing.build_full_payload(
+            net_d_raw, optim_d, sched_d, None, epoch, self.global_step)
         state = {
             "epoch": epoch,
             "global_step": self.global_step,
@@ -555,29 +702,56 @@ class Trainer:
             "dataset_signature": self.dataset_signature,
             "last_losses": self.last_losses,
             "run_config": self.config.model_dump(mode="json"),
+            "best": (self._tracker.best.to_dict()
+                     if self._tracker is not None and self._tracker.best is not None
+                     else None),
         }
-        checkpointing.write_state(state, self.checkpoint_dir / "state.json")
+        mirror = int(self.hps.if_latest) == 1
+        self._io.submit(
+            f"checkpoint-e{epoch}{'+emergency' if emergency else ''}",
+            checkpointing.write_checkpoint_files,
+            payload_g, g_path, payload_d, d_path,
+            state, self.checkpoint_dir / "state.json", mirror,
+        )
         if self.hps.save_every_weights == "1" or final:
-            export = engine_ckpt.export_inference_checkpoint(
-                net_g.state_dict(), self.hps, epoch, self.hps.version,
-                self.exports_dir / f"{self.config.experiment_name}_e{epoch}_s{self.global_step}.pth",
-                self.hps.sample_rate, self.hps.if_f0,
+            export_path = self.exports_dir / (
+                f"{self.config.experiment_name}_e{epoch}_s{self.global_step}.pth"
             )
-            self.emit("training.exported", path=str(export), epoch=epoch)
-        logger.info("checkpoint saved: epoch=%s step=%s emergency=%s -> %s", epoch,
-                    self.global_step, emergency, g_path)
+
+            def _on_export(export: Path) -> None:
+                # fire only after the file exists on disk — the worker layer
+                # reacts to this event by queueing the HF upload
+                self.emit("training.exported", path=str(export), epoch=epoch)
+
+            self._io.submit(
+                f"export-e{epoch}",
+                engine_ckpt.export_inference_checkpoint,
+                payload_g["model"], self.hps, epoch, self.hps.version,
+                export_path, self.hps.sample_rate, self.hps.if_f0,
+                on_done=_on_export,
+            )
+        logger.info("checkpoint queued: epoch=%s step=%s emergency=%s -> %s",
+                    epoch, self.global_step, emergency, g_path)
         return state
 
     def _finalize(self, net_g, epoch: int, completed: bool) -> None:
-        # the loop already saved a full checkpoint at stop/completion;
+        # the loop already queued a full checkpoint at stop/completion;
         # here we only export the final inference model when completed.
         if completed:
-            export = engine_ckpt.export_inference_checkpoint(
-                self._unwrap(net_g).state_dict(), self.hps, epoch, self.hps.version,
-                self.exports_dir / f"{self.config.experiment_name}.pth",
-                self.hps.sample_rate, self.hps.if_f0,
+            snapshot = background_io.snapshot_to_cpu(
+                self._unwrap(net_g).state_dict())
+            export_path = self.exports_dir / f"{self.config.experiment_name}.pth"
+
+            def _on_export(export: Path) -> None:
+                self.emit("training.final_model", path=str(export))
+
+            self._io.submit(
+                "final-export",
+                engine_ckpt.export_inference_checkpoint,
+                snapshot, self.hps, epoch, self.hps.version,
+                export_path, self.hps.sample_rate, self.hps.if_f0,
+                on_done=_on_export,
             )
-            self.emit("training.final_model", path=str(export))
 
     # ------------------------------------------------------------------ control
     def request_stop(self) -> None:

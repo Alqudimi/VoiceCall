@@ -10,19 +10,27 @@ loses scheduler / scaler / global-step / RNG state. We keep byte-compatibility
         D_<step>.pth   same for the discriminator
         G_2333333.pth / D_2333333.pth    always-latest mirrors
         state.json     {epoch, global_step, dataset_signature,
-                        run_config, losses tail, wall_clock, last_save}
+                        run_config, losses tail, wall_clock, last_save, best}
+        best.json      best-so-far model metadata (see best_model.py)
 
 Resume policy (CheckpointManager.resolve):
     1. explicit checkpoint requested -> use it;
     2. state.json exists and matches run config + dataset signature -> latest;
     3. upstream-style G_/D_ present -> legacy resume (epoch from 'iteration');
     4. nothing -> fresh start with optional pretrained base.
+
+I/O model: the trainer thread only *snapshots* live tensor state to CPU
+(``build_full_payload``) and hands the payload to the background I/O worker
+(``write_checkpoint_files``); serialization, mirror refreshes and the
+state.json update run off the training thread so the loop never waits on
+disk.
 """
 from __future__ import annotations
 
 import json
 import logging
 import re
+import shutil
 import time
 from pathlib import Path
 from typing import Any
@@ -31,6 +39,7 @@ import torch
 
 from rvc_platform.core.entities import CheckpointInfo
 from rvc_platform.core.errors import CheckpointError
+from rvc_platform.training.background_io import snapshot_to_cpu
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +52,56 @@ def _torch_save(obj: dict, path: Path) -> None:
     tmp.replace(path)
 
 
+def build_full_payload(
+    model: torch.nn.Module,
+    optimizer: torch.optim.Optimizer,
+    scheduler: torch.optim.lr_scheduler.LRScheduler | None,
+    scaler: Any | None,
+    epoch: int,
+    global_step: int,
+) -> dict:
+    """Snapshot the complete resume state to private CPU copies.
+
+    Safe to hand to a background thread: training may keep mutating the live
+    (GPU) tensors while the payload is serialized elsewhere. This is the only
+    part of a checkpoint save that must run on the training thread.
+    """
+    return {
+        "model": snapshot_to_cpu(model.state_dict()),
+        "optimizer": snapshot_to_cpu(optimizer.state_dict()) if optimizer is not None else None,
+        "scheduler": snapshot_to_cpu(scheduler.state_dict()) if scheduler is not None else None,
+        "scaler": snapshot_to_cpu(scaler.state_dict()) if scaler is not None else None,
+        "epoch": epoch,
+        "global_step": global_step,
+        "rng": snapshot_to_cpu(torch.get_rng_state()),
+        "saved_at": time.time(),
+    }
+
+
+def write_checkpoint_files(
+    payload_g: dict,
+    g_path: Path,
+    payload_d: dict,
+    d_path: Path,
+    state: dict | None,
+    state_path: Path,
+    mirror: bool,
+) -> None:
+    """Write a G/D checkpoint pair (+ optional always-latest mirrors + state).
+
+    Meant to run on the background I/O writer: atomic per file, and ordered —
+    state.json is only touched after both checkpoints are on disk, so a crash
+    mid-write can never advertise a checkpoint that does not exist.
+    """
+    g_path, d_path = Path(g_path), Path(d_path)
+    _torch_save(payload_g, g_path)
+    _torch_save(payload_d, d_path)
+    if mirror:
+        write_latest_mirrors(g_path.parent, g_path, d_path)
+    if state is not None:
+        write_state(state, state_path)
+
+
 def save_full(
     path: Path,
     model: torch.nn.Module,
@@ -52,6 +111,8 @@ def save_full(
     epoch: int,
     global_step: int,
 ) -> None:
+    """Synchronous full-state save (kept for tooling/tests; the trainer uses
+    build_full_payload + write_checkpoint_files on the background worker)."""
     _torch_save(
         {
             "model": model.state_dict(),
@@ -120,7 +181,7 @@ def write_latest_mirrors(checkpoint_dir: Path, g_path: Path, d_path: Path) -> No
         dst = checkpoint_dir / f"{tag}_{LATEST_TAG}.pth"
         tmp = dst.with_suffix(".pth.tmp")
         try:
-            tmp.write_bytes(Path(src).read_bytes())
+            shutil.copyfile(src, tmp)
             tmp.replace(dst)
         except OSError:
             logger.warning("could not refresh %s mirror", dst, exc_info=True)

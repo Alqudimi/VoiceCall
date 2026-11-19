@@ -47,6 +47,8 @@ class TrainingRunConfig(BaseModel):
     save_every_epoch: int = Field(default=10, ge=1, le=200)
     save_latest: bool = True                     # keep G_2333333/D_2333333 updated
     save_every_weights: bool = True              # periodic inference checkpoints
+    save_best: bool = True                       # track + export the best-so-far model
+    val_split: float = Field(default=0.0, ge=0.0, le=0.5)  # held-out fraction for best-model scoring (0 = train-mel fallback)
     cache_in_gpu: bool = False
     pretrained_g: Path | None = None             # explicit override
     pretrained_d: Path | None = None
