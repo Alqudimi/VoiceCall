@@ -56,6 +56,17 @@ class TrainingRunConfig(BaseModel):
     clean_start: bool = False                    # ignore existing checkpoints
     resume: bool = True                          # auto-resume when possible
     resume_from: Path | None = None             # explicit G_*.pth to resume from
+    hf_repo_id: str | None = None                # private model repo, e.g. user/voice-model
+
+    @field_validator("hf_repo_id")
+    @classmethod
+    def _hf_repo(cls, value: str | None) -> str | None:
+        if value is None or not value.strip():
+            return None
+        value = value.strip()
+        if len(value.split("/")) != 2 or any(not part for part in value.split("/")):
+            raise ValueError("hf_repo_id must use the format 'owner/repository'")
+        return value
 
     @field_validator("sample_rate")
     @classmethod

@@ -192,6 +192,12 @@ class Trainer:
         Returns resumed?"""
         from rvc_platform.training.checkpointing import read_state
 
+        if self.config.clean_start:
+            self.config.resume = False
+            self.config.resume_from = None
+            logger.info("clean start requested; ignoring all existing checkpoints")
+            return False
+
         state = read_state(self.checkpoint_dir / "state.json")
 
         explicit = self._resolve_explicit()

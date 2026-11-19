@@ -57,6 +57,7 @@ class TrainingStartRequest(BaseModel):
     speaker_id: int = 0
     resume: bool = True
     clean_start: bool = False
+    hf_repo_id: str | None = Field(default=None, pattern=r"^[^/\s]+/[^/\s]+$")
 
 
 class TrainingExportRequest(BaseModel):

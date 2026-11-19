@@ -87,7 +87,9 @@ class TrainingService:
 
     # ------------------------------------------------------------------ train
     def start(self, config: TrainingRunConfig, resume: bool = True) -> dict:
-        config.resume = resume
+        config.resume = bool(resume and not config.clean_start)
+        if config.clean_start:
+            config.resume_from = None
         config.validate_dataset()
         cfg_path = config.save()
         proc = self.pm.create(

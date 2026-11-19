@@ -269,3 +269,32 @@ uv run rvc-platform train start --experiment iraqi_voice --epochs 200 --batch 6
 - الإعداد الكامل للمفاتيح: [CONFIGURATION.md](CONFIGURATION.md) — قسم `training`.
 - API التدريب (prepare/start/stop/resume/export): [API.md](API.md).
 - أعطال التدريب الشائعة: [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
+
+
+## 10. Hugging Face الخاص وإعادة التدريب من الصفر
+
+أنشئ رمز Hugging Face بصلاحية الكتابة، واحفظه في بيئة خادم التدريب فقط:
+
+```bash
+export HF_TOKEN="hf_..."
+# أو HUGGINGFACE_HUB_TOKEN
+```
+
+في الواجهة أدخل معرف المستودع بصيغة `owner/repository`، أو استخدم:
+
+```bash
+uv run rvc-platform train start --dataset data/raw/myvoice \
+  --experiment my_voice --epochs 200 --hf-repo owner/private-voice
+```
+
+تُنشأ الوجهة كمستودع نموذج **خاص**، ويرفع التدريب أحدث نموذج مصدّر مع كل تصدير دوري، ثم يحدّثه بالتصدير النهائي، ويرفع أحدث فهرس FAISS فقط؛ لا تُرفع البيانات الصوتية أو الملفات الوسيطة أو الرمز. تظهر وصلة المستودع في قائمة التجارب، وفشل الرفع يُسجّل مستقلًا عن نتيجة التدريب.
+إذا كان المستودع موجودًا وعامًا، يرفض النظام الرفع دون تغيير خصوصيته؛ حوّله إلى خاص في Hugging Face أو اختر مستودعًا خاصًا آخر.
+
+لبدء تدريب كامل جديد على تجربة موجودة، فعّل «إعادة التدريب بالكامل من البداية» في الواجهة أو استخدم `--clean-start`:
+
+```bash
+uv run rvc-platform train start --dataset data/raw/myvoice \
+  --experiment my_voice --clean-start --epochs 200
+```
+
+يمسح هذا الخيار checkpoints والتصديرات وحالة التقدم والسجلات القديمة، ويمنع أي استعادة تلقائية أو legacy أو نقطة `resume_from` قديمة؛ يحتفظ بملفات تجهيز البيانات كي لا يعيد استخراج الميزات دون حاجة. الخيار يُستهلك لمرة واحدة ثم يُحفظ التشغيل كقابل للاستئناف؛ لذلك زر «استكمال» بعد بدء التدريب النظيف سيكمل **التدريب الجديد** ولن يمسح نقاطه. الخيار غير متوافق مع `--resume-from`.

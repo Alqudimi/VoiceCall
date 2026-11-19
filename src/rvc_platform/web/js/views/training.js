@@ -62,6 +62,8 @@ async function mount(root) {
     lr: root.querySelector("#tr-lr"),
     lrDecay: root.querySelector("#tr-lr-decay"),
     saveEvery: root.querySelector("#tr-save-every"),
+    hfRepo: root.querySelector("#tr-hf-repo"),
+    cleanStart: root.querySelector("#tr-clean-start"),
     f0: root.querySelector("#tr-f0"),
     f0Method: root.querySelector("#tr-f0-method"),
     speaker: root.querySelector("#tr-speaker"),
@@ -154,11 +156,18 @@ function buildFormCard() {
       field("tr-lr", "معدل التعلم ( learning rate )", el("input", { type: "number", id: "tr-lr", step: "any", value: "0.0001" })),
       field("tr-lr-decay", "تضاؤل معدل التعلم ( lr_decay )", el("input", { type: "number", id: "tr-lr-decay", step: "any", value: "0.999875" })),
       field("tr-save-every", "حفظ كل ( epochs )", el("input", { type: "number", id: "tr-save-every", min: "1", max: "200", value: "10" })),
+      field("tr-hf-repo", "مستودع Hugging Face خاص (اختياري)", el("input", {
+        type: "text", id: "tr-hf-repo", placeholder: "username/my-private-voice", dir: "ltr",
+      }), "الصيغة owner/repository؛ عرّف HF_TOKEN على خادم التدريب. لا تضع الرمز هنا."),
     ]),
     el("div", { class: "row mt" }, [
       el("label", { class: "check" }, [
         el("input", { type: "checkbox", id: "tr-f0", checked: true }),
         el("span", {}, ["تدريب بالطبقة ", el("span", { class: "opt-latin" }, ["f0"])]),
+      ]),
+      el("label", { class: "check" }, [
+        el("input", { type: "checkbox", id: "tr-clean-start" }),
+        el("span", {}, ["إعادة التدريب بالكامل من البداية"]),
       ]),
       el("div", { class: "field grow" }, [
         el("label", { for: "tr-f0-method" }, ["طريقة f0"]),
@@ -437,7 +446,8 @@ async function runStart(state, ui) {
       version: payload.version,
       speaker_id: payload.speaker_id,
       resume: true,
-      clean_start: false,
+      clean_start: ui.cleanStart.checked,
+      hf_repo_id: ui.hfRepo.value.trim() || null,
     });
     state.currentExperiment = res?.run || payload.experiment_name;
     toast(`انطلق التدريب (PID ${res?.pid ?? "؟"}) — تجربة ${state.currentExperiment}.`, "success");
@@ -655,6 +665,9 @@ async function loadRuns(state, ui) {
         el("td", { class: "num" }, [String(run.epoch ?? 0)]),
         el("td", { class: "num" }, [String(run.global_step ?? 0)]),
         el("td", { class: "latin small" }, [fmtTime(run.updated_at)]),
+        el("td", {}, [run.hf_url ? el("a", {
+          href: run.hf_url, target: "_blank", rel: "noopener noreferrer", class: "latin",
+        }, ["مستودع النموذج"]) : el("span", { class: "muted" }, ["—"])]),
         el("td", {}, [run.has_checkpoints ? el("span", { class: "badge ok" }, ["نعم"]) : el("span", { class: "badge idle" }, ["لا"])]),
         el("td", {}, [
           el("button", {
@@ -672,6 +685,7 @@ async function loadRuns(state, ui) {
           el("th", {}, ["الدورة"]),
           el("th", {}, ["الخطوة"]),
           el("th", {}, ["آخر تحديث"]),
+          el("th", {}, ["Hugging Face"]),
           el("th", {}, ["نقاط حفظ"]),
           el("th", {}, [""]),
         ])]),

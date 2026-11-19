@@ -46,6 +46,13 @@ def runs(request: Request):
                 progress = json.loads(progress_file.read_text(encoding="utf-8"))
             except json.JSONDecodeError:
                 progress = {}
+        hf_publish = {}
+        hf_file = run_dir / "huggingface.json"
+        if hf_file.is_file():
+            try:
+                hf_publish = json.loads(hf_file.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                hf_publish = {}
         out.append(
             {
                 "experiment": run_dir.name,
@@ -58,6 +65,8 @@ def runs(request: Request):
                 ),
                 "has_checkpoints": (run_dir / "checkpoints").is_dir()
                 and any((run_dir / "checkpoints").glob("G_*.pth")),
+                "hf_repo_id": hf_publish.get("repo_id"),
+                "hf_url": hf_publish.get("url"),
             }
         )
     return out
@@ -100,6 +109,8 @@ def start(request: Request, payload: TrainingStartRequest):
             config = _svc(request)["training"].make_config(**data)
     else:
         config = _svc(request)["training"].make_config(**data)
+    if "hf_repo_id" in payload.model_fields_set:
+        config.hf_repo_id = payload.hf_repo_id
     try:
         return _svc(request)["training"].start(config, resume=config.resume)
     except (TrainingError, DatasetError) as exc:

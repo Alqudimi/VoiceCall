@@ -400,6 +400,7 @@ def train_start(
     f0_method: str = typer.Option("rmvpe", "--f0-method"),
     no_pretrained: bool = typer.Option(False, "--no-pretrained"),
     clean_start: bool = typer.Option(False, "--clean-start"),
+    hf_repo: Optional[str] = typer.Option(None, "--hf-repo", help="private HF model repo (owner/name)"),
     resume_from: Optional[str] = typer.Option(
         None, "--resume-from",
         help="explicit checkpoint: G_<step>.pth name, absolute path, or 'latest'",
@@ -416,14 +417,20 @@ def train_start(
             epochs=epochs, batch_size=batch_size, learning_rate=lr,
             save_every_epoch=save_every, gpu=gpu, f0_method=f0_method,
             preload_base_models=not no_pretrained, clean_start=clean_start,
+            hf_repo_id=hf_repo,
         )
     elif (run_dir / "run_config.json").is_file():
         cfg = TrainingRunConfig.load(run_dir)
     else:
         console.print("[red]no existing run and no --dataset given[/red]")
         raise typer.Exit(2)
+    cfg.clean_start = clean_start
+    if hf_repo is not None:
+        cfg.hf_repo_id = hf_repo
     cfg.resume = not clean_start
     if resume_from is not None:
+        if clean_start:
+            raise typer.BadParameter("--resume-from cannot be combined with --clean-start")
         cfg.resume_from = Path(resume_from)
         cfg.resume = True
         console.print(f"[cyan]explicit resume point: {resume_from}[/cyan]")
