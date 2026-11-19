@@ -35,6 +35,8 @@ class TrainingPrepareRequest(BaseModel):
     f0: bool = True
     f0_method: str = "rmvpe"
     speaker_id: int = Field(default=0, ge=0, le=109)
+    denoise: bool = False        # pre-slicing spectral-gate denoise (noisereduce; guarded no-op)
+    loudness: bool = True        # per-chunk RMS loudness normalisation
 
 
 class TrainingStartRequest(BaseModel):
@@ -49,7 +51,16 @@ class TrainingStartRequest(BaseModel):
     save_every_weights: bool = True
     save_latest: bool = True
     save_best: bool = True
-    val_split: float = Field(default=0.0, ge=0.0, le=0.5)
+    val_split: float = Field(default=0.05, ge=0.0, le=0.5)
+    # ---- researched quality levers (see UPGRADE_REPORT_AR.md) ----
+    ema_decay: float = Field(default=0.999, ge=0.0, lt=1.0)  # generator EMA (0 = off)
+    c_stft: float = Field(default=2.0, ge=0.0)  # multi-resolution STFT loss weight (0 = upstream objective)
+    use_msd: bool = True         # extra multi-scale raw discriminators (HiFi-GAN MSD scales 2/4)
+    spk_weight: float = Field(default=1.0, ge=0.0)  # speaker-similarity weight (needs speechbrain)
+    early_stop_patience: int = Field(default=0, ge=0, le=10_000)
+    f0_eval: bool = True
+    denoise: bool = False
+    loudness: bool = True
     cache_in_gpu: bool = False
     preload_base_models: bool = True
     gpu: int | None = None

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import sys
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -142,9 +141,10 @@ def test_run_config_best_model_fields(project_env):
     config = TrainingRunConfig(
         experiment_name="bestcfg", dataset_path=project_env / "dataset",
     )
-    # smart defaults: tracking on, no data-pipeline change out of the box
+    # smart defaults: tracking on, with a small held-out split for the
+    # researched composite best-model metric (UPGRADE_REPORT_AR.md §2.4)
     assert config.save_best is True
-    assert config.val_split == 0.0
+    assert config.val_split == 0.05
     config2 = TrainingRunConfig(
         experiment_name="bestcfg2", dataset_path=project_env / "dataset",
         save_best=False, val_split=0.25,
@@ -173,7 +173,7 @@ def test_trainer_clean_start_ignores_explicit_checkpoint(project_env):
     (checkpoint_dir / "G_old.pth").write_bytes(b"old checkpoint")
     trainer = Trainer(config, config.to_hparams(), "cpu", torch.float32)
 
-    resumed = trainer._restore(None, None, None, None, None, None, None, None)
+    resumed, _extras = trainer._restore(None, None, None, None, None, None, None, None)
 
     assert resumed is False
     assert trainer.epoch == 0 and trainer.global_step == 0

@@ -25,7 +25,7 @@ from rvc_platform.engine.rvc.models import models as rvc_models
 from rvc_platform.engine.rvc.models.commons import get_padding
 from rvc_platform.training.run_config import TrainingRunConfig
 from rvc_platform.training.trainer import Trainer
-from rvc_platform.training.utils import HParams, stable_dataset_signature
+from rvc_platform.training.utils import stable_dataset_signature
 
 pytestmark = pytest.mark.slow
 

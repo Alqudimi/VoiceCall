@@ -86,8 +86,14 @@ def write_checkpoint_files(
     state: dict | None,
     state_path: Path,
     mirror: bool,
+    payload_d2: dict | None = None,
+    d2_path: Path | None = None,
 ) -> None:
     """Write a G/D checkpoint pair (+ optional always-latest mirrors + state).
+
+    ``payload_d2`` / ``d2_path`` (optional): the multi-scale discriminator
+    (D2) rides in its own D2_<step>.pth with its own always-latest mirror —
+    G/D file formats stay byte-compatible with upstream tooling.
 
     Meant to run on the background I/O writer: atomic per file, and ordered —
     state.json is only touched after both checkpoints are on disk, so a crash
@@ -98,6 +104,18 @@ def write_checkpoint_files(
     _torch_save(payload_d, d_path)
     if mirror:
         write_latest_mirrors(g_path.parent, g_path, d_path)
+    if payload_d2 is not None and d2_path is not None:
+        d2_path = Path(d2_path)
+        _torch_save(payload_d2, d2_path)
+        if mirror:
+            d2_mirror = d2_path.parent / f"D2_{LATEST_TAG}.pth"
+            tmp = d2_mirror.with_suffix(".pth.tmp")
+            try:
+                shutil.copyfile(d2_path, tmp)
+                tmp.replace(d2_mirror)
+            except OSError:
+                logger.warning("could not refresh D2 mirror", d2_mirror,
+                               exc_info=True)
     if state is not None:
         write_state(state, state_path)
 
@@ -131,7 +149,14 @@ def save_full(
 def load_full(path: Path, model: torch.nn.Module, optimizer: torch.optim.Optimizer,
               scheduler: torch.optim.lr_scheduler.LRScheduler | None = None,
               scaler: Any | None = None) -> dict:
-    """Load a full-state checkpoint into live objects. Returns metadata."""
+    """Load a full-state checkpoint into live objects. Returns metadata.
+
+    Metadata additionally carries the checkpoint-embedded optional states —
+    ``ema`` (generator EMA shadow, from the G payload) and ``msd`` (the D2
+    multi-scale discriminator state, from the D payload) — so callers can wire
+    the quality levers without loading the payloads twice. Both default to
+    None on checkpoints written before those features existed.
+    """
     if not Path(path).is_file():
         raise CheckpointError(f"checkpoint missing: {path}")
     payload = torch.load(path, map_location="cpu", weights_only=False)
@@ -149,6 +174,8 @@ def load_full(path: Path, model: torch.nn.Module, optimizer: torch.optim.Optimiz
     return {
         "epoch": int(payload.get("epoch", payload.get("iteration", 1)) or 1),
         "global_step": int(payload.get("global_step", 0) or 0),
+        "ema": payload.get("ema"),
+        "msd": payload.get("msd"),
     }
 
 

@@ -40,6 +40,7 @@ from rvc_platform.training import best_model
 from rvc_platform.training import checkpointing
 from rvc_platform.training import losses as L
 from rvc_platform.training import mel_processing
+from rvc_platform.training import stft_loss
 from rvc_platform.training.dataset import (
     DistributedBucketSampler,
     TextAudioCollate,
@@ -94,6 +95,14 @@ class Trainer:
         self._validator: best_model.ValidationEvaluator | None = None
         self._epoch_mel_acc: torch.Tensor | None = None
         self._epoch_start_step = 0
+        # researched quality levers (see UPGRADE_REPORT_AR.md):
+        # generator EMA shadow, multi-scale discriminator + its optimizer/
+        # scheduler (D2), early-stop bookkeeping
+        self._ema = None                     # ema.GeneratorEMA | None
+        self._msd = None                     # msd.MultiScaleDiscriminator | None
+        self._optim_d2: torch.optim.Optimizer | None = None
+        self._sched_d2: torch.optim.lr_scheduler.LRScheduler | None = None
+        self._early_stopped = False
 
     # ------------------------------------------------------------------ events
     def emit(self, topic: str, **payload) -> None:
@@ -177,7 +186,31 @@ class Trainer:
         net_d = disc_cls(hps.model["use_spectral_norm"]).to(self.device)
         optim_g = self._make_optimizer(net_g, hps)
         optim_d = self._make_optimizer(net_d, hps)
+        # extra coarse-scale raw discriminators (HiFi-GAN MSD scales 2/4) with
+        # their own optimizer — G/D checkpoints and pretrained bases untouched
+        if self._use_msd():
+            from rvc_platform.training import msd as msd_mod
+
+            self._msd = msd_mod.MultiScaleDiscriminator().to(self.device)
+            self._optim_d2 = self._make_optimizer(self._msd, hps)
+            logger.info("multi-scale discriminator enabled (scales=%s) as D2",
+                        getattr(self._msd, "scales", (2, 4)))
         return dataset, loader, net_g, net_d, optim_g, optim_d
+
+    def _use_msd(self) -> bool:
+        """use_msd from run config, overridable per session with RVC_MSD=0."""
+        env = os.environ.get("RVC_MSD", "").strip().lower()
+        if env in ("0", "off", "false", "no"):
+            return False
+        return bool(int(self.hps.train.get("use_msd", 1)))
+
+    @staticmethod
+    def _ema_decay(hps) -> float:
+        try:
+            decay = float(hps.train.get("ema_decay", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+        return decay if 0.0 < decay < 1.0 else 0.0
 
     @staticmethod
     def _make_optimizer(module: torch.nn.Module, hps) -> torch.optim.AdamW:
@@ -289,16 +322,19 @@ class Trainer:
             logger.info("loaded pretrained D: %s", hps.pretrainD)
 
     def _restore(self, net_g, net_d, optim_g, optim_d, sched_g, sched_d, scaler,
-                 dataset_signature: dict | None) -> bool:
+                 dataset_signature: dict | None) -> tuple[bool, dict]:
         """Explicit > full resume > legacy resume > pretrained start.
-        Returns resumed?"""
+        Returns (resumed?, extras) — extras carries checkpoint-embedded EMA /
+        D2 (MSD) states so the caller can wire the quality levers without
+        re-loading the payloads."""
         from rvc_platform.training.checkpointing import read_state
 
+        extras: dict = {}
         if self.config.clean_start:
             self.config.resume = False
             self.config.resume_from = None
             logger.info("clean start requested; ignoring all existing checkpoints")
-            return False
+            return False, extras
 
         state = read_state(self.checkpoint_dir / "state.json")
 
@@ -310,13 +346,15 @@ class Trainer:
                       if explicit.name.startswith("G_") else None)
             if d_path is not None and d_path.is_file():
                 checkpointing.load_full(d_path, net_d, optim_d, sched_d)
+                self._restore_d2(d_path.with_name(d_path.name.replace("D_", "D2_")))
             self.epoch = max(meta["epoch"], 1)
             self.global_step = meta.get("global_step") or (self.epoch - 1) * self.steps_per_epoch
+            extras["ema"] = meta.get("ema")
             logger.info("resumed (explicit) from %s (epoch=%s step=%s)",
                         explicit, self.epoch, self.global_step)
             self.emit("training.resumed", checkpoint=str(explicit), epoch=self.epoch,
                       global_step=self.global_step, explicit=True)
-            return True
+            return True, extras
 
         resume_path = checkpointing.latest_step_checkpoint(self.checkpoint_dir)
         latest_g = self.checkpoint_dir / f"G_{checkpointing.LATEST_TAG}.pth"
@@ -339,12 +377,14 @@ class Trainer:
             d_path = latest_d if latest_d.is_file() else Path(str(chosen).replace("G_", "D_"))
             if d_path.is_file():
                 checkpointing.load_full(d_path, net_d, optim_d, sched_d)
+                self._restore_d2(d_path.with_name(d_path.name.replace("D_", "D2_")))
             self.epoch = max(meta["epoch"], 1)
             self.global_step = meta.get("global_step") or (self.epoch - 1) * self.steps_per_epoch
+            extras["ema"] = meta.get("ema")
             logger.info("resumed from %s (epoch=%s step=%s)", chosen, self.epoch, self.global_step)
             self.emit("training.resumed", checkpoint=str(chosen), epoch=self.epoch,
                       global_step=self.global_step)
-            return True
+            return True, extras
 
         if self.config.resume and latest_g.is_file() and latest_d.is_file():
             # upstream-style checkpoints: model + optimizer + iteration(epoch)
@@ -358,10 +398,35 @@ class Trainer:
             self.global_step = (self.epoch - 1) * self.steps_per_epoch
             logger.info("legacy resume from %s (epoch=%s)", latest_g, self.epoch)
             self.emit("training.resumed.legacy", epoch=self.epoch)
-            return True
+            return True, extras
 
         self._load_pretrained(net_g, net_d, optim_d)
-        return False
+        return False, extras
+
+    def _restore_d2(self, d2_path: Path | None) -> None:
+        """Restore the optional multi-scale discriminator (D2) from its own
+        D2_<step>.pth; missing files (legacy runs) simply warm-start D2."""
+        if self._msd is None:
+            return
+        if d2_path is None or not Path(d2_path).is_file():
+            logger.info("D2 (multi-scale discriminator) warm-started fresh "
+                        "(no D2 checkpoint)")
+            return
+        try:
+            payload = torch.load(Path(d2_path), map_location="cpu",
+                                 weights_only=False)
+            self._msd.load_state_dict(payload["model"])
+            if self._optim_d2 is not None and payload.get("optimizer"):
+                self._optim_d2.load_state_dict(payload["optimizer"])
+            if (self._sched_d2 is not None and payload.get("scheduler")
+                    and isinstance(self._sched_d2,
+                                   torch.optim.lr_scheduler.LRScheduler)):
+                self._sched_d2.load_state_dict(payload["scheduler"])
+            logger.info("D2 (multi-scale discriminator) state restored from %s",
+                        d2_path)
+        except Exception:
+            logger.warning("D2 restore failed — continuing with fresh D2",
+                           exc_info=True)
 
     # ----------------------------------------------------------- best tracking
     def _setup_best_tracking(self) -> None:
@@ -387,7 +452,8 @@ class Trainer:
                     logger.exception("validation evaluator unavailable; "
                                      "falling back to train-mel scoring")
                     validator = None
-        metric = "val_mel" if validator is not None else "train_mel"
+        metric = "composite" if (validator is not None and validator.has_speaker) else (
+            "val_mel" if validator is not None else "train_mel")
         self._tracker = best_model.BestModelTracker(
             self.checkpoint_dir / best_model.BEST_STATE_NAME,
             metric=metric, mode="min",
@@ -398,17 +464,48 @@ class Trainer:
             self._tracker.reset()
             logger.info("validation split changed; best-model bar reset")
         self._validator = validator
-        logger.info("best-model tracking enabled: metric=%s (validator=%s)",
-                    metric, validator is not None)
+        logger.info("best-model tracking enabled: metric=%s (validator=%s, "
+                    "speaker-sim=%s, f0-eval=%s)",
+                    metric, validator is not None,
+                    bool(validator and validator.has_speaker),
+                    bool(validator and validator.f0_fn is not None))
+
+    # ------------------------------------------------------------- EMA helpers
+    def _eval_weights(self, net_g, fn):
+        """Run ``fn(module)`` against the EMA weights when enabled.
+
+        EMA weights are swapped into the (unwrapped) module for the duration
+        of the call and the live training weights are restored right after —
+        the training loop itself never sees the shadow copy."""
+        raw = self._unwrap(net_g)
+        if self._ema is None:
+            return fn(raw)
+        backup = background_io.snapshot_to_cpu(raw.state_dict())
+        self._ema.apply_to(raw)
+        try:
+            return fn(raw)
+        finally:
+            raw.load_state_dict(backup)
+
+    def _export_snapshot(self, net_g) -> dict:
+        """CPU state dict for inference exports: EMA weights when enabled."""
+        raw = self._unwrap(net_g)
+        if self._ema is None:
+            return background_io.snapshot_to_cpu(raw.state_dict())
+        return background_io.snapshot_to_cpu(self._ema.export_state_dict(raw))
 
     def _after_epoch(self, net_g, epoch: int) -> None:
-        """Score the epoch, update the best bar, export on improvement."""
+        """Score the epoch, update the best bar, export on improvement.
+
+        With EMA enabled the epoch is scored and exported against the EMA
+        weights (the BigVGAN recipe — the averaged generator is the model you
+        ship), while training itself continues on the raw weights."""
         if self._tracker is None:
             return
         scores: dict = {}
         if self._validator is not None:
             try:
-                scores = self._validator.evaluate(self._unwrap(net_g))
+                scores = self._eval_weights(net_g, self._validator.evaluate)
             except Exception:
                 logger.exception("validation failed; using train-mel fallback")
                 scores = {}
@@ -433,8 +530,10 @@ class Trainer:
     def _export_best(self, net_g, info: best_model.BestModelInfo) -> None:
         """Snapshot G and queue the best-model export + best.json on the
         background I/O worker; the on_done chain hands the landed file to the
-        HF publisher (via best_export_cb) only after it exists on disk."""
-        snapshot = background_io.snapshot_to_cpu(self._unwrap(net_g).state_dict())
+        HF publisher (via best_export_cb) only after it exists on disk.
+
+        The export carries the EMA weights when enabled."""
+        snapshot = self._export_snapshot(net_g)
         out_path = self.exports_dir / (
             f"{self.config.experiment_name}_best_e{info.epoch}_s{info.global_step}.pth"
         )
@@ -493,14 +592,19 @@ class Trainer:
         sched_d = torch.optim.lr_scheduler.ExponentialLR(
             optim_d, gamma=self.hps.train["lr_decay"]
         )
+        if self._optim_d2 is not None:
+            self._sched_d2 = torch.optim.lr_scheduler.ExponentialLR(
+                self._optim_d2, gamma=self.hps.train["lr_decay"],
+            )
         scaler = torch.amp.GradScaler("cuda", enabled=self.is_half)
         self.state = JobState.RUNNING
         started = time.time()
         self.emit("training.started", steps_per_epoch=self.steps_per_epoch,
                   device=self.device, precision=str(self.dtype))
 
-        self._restore(net_g, net_d, optim_g, optim_d, sched_g, sched_d, scaler,
-                      dataset_signature)
+        _, extras = self._restore(net_g, net_d, optim_g, optim_d, sched_g, sched_d, scaler,
+                                  dataset_signature)
+        self._init_ema(net_g, extras.get("ema"))
         net_g, net_d = self._maybe_compile(net_g, net_d)
         start_epoch = self.epoch + 1
         flush_timeout = float(os.environ.get("RVC_IO_FLUSH_TIMEOUT", "900"))
@@ -542,6 +646,24 @@ class Trainer:
         self.emit("training.finished", completed=completed,
                   epoch=self.epoch, seconds=round(time.time() - started, 1))
         return completed
+
+    def _init_ema(self, net_g, saved_state: dict | None) -> None:
+        """Create the generator EMA after weights are restored/initialised;
+        resume continues from the checkpointed shadow (bit-exact)."""
+        decay = self._ema_decay(self.hps)
+        if decay <= 0.0:
+            self._ema = None
+            return
+        from rvc_platform.training import ema as ema_mod
+
+        self._ema = ema_mod.GeneratorEMA(net_g, decay=decay)
+        if saved_state:
+            try:
+                device = next(net_g.parameters()).device
+                self._ema.load_state_dict(saved_state, device=device)
+            except Exception:
+                logger.warning("EMA restore failed — re-initialised from weights",
+                               exc_info=True)
 
     def _loop(self, net_g, net_d, optim_g, optim_d, sched_g, sched_d, scaler,
               loader, start_epoch: int) -> bool:
@@ -612,27 +734,52 @@ class Trainer:
                         hps.train["segment_size"],
                     )
                     y_d_hat_r, y_d_hat_g, _, _ = net_d(wave_sliced, y_hat.detach())
+                    if self._msd is not None:
+                        # HiFi-GAN MSD scales 2/4 — same loss functions consume
+                        # the concatenated output lists (zip iteration)
+                        y2_r, y2_g, _, _ = self._msd(wave_sliced, y_hat.detach())
+                        y_d_hat_r = y_d_hat_r + y2_r
+                        y_d_hat_g = y_d_hat_g + y2_g
                     with torch.autocast("cuda" if self.is_half else "cpu", enabled=False):
                         loss_disc, losses_disc_r, losses_disc_g = L.discriminator_loss(
                             y_d_hat_r, y_d_hat_g
                         )
                 optim_d.zero_grad(set_to_none=True)
+                if self._optim_d2 is not None:
+                    self._optim_d2.zero_grad(set_to_none=True)
                 scaler.scale(loss_disc).backward()
                 scaler.unscale_(optim_d)
                 # upstream "clips" with value None — a no-op whose per-parameter
                 # .item() norm bookkeeping forces a GPU->CPU sync every step;
                 # skipped with identical numerics (no clamping happens anyway).
                 scaler.step(optim_d)
+                if self._optim_d2 is not None:
+                    scaler.unscale_(self._optim_d2)
+                    scaler.step(self._optim_d2)
 
                 with torch.autocast("cuda" if self.is_half else "cpu",
                                     enabled=self.is_half):
                     y_d_hat_r, y_d_hat_g, fmap_r, fmap_g = net_d(wave_sliced, y_hat)
+                    if self._msd is not None:
+                        y2_r, y2_g, f2_r, f2_g = self._msd(wave_sliced, y_hat)
+                        y_d_hat_r = y_d_hat_r + y2_r
+                        y_d_hat_g = y_d_hat_g + y2_g
+                        fmap_r = fmap_r + f2_r
+                        fmap_g = fmap_g + f2_g
                     with torch.autocast("cuda" if self.is_half else "cpu", enabled=False):
                         loss_mel = torch.nn.functional.l1_loss(y_mel, y_hat_mel) * hps.train["c_mel"]
                         loss_kl = L.kl_loss(z_p, logs_q, m_p, logs_p, z_mask) * hps.train["c_kl"]
                         loss_fm = L.feature_loss(fmap_r, fmap_g)
                         loss_gen, losses_gen = L.generator_loss(y_d_hat_g)
                         loss_gen_all = loss_gen + loss_fm + loss_mel + loss_kl
+                        # multi-resolution STFT auxiliary loss (UnivNet/BigVGAN
+                        # recipe; c_stft=0 reproduces the upstream objective)
+                        c_stft = float(hps.train.get("c_stft", 0.0) or 0.0)
+                        loss_stft = None
+                        if c_stft > 0.0:
+                            loss_stft = stft_loss.mr_stft_loss(
+                                wave_sliced, y_hat) * c_stft
+                            loss_gen_all = loss_gen_all + loss_stft
                 if self._tracker is not None and self._validator is None:
                     # GPU-side accumulation for the train_mel fallback metric;
                     # a single host sync happens at the end of the epoch
@@ -640,11 +787,18 @@ class Trainer:
                     self._epoch_mel_acc = (detached if self._epoch_mel_acc is None
                                            else self._epoch_mel_acc + detached)
                 optim_g.zero_grad(set_to_none=True)
+                scale_before = scaler.get_scale()
                 scaler.scale(loss_gen_all).backward()
                 scaler.unscale_(optim_g)
                 # see the D-side note: None-clipping is a no-op, skipped.
                 scaler.step(optim_g)
                 scaler.update()
+                if self._ema is not None:
+                    # a reduced scale means the G step was skipped (inf grads);
+                    # only fold real updates into the shadow
+                    stepped = (not self.is_half) or scaler.get_scale() >= scale_before
+                    if stepped:
+                        self._ema.update(self._unwrap(net_g))
 
                 self.global_step += 1
                 if self.global_step % hps.train["log_interval"] == 0 or batch_idx == 0:
@@ -657,6 +811,11 @@ class Trainer:
                         "fm": round(float(loss_fm), 4),
                         "lr": lr,
                     }
+                    if loss_stft is not None:
+                        self.last_losses["stft"] = round(float(loss_stft), 4)
+                    if self._ema is not None:
+                        self.last_losses["ema_decay"] = round(
+                            self._ema._current_decay(), 6)
                     self.emit("training.progress", **self.progress_payload(),
                               epoch_fraction=epoch / max(1, hps.total_epoch),
                               epoch_seconds=round(time.time() - epoch_start, 1),
@@ -664,9 +823,22 @@ class Trainer:
 
             sched_g.step()
             sched_d.step()
+            if self._sched_d2 is not None:
+                self._sched_d2.step()
             # score the epoch (held-out validation or train-mel fallback) and
             # export/publish the best-so-far model when the bar is beaten
             self._after_epoch(net_g, epoch)
+            # early stop: patience epochs without a new best -> cooperative stop
+            # (the researched answer to RVC "overtraining" degradation)
+            if self._early_stop_due(epoch):
+                self._early_stopped = True
+                self.emit("training.early_stop", epoch=epoch,
+                          patience=self._early_stop_patience(),
+                          best=(self._tracker.best.to_dict()
+                                if self._tracker is not None and self._tracker.best else None))
+                self._checkpoint(net_g, net_d, optim_g, optim_d, sched_g, sched_d,
+                                 scaler, epoch, final=True, early_stop=True)
+                return False
             if epoch % hps.save_every_epoch == 0:
                 self._checkpoint(net_g, net_d, optim_g, optim_d, sched_g, sched_d,
                                  scaler, epoch, final=False)
@@ -677,9 +849,23 @@ class Trainer:
                          scaler, self.epoch, final=True)
         return True
 
+    def _early_stop_patience(self) -> int:
+        """Epochs without a new best before a cooperative stop (0 = off)."""
+        try:
+            return max(0, int(self.hps.train.get("early_stop_patience", 0) or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    def _early_stop_due(self, epoch: int) -> bool:
+        patience = self._early_stop_patience()
+        if patience <= 0 or self._tracker is None or self._tracker.best is None:
+            return False
+        return (epoch - int(self._tracker.best.epoch)) >= patience
+
     # ------------------------------------------------------------------ checkpointing
     def _checkpoint(self, net_g, net_d, optim_g, optim_d, sched_g, sched_d,
-                    scaler, epoch: int, final: bool, emergency: bool = False) -> dict:
+                    scaler, epoch: int, final: bool, emergency: bool = False,
+                    early_stop: bool = False) -> dict:
         """Queue a full-state checkpoint on the background I/O worker.
 
         The only work on the training thread is building CPU snapshots of the
@@ -694,6 +880,18 @@ class Trainer:
             net_g_raw, optim_g, sched_g, scaler, epoch, self.global_step)
         payload_d = checkpointing.build_full_payload(
             net_d_raw, optim_d, sched_d, None, epoch, self.global_step)
+        if self._ema is not None:
+            # EMA rides inside the G payload — resume is bit-exact and legacy
+            # readers simply see (and ignore) one extra key
+            payload_g["ema"] = self._ema.state_dict()
+        payload_d2 = None
+        d2_path = None
+        if self._msd is not None and self._optim_d2 is not None:
+            d2_path = self.checkpoint_dir / f"D2_{step_name}.pth"
+            payload_d2 = checkpointing.build_full_payload(
+                self._msd, self._optim_d2, self._sched_d2, None, epoch,
+                self.global_step,
+            )
         state = {
             "epoch": epoch,
             "global_step": self.global_step,
@@ -702,6 +900,7 @@ class Trainer:
             "dataset_signature": self.dataset_signature,
             "last_losses": self.last_losses,
             "run_config": self.config.model_dump(mode="json"),
+            "early_stopped": bool(early_stop or self._early_stopped),
             "best": (self._tracker.best.to_dict()
                      if self._tracker is not None and self._tracker.best is not None
                      else None),
@@ -712,6 +911,7 @@ class Trainer:
             checkpointing.write_checkpoint_files,
             payload_g, g_path, payload_d, d_path,
             state, self.checkpoint_dir / "state.json", mirror,
+            payload_d2, d2_path,
         )
         if self.hps.save_every_weights == "1" or final:
             export_path = self.exports_dir / (
@@ -726,7 +926,7 @@ class Trainer:
             self._io.submit(
                 f"export-e{epoch}",
                 engine_ckpt.export_inference_checkpoint,
-                payload_g["model"], self.hps, epoch, self.hps.version,
+                self._export_snapshot(net_g), self.hps, epoch, self.hps.version,
                 export_path, self.hps.sample_rate, self.hps.if_f0,
                 on_done=_on_export,
             )
@@ -738,8 +938,6 @@ class Trainer:
         # the loop already queued a full checkpoint at stop/completion;
         # here we only export the final inference model when completed.
         if completed:
-            snapshot = background_io.snapshot_to_cpu(
-                self._unwrap(net_g).state_dict())
             export_path = self.exports_dir / f"{self.config.experiment_name}.pth"
 
             def _on_export(export: Path) -> None:
@@ -748,7 +946,7 @@ class Trainer:
             self._io.submit(
                 "final-export",
                 engine_ckpt.export_inference_checkpoint,
-                snapshot, self.hps, epoch, self.hps.version,
+                self._export_snapshot(net_g), self.hps, epoch, self.hps.version,
                 export_path, self.hps.sample_rate, self.hps.if_f0,
                 on_done=_on_export,
             )
@@ -760,3 +958,27 @@ class Trainer:
     @property
     def stop_requested(self) -> bool:
         return self._stop.is_set()
+
+
+def build_generator(hps, device: str) -> torch.nn.Module:
+    """Standalone generator builder (the trainer's G path) for tooling such as
+    ``rvc-platform train evaluate``. In eval mode the SynthesizerTrn forward
+    runs its inference path (prior-only, no ``enc_q``), so both full training
+    checkpoints and portable inference exports can be evaluated."""
+    from rvc_platform.engine.rvc.models import models as rvc_models
+
+    if int(hps.if_f0) == 1:
+        cls = (rvc_models.SynthesizerTrnMs768NSFsid if hps.version == "v2"
+               else rvc_models.SynthesizerTrnMs256NSFsid)
+        return cls(
+            hps.data["filter_length"] // 2 + 1,
+            hps.train["segment_size"] // hps.data["hop_length"],
+            **hps.model, is_half=False, sr=hps.sample_rate,
+        ).to(device)
+    cls = (rvc_models.SynthesizerTrnMs768NSFsid_nono if hps.version == "v2"
+           else rvc_models.SynthesizerTrnMs256NSFsid_nono)
+    return cls(
+        hps.data["filter_length"] // 2 + 1,
+        hps.train["segment_size"] // hps.data["hop_length"],
+        **hps.model, is_half=False,
+    ).to(device)

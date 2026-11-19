@@ -125,6 +125,7 @@ def _make_run(project_env, n_chunks: int = 3) -> tuple[TrainingRunConfig, HParam
         save_every_epoch=1,
         preload_base_models=False,   # no pretrained assets in this sandbox
         resume=True,
+        val_split=0.0,               # 3 chunks x batch 1 -> 3 steps (no held-out)
     )
     hps = config.to_hparams()
     hps.data["training_files"] = str(run_dir / "filelist.txt")
@@ -167,7 +168,7 @@ def test_train_one_epoch_and_real_resume(project_env, tiny_discriminator):
     config2 = TrainingRunConfig(
         experiment_name="smoke", dataset_path=config.dataset_path,
         sample_rate="40k", epochs=2, batch_size=1, save_every_epoch=1,
-        preload_base_models=False, resume=True,
+        preload_base_models=False, resume=True, val_split=0.0,
     )
     hps2 = _shrink(config2.to_hparams())
     hps2.data["training_files"] = str(run_dir / "filelist.txt")
@@ -195,7 +196,7 @@ def test_train_one_epoch_and_real_resume(project_env, tiny_discriminator):
     config3 = TrainingRunConfig(
         experiment_name="smoke", dataset_path=config.dataset_path,
         sample_rate="40k", epochs=3, batch_size=1,
-        preload_base_models=False, resume=True,
+        preload_base_models=False, resume=True, val_split=0.0,
     )
     hps3 = _shrink(config3.to_hparams())
     hps3.data["training_files"] = str(run_dir / "filelist.txt")
@@ -226,7 +227,7 @@ def test_train_one_epoch_and_real_resume(project_env, tiny_discriminator):
     config4 = TrainingRunConfig(
         experiment_name="smoke", dataset_path=config.dataset_path,
         sample_rate="40k", epochs=5, batch_size=1,
-        preload_base_models=False, resume=True,
+        preload_base_models=False, resume=True, val_split=0.0,
     )
     hps4 = _shrink(config4.to_hparams())
     hps4.data["training_files"] = str(run_dir / "filelist.txt")

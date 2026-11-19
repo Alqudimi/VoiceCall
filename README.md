@@ -27,6 +27,7 @@
 |---|---|
 | [INSTALLATION.md](INSTALLATION.md) | التثبيت خطوة بخطوة (Ubuntu / Windows / Colab / GPU) |
 | [TRAINING.md](TRAINING.md) | تدريب نموذج صوتي جديد من بياناتك |
+| [UPGRADE_REPORT_AR.md](UPGRADE_REPORT_AR.md) | تقرير الترقية البحثية: EMA / MRSTFT / MSD / المقياس المركب (مراجع + أدلة) |
 | [REALTIME.md](REALTIME.md) | البث اللحظي عبر WebSocket وقياس زمن الاستجابة |
 | [API.md](API.md) | توثيق كامل لواجهة REST/WebSocket |
 | [CONFIGURATION.md](CONFIGURATION.md) | كل مفاتيح الإعداد ومتغيرات البيئة |
@@ -42,7 +43,7 @@
 
 | القدرة | الوصف | القيد |
 |---|---|---|
-| تدريب نماذج صوت | خط كامل: فحص بيانات (بصمت MD5 + نسبة صمت)، تقطيع، استخراج F0 وHuBERT، فهرس FAISS، تدريب GAN مع استئناف دقيق — تلقائي أو **من نقطة محددة**، مع حفظ طارئ عند الانهيار، و**تتبّع أفضل نموذج** (تحقق محجوز أو خسارة التدريب) يُرفع ويُحدّث في `best/` على HuggingFace، و**كل عمليات القراءة/الكتابة/الرفع عبر خيوط خلفية** لا تبطئ التدريب | GPU واحد فقط (لا يوجد DDP متعدد GPU) |
+| تدريب نماذج صوت | خط كامل: فحص بيانات (بصمت MD5 + نسبة صمت)، تقطيع، استخراج F0 وHuBERT، فهرس FAISS، تدريب GAN مع استئناف دقيق — تلقائي أو **من نقطة محددة**، مع حفظ طارئ عند الانهيار، و**تتبّع أفضل نموذج** بـ**مقياس مركب** (val_mel + تشابه متحدث ECAPA + F0-RMSE) يُرفع ويُحدّث في `best/` على HuggingFace، و**وصفة الجودة البحثية مفعّلة افتراضيًا**: EMA للمولّد + خسارة MRSTFT + تمييزات MSD (scales 2/4) + إيقاف مبكر ضد الإفراط — انظر UPGRADE_REPORT_AR.md | GPU واحد فقط (لا يوجد DDP متعدد GPU) |
 | تحويل الملفات | Audio-to-Audio: WAV/MP3/FLAC/OGG/M4A/OPUS/WebM/AAC (عبر ffmpeg) + **تسجيل مباشر من الميكروفون** داخل تبويب التحويل | WAV/FLAC تعمل بدون ffmpeg |
 | البث اللحظي | من ميكروفون المتصفح إلى صوت محوّل عبر WebSocket، **مع اختيار الميكروفون وجهاز الإخراج** | يتطلب GPU من فئة CUDA (RTX) ونموذج f0 |
 | واجهة ويب عربية | لوحة تحكم RTL: لوحة التحكم / النماذج / تحويل الملفات / البث اللحظي / التدريب / الإعدادات | `http://127.0.0.1:8320` |
@@ -245,6 +246,7 @@ Windows/Colab حيث لا يوجد make. المجموعات: `install`, `env`, `
 | نقاط الحفظ | `make checkpoints EXPERIMENT=<exp>` | `uv run rvc-platform train checkpoints <exp>` |
 | تصدير نموذج | `make export EXPERIMENT=<exp>` | `uv run rvc-platform train export <exp>` |
 | قائمة النماذج | `make model-list` | `uv run rvc-platform model list` |
+| تقييم موضوعي لنقطة تحقق | — | `uv run rvc-platform train evaluate <exp> [--checkpoint G_48.pth]` (val_mel + تشابه متحدث + composite → `runs/<exp>/eval_report.json`) |
 | تفاصيل نموذج | `make model-info MODEL=<name>` | `uv run rvc-platform model info <name>` |
 | تحميل على خادم حي | `make model-load MODEL=<name> PORT=8320` | `POST /api/models/<name>/load` |
 | تحويل ملف | `make inference INPUT=x.wav MODEL=y PITCH=0 INDEX_RATE=0` | `uv run rvc-platform inference x.wav y --pitch 0 --f0-method rmvpe --index-rate 0 --filter-radius 3 --rms 0.25 --protect 0.33 --output-sr null` |

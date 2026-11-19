@@ -142,7 +142,58 @@ class ParselmouthExtractor:
         return f0[:p_len]
 
 
-_EXTRACTORS = {"rmvpe": RMVPEExtractor, "fcpe": FCPEExtractor, "pm": ParselmouthExtractor}
+class CrepeExtractor:
+    """CREPE pitch tracker via ``torchcrepe`` — optional quality method.
+
+    Kim et al., "CREPE: A Convolutional Representation for Pitch Estimation"
+    (Interspeech 2018): monophonic pitch tracking with strong robustness to
+    noise. Offered as an alternative F0 source for datasets where RMVPE
+    struggles (breathy/whispery/noisy recordings); frames with low periodicity
+    (< 0.1) are treated as unvoiced, matching the CREPE evaluation protocol.
+
+    Optional dependency (Colab quality group): ``uv pip install torchcrepe``;
+    selecting ``--f0-method crepe`` without the library is a clear
+    ConfigurationError, never a silent fallback.
+    """
+
+    name = "crepe"
+
+    def __init__(self, device: str, is_half: bool = False,
+                 capacity: str = "full") -> None:
+        try:
+            import torchcrepe
+        except ImportError as exc:
+            raise ConfigurationError(
+                "f0 method 'crepe' requires the torchcrepe package — "
+                "install it with: uv pip install torchcrepe"
+            ) from exc
+        self._torchcrepe = torchcrepe
+        self.device = device if (device == "cpu" or ":" in device) else "cpu"
+        self.capacity = capacity
+
+    def extract(self, audio_16k: np.ndarray) -> np.ndarray:
+        audio = torch.from_numpy(
+            np.ascontiguousarray(audio_16k, dtype=np.float32),
+        ).unsqueeze(0)
+        with torch.no_grad():
+            f0, periodicity = self._torchcrepe.predict(
+                audio, 16_000, hop_length=160, batch_size=512,
+                device=self.device, return_periodicity=True,
+                capacity=self.capacity,
+            )
+        f0 = f0.squeeze(0)
+        periodicity = periodicity.squeeze(0)
+        voiced = periodicity >= 0.1
+        f0 = torch.where(voiced, f0, torch.zeros_like(f0))
+        return f0.cpu().numpy().astype(np.float32)
+
+
+_EXTRACTORS = {
+    "rmvpe": RMVPEExtractor,
+    "fcpe": FCPEExtractor,
+    "pm": ParselmouthExtractor,
+    "crepe": CrepeExtractor,
+}
 
 
 def available_methods() -> list[str]:

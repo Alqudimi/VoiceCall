@@ -100,7 +100,7 @@ def _make_run(project_env, n_chunks: int = 2):
 
     config = TrainingRunConfig(
         experiment_name="policy", dataset_path=str(ds_dir),
-        sample_rate="40k", epochs=1, batch_size=1, save_every_epoch=1,
+        sample_rate="40k", epochs=1, batch_size=1, save_every_epoch=1, val_split=0.0,
         preload_base_models=False, resume=True,
     )
     hps = config.to_hparams()

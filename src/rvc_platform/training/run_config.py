@@ -27,7 +27,7 @@ from rvc_platform.training.utils import HParams
 
 SR_ALIASES = {"32k": 32_000, "40k": 40_000, "48k": 48_000}
 
-TRAINING_F0_METHODS = ("rmvpe", "fcpe", "pm")  # dataset extraction methods we ship
+TRAINING_F0_METHODS = ("rmvpe", "fcpe", "pm", "crepe")  # dataset extraction methods we ship (crepe: optional torchcrepe)
 
 
 class TrainingRunConfig(BaseModel):
@@ -48,7 +48,17 @@ class TrainingRunConfig(BaseModel):
     save_latest: bool = True                     # keep G_2333333/D_2333333 updated
     save_every_weights: bool = True              # periodic inference checkpoints
     save_best: bool = True                       # track + export the best-so-far model
-    val_split: float = Field(default=0.0, ge=0.0, le=0.5)  # held-out fraction for best-model scoring (0 = train-mel fallback)
+    val_split: float = Field(default=0.05, ge=0.0, le=0.5)  # held-out fraction for best-model scoring (0 = train-mel fallback)
+    # ---- researched quality levers (see UPGRADE_REPORT_AR.md) -----------------
+    ema_decay: float = Field(default=0.999, ge=0.0, lt=1.0)  # generator EMA (0 disables; BigVGAN-style)
+    c_stft: float = Field(default=2.0, ge=0.0)  # multi-resolution STFT loss weight (0 = upstream objective)
+    use_msd: bool = True                        # extra multi-scale (raw) discriminator scales 2/4 (HiFi-GAN MSD)
+    spk_weight: float = Field(default=1.0, ge=0.0)  # speaker-similarity weight in the composite best-model metric
+    early_stop_patience: int = Field(default=0, ge=0, le=10_000)  # epochs without a new best before cooperative stop (0 = off)
+    f0_eval: bool = True                         # F0-RMSE diagnostic in validation (needs rmvpe asset)
+    # ---- dataset-quality preprocessing options (any dataset, Colab-safe) -----
+    denoise: bool = False                        # pre-slicing spectral-gate denoise (noisereduce; guarded no-op)
+    loudness: bool = True                        # per-chunk RMS loudness normalisation (common training targets)
     cache_in_gpu: bool = False
     pretrained_g: Path | None = None             # explicit override
     pretrained_d: Path | None = None
@@ -85,7 +95,8 @@ class TrainingRunConfig(BaseModel):
         if v not in TRAINING_F0_METHODS:
             raise ValueError(
                 f"f0_method must be one of {TRAINING_F0_METHODS} "
-                "(crepe/harvest/dio intentionally not shipped — see docs)"
+                "(harvest/dio intentionally not shipped — see docs; "
+                "crepe needs the optional torchcrepe quality group)"
             )
         return v
 
@@ -156,6 +167,13 @@ class TrainingRunConfig(BaseModel):
             train["segment_size"] = self.segment
         if self.epochs:
             train["epochs"] = self.epochs
+        # researched quality levers -> train hyper-parameters (0/False = exact upstream behaviour)
+        train["ema_decay"] = self.ema_decay
+        train["c_stft"] = self.c_stft
+        train["use_msd"] = 1 if self.use_msd else 0
+        train["spk_weight"] = self.spk_weight
+        train["early_stop_patience"] = self.early_stop_patience
+        train["f0_eval"] = 1 if self.f0_eval else 0
         hps = HParams.from_template(
             {"train": train, "data": dict(template["data"]), "model": dict(template["model"])},
             version=self.version,

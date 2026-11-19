@@ -37,7 +37,7 @@ import logging
 import math
 import random
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 
 import torch
@@ -240,9 +240,19 @@ class ValidationEvaluator:
     """Held-out generator losses under ``no_grad`` + eval mode.
 
     The mel-reconstruction L1 (raw, without the ``c_mel`` weight) is the
-    monitored quality proxy; KL and adversarial diagnostics are collected for
-    observability. Evaluation is forward-only and bounded by ``max_batches``,
-    so it costs a small fraction of one training epoch.
+    reconstruction proxy; KL and adversarial diagnostics are collected for
+    observability. On top of that (researched composite — see
+    UPGRADE_REPORT_AR.md):
+      * ``val_spk``      — ECAPA speaker-embedding cosine similarity between
+                          reconstruction and ground truth (timbre preservation),
+                          automatically skipped when ``speechbrain`` is
+                          unavailable;
+      * ``val_f0_rmse``  — RMVPE F0 RMSE diagnostic, skipped when the rmvpe
+                          asset is unavailable;
+      * ``composite``    — val_mel + spk_weight * (1 - val_spk): the
+                          best-model selection metric (lower is better).
+    Evaluation is forward-only and bounded by ``max_batches``, so it costs a
+    small fraction of one training epoch. No optional metric can fail a run.
     """
 
     def __init__(self, hps, device: str, is_half: bool, val_filelist: Path,
@@ -266,13 +276,37 @@ class ValidationEvaluator:
             dataset, batch_size=batch_size, shuffle=False,
             num_workers=0, collate_fn=collate,
         )
+        # ---- optional objective metrics (guarded: absence degrades to
+        # val_mel-only selection exactly as before)
+        from rvc_platform.training import eval_metrics
+
+        self._metrics = eval_metrics
+        self.speaker = None
+        if int(hps.train.get("spk_weight", 1.0) or 0.0) > 0:
+            try:
+                self.speaker = eval_metrics.try_build_speaker_embedder(device)
+            except Exception:
+                self.speaker = None
+        self.spk_weight = float(hps.train.get("spk_weight", 1.0) or 0.0)
+        self.f0_fn = None
+        if int(hps.train.get("f0_eval", 1) or 0) and int(hps.if_f0) == 1:
+            try:
+                self.f0_fn = eval_metrics.try_build_f0_helper(device, is_half)
+            except Exception:
+                self.f0_fn = None
+
+    @property
+    def has_speaker(self) -> bool:
+        return self.speaker is not None
 
     def evaluate(self, net_g: torch.nn.Module) -> dict:
         hps = self.hps
         was_training = net_g.training
         net_g.eval()
-        sums = {"val_mel": 0.0, "val_kl": 0.0}
+        sums = {"val_mel": 0.0, "val_kl": 0.0, "val_spk": 0.0, "val_f0_rmse": 0.0}
         items = 0
+        spk_items = 0
+        f0_items = 0
         batches = 0
         try:
             with torch.no_grad():
@@ -327,6 +361,37 @@ class ValidationEvaluator:
                                 y_hat_mel = y_hat_mel.half()
                             mel_l1 = torch.nn.functional.l1_loss(y_mel, y_hat_mel)
                             kl = L.kl_loss(z_p, logs_q, m_p, logs_p, z_mask)
+                            # ---- optional objective metrics (guarded) ----
+                            n_batch = int(y_hat.shape[0])
+                            wave_sliced = commons.slice_segments(
+                                wave, ids_slice * hps.data["hop_length"],
+                                hps.train["segment_size"],
+                            )
+                            if self.speaker is not None:
+                                try:
+                                    sim = self._metrics.speaker_similarity(
+                                        self.speaker, y_hat.detach().float(),
+                                        wave_sliced.detach().float(),
+                                        int(hps.data["sampling_rate"]),
+                                    )
+                                    sums["val_spk"] += sim * n_batch
+                                    spk_items += n_batch
+                                except Exception:
+                                    logger.warning("speaker-similarity failed; "
+                                                   "metric disabled for this run",
+                                                   exc_info=True)
+                                    self.speaker = None
+                            if self.f0_fn is not None:
+                                try:
+                                    rmse = self._batch_f0_rmse(y_hat, pitchf, ids_slice)
+                                    if rmse is not None:
+                                        sums["val_f0_rmse"] += rmse * n_batch
+                                        f0_items += n_batch
+                                except Exception:
+                                    logger.warning("f0 RMSE failed; metric "
+                                                   "disabled for this run",
+                                                   exc_info=True)
+                                    self.f0_fn = None
                     n = int(y_hat.shape[0])
                     sums["val_mel"] += float(mel_l1) * n
                     sums["val_kl"] += float(kl) * n
@@ -337,12 +402,48 @@ class ValidationEvaluator:
                 net_g.train()
         if items == 0:
             return {}
-        return {
+        out = {
             "val_mel": sums["val_mel"] / items,
             "val_kl": sums["val_kl"] / items,
             "val_batches": batches,
             "val_items": items,
         }
+        if spk_items > 0:
+            out["val_spk"] = sums["val_spk"] / spk_items
+            out["composite"] = self._metrics.composite_score(
+                out["val_mel"], out["val_spk"], self.spk_weight)
+        if f0_items > 0:
+            out["val_f0_rmse"] = sums["val_f0_rmse"] / f0_items
+        return out
+
+    def _batch_f0_rmse(self, y_hat, pitchf, ids_slice) -> float | None:
+        """Mean voiced F0 RMSE (Hz) across the batch's sliced segments.
+
+        The ground-truth F0 for the sliced segment is taken from the loader's
+        ``pitchf`` frames at the same 10 ms grid (frame indices ``ids_slice``),
+        and the prediction is extracted (RMVPE) from the 16 kHz-resampled
+        reconstruction — the standard voiced RPE alignment used in pitch
+        literature (CREPE's evaluation protocol).
+        """
+        hps = self.hps
+        seg_frames = max(1, hps.train["segment_size"] // hps.data["hop_length"])
+        sr = int(hps.data["sampling_rate"])
+        starts = ids_slice.detach().cpu().numpy().ravel().astype(int)
+        gt = pitchf.detach().cpu().numpy()
+        pred16 = self._metrics.resample_16k(
+            y_hat.detach().float().squeeze(1), sr,
+        ).cpu().numpy()
+        rmses = []
+        for b in range(gt.shape[0]):
+            f0_true = gt[b, starts[b]:starts[b] + seg_frames]
+            if f0_true.size == 0:
+                continue
+            value = self._metrics.f0_rmse(self.f0_fn, pred16[b], f0_true)
+            if value is not None:
+                rmses.append(value)
+        if not rmses:
+            return None
+        return float(sum(rmses) / len(rmses))
 
 
 # ------------------------------------------------------------- artifacts

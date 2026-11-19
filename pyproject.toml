@@ -48,6 +48,14 @@ training = [
     "scikit-learn>=1.6.0,<2",
     "matplotlib>=3.8.2,<4",
 ]
+# Researched quality levers (UPGRADE_REPORT_AR.md) — every one is OPTIONAL at
+# runtime (guarded imports degrade gracefully), so core environments stay
+# bootable; Colab installs this group to unlock the strongest configuration.
+quality = [
+    "speechbrain>=1.0,<2",      # ECAPA speaker-similarity in the composite best-model metric
+    "torchcrepe>=0.0.23,<1",    # CREPE F0 extraction method (--f0-method crepe)
+    "noisereduce>=3.0.0,<4",    # spectral-gate dataset denoising (--denoise)
+]
 onnx = ["onnxruntime>=1.18.0,<2"]
 
 [project.scripts]

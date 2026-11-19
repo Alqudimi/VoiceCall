@@ -317,11 +317,19 @@ def prepare_audio_dataset(
 
 
 @app.command("preprocess")
-def preprocess(dataset: Path, experiment: str, sr: str = typer.Option("40k")):
+def preprocess(
+    dataset: Path,
+    experiment: str,
+    sr: str = typer.Option("40k", "--sr"),
+    denoise: bool = typer.Option(False, "--denoise/--no-denoise",
+                                  help="best-effort spectral-gate denoise before slicing (noisereduce)"),
+    loudness: bool = typer.Option(True, "--loudness/--no-loudness",
+                                  help="per-chunk RMS loudness normalisation (-20 dBFS)"),
+):
     from rvc_platform.training.run_config import TrainingRunConfig
 
     cfg = TrainingRunConfig(experiment_name=experiment, dataset_path=dataset,
-                            sample_rate=sr)
+                            sample_rate=sr, denoise=denoise, loudness=loudness)
     DataPipelineRunner(cfg).stage("preprocess")
 
 
@@ -336,14 +344,22 @@ def extract_features(experiment: str, method: str = typer.Option("rmvpe", "--f0-
 
 
 @app.command("prepare-dataset")
-def prepare_dataset(dataset: Path, experiment: str,
-                    sr: str = typer.Option("40k", "--sr"),
-                    method: str = typer.Option("rmvpe", "--f0-method", "--method")):
+def prepare_dataset(
+    dataset: Path,
+    experiment: str,
+    sr: str = typer.Option("40k", "--sr"),
+    method: str = typer.Option("rmvpe", "--f0-method", "--method"),
+    denoise: bool = typer.Option(False, "--denoise/--no-denoise",
+                                  help="best-effort spectral-gate denoise before slicing (noisereduce)"),
+    loudness: bool = typer.Option(True, "--loudness/--no-loudness",
+                                  help="per-chunk RMS loudness normalisation (-20 dBFS)"),
+):
     """Full pipeline: check -> preprocess -> F0 -> HuBERT -> filelist -> index."""
     from rvc_platform.training.run_config import TrainingRunConfig
 
     cfg = TrainingRunConfig(experiment_name=experiment, dataset_path=dataset,
-                            sample_rate=sr, f0_method=method)
+                            sample_rate=sr, f0_method=method,
+                            denoise=denoise, loudness=loudness)
     DataPipelineRunner(cfg).all()
 
 
@@ -409,6 +425,31 @@ def train_start(
         None, "--val-split",
         help="held-out data fraction (0-0.5) scoring the best model; 0 = train-mel fallback",
     ),
+    # ---- researched quality levers (UPGRADE_REPORT_AR.md) ----
+    no_ema: bool = typer.Option(
+        False, "--no-ema",
+        help="disable the generator EMA (BigVGAN-style averaging of G weights)",
+    ),
+    ema_decay: Optional[float] = typer.Option(
+        None, "--ema-decay",
+        help="EMA decay (default 0.999); 0 or --no-ema disables",
+    ),
+    stft_weight: Optional[float] = typer.Option(
+        None, "--stft-weight",
+        help="multi-resolution STFT loss weight (default 2.0; 0 = upstream objective)",
+    ),
+    no_msd: bool = typer.Option(
+        False, "--no-msd",
+        help="disable the extra multi-scale raw discriminators (HiFi-GAN MSD)",
+    ),
+    spk_weight: Optional[float] = typer.Option(
+        None, "--spk-weight",
+        help="speaker-similarity weight in the composite best-model metric (needs speechbrain)",
+    ),
+    early_stop: Optional[int] = typer.Option(
+        None, "--early-stop",
+        help="stop cooperatively after N epochs without a new best model (0 = off)",
+    ),
     resume_from: Optional[str] = typer.Option(
         None, "--resume-from",
         help="explicit checkpoint: G_<step>.pth name, absolute path, or 'latest'",
@@ -419,6 +460,14 @@ def train_start(
 
     paths = get_paths()
     run_dir = paths.runs / experiment
+    quality_overrides = {
+        **({"ema_decay": 0.0} if no_ema else
+           ({"ema_decay": ema_decay} if ema_decay is not None else {})),
+        **({"c_stft": stft_weight} if stft_weight is not None else {}),
+        **({"use_msd": False} if no_msd else {}),
+        **({"spk_weight": spk_weight} if spk_weight is not None else {}),
+        **({"early_stop_patience": early_stop} if early_stop is not None else {}),
+    }
     if dataset is not None:
         cfg = TrainingRunConfig(
             experiment_name=experiment, dataset_path=dataset, sample_rate=sr,
@@ -428,6 +477,7 @@ def train_start(
             hf_repo_id=hf_repo,
             **({"save_best": save_best} if save_best is not None else {}),
             **({"val_split": val_split} if val_split is not None else {}),
+            **quality_overrides,
         )
     elif (run_dir / "run_config.json").is_file():
         cfg = TrainingRunConfig.load(run_dir)
@@ -441,6 +491,8 @@ def train_start(
         cfg.save_best = save_best
     if val_split is not None:
         cfg.val_split = val_split
+    for key, value in quality_overrides.items():
+        setattr(cfg, key, value)
     cfg.resume = not clean_start
     if resume_from is not None:
         if clean_start:
@@ -468,6 +520,127 @@ def train_start(
     except SystemExit as exc:
         if exc.code not in (None, 0):
             raise
+
+
+@train_app.command("evaluate")
+def train_evaluate(
+    experiment: str = typer.Argument(..., help="Experiment (run) name under runs/"),
+    checkpoint: Optional[str] = typer.Option(
+        None, "--checkpoint",
+        help="G checkpoint to score: 'latest', G_<step>.pth name, absolute path, "
+             "or an exports/*.pth inference file (default: best export if any, else latest)",
+    ),
+    val_split: Optional[float] = typer.Option(
+        None, "--val-split", help="held-out fraction (defaults to the run config)",
+    ),
+    batch: Optional[int] = typer.Option(None, "--batch", help="validation batch size"),
+    gpu: Optional[int] = typer.Option(None, "--gpu"),
+):
+    """Objective evaluation of a generator on held-out data (UPGRADE_REPORT_AR.md).
+
+    Reports val_mel (reconstruction), val_spk (ECAPA speaker similarity, when
+    speechbrain is installed), val_f0_rmse (pitch, when rmvpe asset exists) and
+    the composite selection score; writes runs/<exp>/eval_report.json.
+    """
+    import torch
+
+    from rvc_platform.core.errors import ConfigurationError
+    from rvc_platform.training.best_model import (
+        ValidationEvaluator,
+        derive_validation_split,
+    )
+    from rvc_platform.training.run_config import TrainingRunConfig
+    from rvc_platform.training.trainer import build_generator
+    from rvc_platform.utils.device import select_device
+
+    run_dir = get_paths().runs / experiment
+    if not (run_dir / "run_config.json").is_file():
+        console.print(f"[red]no run config under {run_dir}[/red]")
+        raise typer.Exit(2)
+    cfg = TrainingRunConfig.load(run_dir)
+    hps = cfg.to_hparams()
+    hps.data["training_files"] = str(run_dir / "filelist.txt")
+    if batch is not None:
+        hps.train["batch_size"] = batch
+
+    split = derive_validation_split(
+        Path(hps.data["training_files"]),
+        float(val_split if val_split is not None else cfg.val_split),
+    )
+    if split is None or split.n_val == 0:
+        console.print("[red]no validation split available — pass --val-split > 0 "
+                      "on a run with a filelist[/red]")
+        raise typer.Exit(2)
+
+    # ---- resolve the checkpoint to score -----------------------------------
+    ckpt_dir = run_dir / "checkpoints"
+    candidates: list[Path] = []
+    if checkpoint:
+        raw = Path(checkpoint)
+        candidates.append(raw if raw.is_absolute() else ckpt_dir / checkpoint)
+        if str(checkpoint).strip().lower() in ("latest", "final"):
+            candidates.append(ckpt_dir / "G_final.pth")
+    else:
+        best_json = ckpt_dir / "best.json"
+        if best_json.is_file():
+            try:
+                import json as _json
+
+                meta = _json.loads(best_json.read_text(encoding="utf-8"))
+                name = meta.get("export")
+                if name:
+                    candidates.append(run_dir / "exports" / name)
+            except (OSError, ValueError):
+                pass
+        candidates.append(ckpt_dir / "G_final.pth")
+        numbered = sorted(ckpt_dir.glob("G_*.pth"),
+                          key=lambda p: p.stat().st_mtime, reverse=True)
+        candidates.extend(numbered[:2])
+    weight_path = next((p for p in candidates if p.is_file()), None)
+    if weight_path is None:
+        console.print(f"[red]no checkpoint found for {experiment} "
+                      f"(tried {[str(c) for c in candidates]})[/red]")
+        raise typer.Exit(2)
+
+    device = select_device(gpu).device
+    net_g = build_generator(hps, device)
+    payload = torch.load(weight_path, map_location="cpu", weights_only=False)
+    if "model" in payload:
+        state = payload["model"]
+    elif "weight" in payload:
+        state = {k: v.float() for k, v in payload["weight"].items()}
+    else:
+        raise ConfigurationError(f"{weight_path} has neither 'model' nor 'weight'")
+    _missing, unexpected = net_g.load_state_dict(state, strict=False)
+    if unexpected:
+        console.print(f"[yellow]ignoring {len(unexpected)} unexpected keys[/yellow]")
+
+    evaluator = ValidationEvaluator(hps, device, False, split.val_path)
+    scores = evaluator.evaluate(net_g)
+    if not scores:
+        console.print("[red]evaluation produced no scores (empty validation set?)[/red]")
+        raise typer.Exit(2)
+
+    report = {
+        "experiment": experiment,
+        "checkpoint": str(weight_path),
+        "epoch": int(payload.get("epoch", payload.get("iteration", 0)) or 0),
+        "device": device,
+        "metrics": {k: (round(v, 6) if isinstance(v, float) else v)
+                    for k, v in scores.items()},
+        "metric_semantics": {
+            "val_mel": "held-out mel L1 reconstruction (lower is better)",
+            "val_spk": "ECAPA speaker-similarity (higher is better; needs speechbrain)",
+            "val_f0_rmse": "voiced F0 RMSE Hz (lower is better; needs rmvpe asset)",
+            "composite": "val_mel + spk_weight*(1-val_spk) — selection metric (lower is better)",
+        },
+        "evaluated_at": time.time(),
+    }
+    out_path = run_dir / "eval_report.json"
+    out_path.write_text(json.dumps(report, ensure_ascii=False, indent=2),
+                        encoding="utf-8")
+    console.print_json(json.dumps(report, ensure_ascii=False))
+    console.print(f"[green]report saved: {out_path}[/green]")
 
 
 @train_app.command("stop")

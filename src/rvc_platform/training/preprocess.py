@@ -6,7 +6,20 @@ Stages (each idempotent, each reported):
 2. ``preprocess``— silence-aware slicing (vendored Slicer), 3.7 s chunks with
                    0.3 s overlap, high-pass 48 Hz, peak-normalisation
                    (alpha 0.75 / max 0.9 — upstream constants), dual output:
-                   target-sr ``0_gt_wavs`` + 16 kHz ``1_16k_wavs``.
+                   target-sr ``0_gt_wavs`` + 16 kHz ``1_16k_wavs``;
+
+Researched dataset-quality levers added on top (see UPGRADE_REPORT_AR.md,
+all optional — the upstream numerics are reproduced exactly when both are
+off/unused):
+* ``denoise``   — best-effort spectral-gating denoise (``noisereduce``) on
+                  the raw file BEFORE slicing: removes broadband hiss / hum
+                  that otherwise becomes part of the training targets. Guarded:
+                  missing library or a failed call is a logged no-op, never a
+                  crash (Colab-safe).
+* ``loudness``  — per-chunk RMS loudness normalisation to a common target
+                  (−20 dBFS, gain-capped, peak-guarded) BEFORE the upstream
+                  peak-normalisation: mixed-source datasets land at a common
+                  loudness so the GAN is not asked to track level drift.
 """
 from __future__ import annotations
 
@@ -172,13 +185,69 @@ def _silence_ratio(audio: np.ndarray, threshold_db: float = -40.0) -> float:
     return float(np.mean(db < threshold_db))
 
 
+def _denoise_audio(audio: np.ndarray, sr: int) -> np.ndarray:
+    """Best-effort spectral-gating denoise (noisereduce); never raises.
+
+    The library is optional (Colab quality group: ``uv pip install
+    noisereduce``); when missing, or when the call fails for any reason, the
+    ORIGINAL audio is returned unchanged so preprocessing always completes.
+    """
+    try:
+        import noisereduce as nr
+
+        out = nr.reduce_noise(y=np.asarray(audio, dtype=np.float32),
+                              sr=int(sr), stationary=False)
+        out = np.asarray(out, dtype=np.float32)
+        if out.shape == np.asarray(audio).shape and np.isfinite(out).all():
+            return out
+        logger.warning("denoise output invalid — keeping original audio")
+        return audio
+    except ImportError:
+        logger.info("noisereduce not installed — --denoise is a no-op "
+                    "(install the quality group: uv pip install noisereduce)")
+        return audio
+    except Exception:
+        logger.warning("denoise failed — keeping original audio", exc_info=True)
+        return audio
+
+
+def _loudness_norm(audio: np.ndarray, target_db: float = -20.0,
+                   max_gain: float = 10.0) -> np.ndarray:
+    """Per-chunk RMS loudness normalisation (gain-capped, peak-guarded).
+
+    Scale toward ``target_db`` dBFS RMS; the gain is capped (silence stays
+    silent) and a 0.99 peak guard prevents clipping before the upstream
+    peak-normalisation runs.
+    """
+    x = np.asarray(audio, dtype=np.float32)
+    if x.size < 2:
+        return x
+    rms = float(np.sqrt(np.mean(x ** 2)))
+    if rms <= 1e-8:
+        return x
+    target_rms = 10.0 ** (target_db / 20.0)
+    gain = min(target_rms / rms, max_gain)
+    out = x * gain
+    peak = float(np.abs(out).max()) if out.size else 0.0
+    if peak > 0.99:
+        out = out * (0.99 / peak)
+    return out.astype(np.float32)
+
+
 def _norm_write(tmp_audio: np.ndarray, key: str, idx: int, sr: int, max_peak: float,
-                alpha: float, gt_wavs_dir: Path, wavs16k_dir: Path) -> bool:
-    """Peak-normalise one chunk and write it at target-sr + 16 kHz (upstream)."""
+                alpha: float, gt_wavs_dir: Path, wavs16k_dir: Path,
+                loudness: bool = False, loudness_target_db: float = -20.0) -> bool:
+    """Peak-normalise one chunk and write it at target-sr + 16 kHz (upstream).
+
+    With ``loudness`` the chunk is first RMS-normalised to a common target —
+    the researched fix for mixed-loudness datasets (consistent training
+    targets for the GAN)."""
     tmp_max = float(np.abs(tmp_audio).max()) if tmp_audio.size else 0.0
     if not np.isfinite(tmp_max) or tmp_max <= 0 or tmp_max > 2.5:
         logger.warning("skipping invalid chunk %s_%s (peak=%s)", key, idx, tmp_max)
         return False
+    if loudness:
+        tmp_audio = _loudness_norm(tmp_audio, loudness_target_db)
     tmp_audio = (tmp_audio / tmp_max * (max_peak * alpha)) + (1 - alpha) * tmp_audio
     wavfile.write(str(gt_wavs_dir / f"{key}_{idx}.wav"), sr,
                   tmp_audio.astype(np.float32))
@@ -190,8 +259,13 @@ def _norm_write(tmp_audio: np.ndarray, key: str, idx: int, sr: int, max_peak: fl
 
 def _slice_file(path: Path, key: str, sr: int, per: float, overlap: float,
                 max_peak: float, alpha: float, bh, ah,
-                gt_wavs_dir: Path, wavs16k_dir: Path) -> int:
-    """Slice + normalise + dual-rate write for one dataset file (upstream logic)."""
+                gt_wavs_dir: Path, wavs16k_dir: Path,
+                denoise: bool = False, loudness: bool = False,
+                loudness_target_db: float = -20.0) -> int:
+    """Slice + normalise + dual-rate write for one dataset file (upstream logic).
+
+    ``denoise`` cleans the raw decoded file once, before slicing; ``loudness``
+    normalises each sliced chunk (see module docstring)."""
     slicer = Slicer(
         sr=sr, threshold=-42, min_length=1500, min_interval=400,
         hop_size=15, max_sil_kept=500,
@@ -199,6 +273,8 @@ def _slice_file(path: Path, key: str, sr: int, per: float, overlap: float,
     audio = load_audio(path, sr)
     if audio.size == 0:
         return 0
+    if denoise:
+        audio = _denoise_audio(audio, sr)
     audio = signal.lfilter(bh, ah, audio)  # causal high-pass
     tail = per + overlap
     idx = 0
@@ -211,14 +287,16 @@ def _slice_file(path: Path, key: str, sr: int, per: float, overlap: float,
             if len(sliced[start:]) > tail * sr:
                 tmp = sliced[start : start + int(per * sr)]
                 if _norm_write(tmp, key, idx, sr, max_peak, alpha,
-                               gt_wavs_dir, wavs16k_dir):
+                               gt_wavs_dir, wavs16k_dir, loudness,
+                               loudness_target_db):
                     produced += 1
                 idx += 1
             else:
                 tmp = sliced[start:]
                 idx += 1
                 break
-        if _norm_write(tmp, key, idx, sr, max_peak, alpha, gt_wavs_dir, wavs16k_dir):
+        if _norm_write(tmp, key, idx, sr, max_peak, alpha, gt_wavs_dir,
+                       wavs16k_dir, loudness, loudness_target_db):
             produced += 1
     return produced
 
@@ -226,16 +304,28 @@ def _slice_file(path: Path, key: str, sr: int, per: float, overlap: float,
 def _preprocess_task(task: tuple) -> int:
     """Process-pool entry point: unpack args and slice exactly one file."""
     (path_str, key, sr, per, overlap, max_peak, alpha, bh, ah,
-     gt_str, wavs16k_str) = task
+     gt_str, wavs16k_str, denoise, loudness, loudness_target_db) = task
     return _slice_file(Path(path_str), key, sr, per, overlap, max_peak, alpha,
-                       bh, ah, Path(gt_str), Path(wavs16k_str))
+                       bh, ah, Path(gt_str), Path(wavs16k_str),
+                       bool(denoise), bool(loudness), float(loudness_target_db))
 
 
 class DatasetPreprocessor:
-    """Slice + normalise + dual-rate write (upstream ``preprocess.py``)."""
+    """Slice + normalise + dual-rate write (upstream ``preprocess.py``).
+
+    ``denoise``: optional pre-slicing spectral-gate denoise (noisereduce,
+    guarded no-op when unavailable). ``loudness``: per-chunk RMS loudness
+    normalisation to ``loudness_target_db`` — ON by default (consistent
+    training targets on ANY mixed-loudness dataset; pass ``loudness=False``
+    to reproduce the upstream output exactly).
+    """
 
     def __init__(self, sr: int, exp_dir: Path, per: float = 3.7,
-                 progress=None) -> None:
+                 progress=None, denoise: bool = False, loudness: bool = True,
+                 loudness_target_db: float = -20.0) -> None:
+        self.denoise = bool(denoise)
+        self.loudness = bool(loudness)
+        self.loudness_target_db = float(loudness_target_db)
         self.slicer = Slicer(
             sr=sr, threshold=-42, min_length=1500, min_interval=400,
             hop_size=15, max_sil_kept=500,
@@ -255,12 +345,14 @@ class DatasetPreprocessor:
 
     def _norm_write(self, tmp_audio: np.ndarray, key: str, idx: int) -> bool:
         return _norm_write(tmp_audio, key, idx, self.sr, self.max, self.alpha,
-                           self.gt_wavs_dir, self.wavs16k_dir)
+                           self.gt_wavs_dir, self.wavs16k_dir,
+                           self.loudness, self.loudness_target_db)
 
     def process_file(self, path: Path, key: str) -> int:
         return _slice_file(path, key, self.sr, self.per, self.overlap, self.max,
                            self.alpha, self.bh, self.ah,
-                           self.gt_wavs_dir, self.wavs16k_dir)
+                           self.gt_wavs_dir, self.wavs16k_dir,
+                           self.denoise, self.loudness, self.loudness_target_db)
 
     def run(self, dataset_path: Path, progress=None) -> dict:
         dataset_path = Path(dataset_path)
@@ -283,7 +375,8 @@ class DatasetPreprocessor:
             tasks = [
                 (str(p), str(i), self.sr, self.per, self.overlap, self.max,
                  self.alpha, self.bh, self.ah,
-                 str(self.gt_wavs_dir), str(self.wavs16k_dir))
+                 str(self.gt_wavs_dir), str(self.wavs16k_dir),
+                 self.denoise, self.loudness, self.loudness_target_db)
                 for i, p in enumerate(files)
             ]
             try:

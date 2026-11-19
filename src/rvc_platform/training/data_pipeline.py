@@ -37,13 +37,21 @@ class DataPipeline:
         atomic_json_dump(report.to_dict(), self.layout["filelist"].parent / "dataset_report.json")
         return report.to_dict()
 
-    def preprocess(self, progress: StageProgress | None = None) -> dict:
+    def preprocess(self, progress: StageProgress | None = None,
+                   denoise: bool | None = None,
+                   loudness: bool | None = None) -> dict:
+        """Slice + normalise; ``denoise``/``loudness`` resolve to the run
+        config fields (default: denoise off, loudness on) when left None."""
         def _cb(frac: float, name: str) -> None:
             if progress:
                 progress("preprocess", frac, name)
 
+        if denoise is None:
+            denoise = bool(getattr(self.config, "denoise", False))
+        if loudness is None:
+            loudness = bool(getattr(self.config, "loudness", True))
         pp = DatasetPreprocessor(self.config.sr_int, self.layout["gt_wavs"].parent,
-                                 progress=_cb)
+                                 progress=_cb, denoise=denoise, loudness=loudness)
         return pp.run(Path(self.config.dataset_path), progress=_cb)
 
     def extract_f0(self, progress: StageProgress | None = None) -> dict:
