@@ -15,6 +15,7 @@ ExponentialLR decay, AdamW betas) with an engineered shell around it:
 from __future__ import annotations
 
 import logging
+import os
 import threading
 import time
 import warnings
@@ -123,16 +124,26 @@ class Trainer:
             [100, 200, 300, 400, 500, 600, 700, 800, 900],
             num_replicas=1, rank=0, shuffle=True,
         )
+        use_cuda = self.device.startswith("cuda")
+        num_workers = int(os.environ.get("RVC_NUM_WORKERS", "2" if use_cuda else "0"))
+        num_workers = max(0, min(num_workers, 16))
+        persistent = os.environ.get("RVC_PERSISTENT_WORKERS", "0") == "1" and num_workers > 0
+        loader_kwargs = {}
+        if num_workers > 0:
+            loader_kwargs["prefetch_factor"] = max(
+                1, min(int(os.environ.get("RVC_PREFETCH_FACTOR", "2")), 8)
+            )
         loader = DataLoader(
             dataset,
-            # forked workers multiply the parent's RSS (torch allocator pages)
-            # and can OOM small RAM/Colab boxes; single-process on CPU, 2 on CUDA.
-            num_workers=2 if self.device.startswith("cuda") else 0,
+            # Defaults preserve the historical project behavior. These flags are
+            # opt-in so Colab users can benchmark without changing sampler order.
+            num_workers=num_workers,
             shuffle=False,
-            pin_memory=self.device.startswith("cuda"),
+            pin_memory=use_cuda,
             collate_fn=collate,
             batch_sampler=sampler,
-            persistent_workers=False,
+            persistent_workers=persistent,
+            **loader_kwargs,
         )
         net_g = net_g.to(self.device)
         net_d = disc_cls(hps.model["use_spectral_norm"]).to(self.device)
@@ -388,7 +399,7 @@ class Trainer:
                         loss_disc, losses_disc_r, losses_disc_g = L.discriminator_loss(
                             y_d_hat_r, y_d_hat_g
                         )
-                optim_d.zero_grad()
+                optim_d.zero_grad(set_to_none=True)
                 scaler.scale(loss_disc).backward()
                 scaler.unscale_(optim_d)
                 commons.clip_grad_value_(net_d.parameters(), None)
@@ -403,7 +414,7 @@ class Trainer:
                         loss_fm = L.feature_loss(fmap_r, fmap_g)
                         loss_gen, losses_gen = L.generator_loss(y_d_hat_g)
                         loss_gen_all = loss_gen + loss_fm + loss_mel + loss_kl
-                optim_g.zero_grad()
+                optim_g.zero_grad(set_to_none=True)
                 scaler.scale(loss_gen_all).backward()
                 scaler.unscale_(optim_g)
                 commons.clip_grad_value_(net_g.parameters(), None)

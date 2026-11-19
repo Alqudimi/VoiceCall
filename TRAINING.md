@@ -233,7 +233,8 @@ make model-info MODEL=iraqi_voice    # بيانات checkpoint وفقرة
 سير مقترح (GPU واحد ممنوح من Colab — T4/L4/A100):
 
 1. نفّذ مثبّت Colab (انظر INSTALLATION.md القسم 4) — يجهز البيئة والأصول ويربط
-   Drive بمجلد `RVC_Iraqi/`.
+   Drive بمجلد `RVC_Iraqi/`. يعمل التدريب افتراضيًا على `/content` المحلي الأسرع،
+   ثم تنسخ خلية Snapshot النتائج المكتملة إلى Drive.
 2. ارفع بياناتك (مثلاً إلى Drive ثم انسخها إلى `data/raw/`).
 3. جهّز ودرّب:
 
@@ -242,8 +243,10 @@ uv run rvc-platform prepare-dataset data/raw/myvoice iraqi_voice --sr 40k --f0-m
 uv run rvc-platform train start --experiment iraqi_voice --epochs 200 --batch 6
 ```
 
-4. عند انقطاع الجلسة (المقص الزمني في Colab حقيقي): أعد تشغيل المثبّت — يستأنف
-   تلقائيًا من آخر checkpoint متزامن في Drive.
+4. عند انقطاع الجلسة (المقص الزمني في Colab حقيقي): شغّل خلية Snapshot قبل
+   الانقطاع قدر الإمكان، ثم أعد تشغيل المثبّت — يستعيد آخر checkpoint متزامن من
+   Drive إلى `/content` ويستأنف تلقائيًا. يتحقق Snapshot من ملفات `.pth` عبر
+   `snapshot_manifest.json`.
 5. صدّر النموذج وحمّله من `models/`.
 
 ملاحظة صريحة: Colab تمنح **GPU واحدًا** بطبيعتها — وهذا متوافق مع قرار المنصة:
@@ -255,6 +258,13 @@ uv run rvc-platform train start --experiment iraqi_voice --epochs 200 --batch 6
 
 - **GPU واحد فقط** للتدريب؛ لا يوجد DDP. على CPU يعمل الكود لكن بطيئًا جدًا
   (احسب ساعات إلى أيام لكل epoch).
+- افتراضيًا يستخدم DataLoader نفس سياسة المشروع السابقة: عاملان على CUDA وصفر
+  على CPU، مع `pin_memory` و`non_blocking`، ولا يغيّر sampler أو ترتيب الدفعات.
+  يمكن إجراء benchmark اختياري عبر `RVC_NUM_WORKERS` و`RVC_PREFETCH_FACTOR` و
+  `RVC_PERSISTENT_WORKERS=1`، لكن زيادة هذه القيم قد تستهلك RAM في Colab.
+- استخراج F0 وHuBERT يكتب ملفات NPY ذريًا عبر ملف `.part` ثم `os.replace`،
+  ويتحقق من صحة الملفات قبل اعتبارها cache مكتملة؛ لذلك إعادة التشغيل بعد انقطاع
+  لا تعتمد على ملف جزئي.
 - **البث اللحظي** (انظر REALTIME.md) يتطلب GPU من فئة RTX ونموذج f0.
 - **جودة اللهجة العراقية** تعتمد كليًا على نظافة بياناتك وكميتها؛ المنصة توفر
   الأدوات (RMVPE افتراضيًا، `protect` يحرس الصوات العراقية كـ /q/ الم emphatic)،

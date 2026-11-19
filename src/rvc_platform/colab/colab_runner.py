@@ -2,10 +2,8 @@
 
 In Colab the VM is ephemeral. Strategy (documented in INSTALLATION.md):
 
-* ``runs/``    -> redirected to Drive (RVC_RUNS_DIR): every checkpoint is
-                   written straight to Drive, so an interrupted session
-                   loses at most ``save_every_epoch`` epochs;
-* ``models/``  -> redirected to Drive: exported models survive;
+* ``runs/`` and ``models/`` -> kept on the fast local VM during training;
+                   ``snapshot()`` copies completed artifacts to Drive;
 * ``assets/``  -> ephemeral (large, re-downloadable; cached per session).
 
 ``restore()`` pulls an existing Drive workspace into the session when the
@@ -16,6 +14,8 @@ would be restored.
 from __future__ import annotations
 
 import logging
+import hashlib
+import json
 import os
 import shutil
 import time
@@ -42,10 +42,30 @@ def _sync(src: Path, dst: Path, label: str) -> dict:
                 shutil.copytree(item, dst / item.name, dirs_exist_ok=True)
                 copied += 1
             elif item.is_file() and not item.name.endswith(".part"):
-                shutil.copy2(item, dst / item.name)
+                target = dst / item.name
+                partial = target.with_name(f".{target.name}.part")
+                shutil.copy2(item, partial)
+                os.replace(partial, target)
                 copied += 1
     logger.info("synced %s items (%s): %s -> %s", copied, label, src, dst)
     return {"items": copied, "from": str(src), "to": str(dst)}
+
+
+def _artifact_manifest(root: Path) -> dict:
+    """Describe completed checkpoint/model files without hashing huge datasets."""
+    files = []
+    for path in sorted(root.rglob("*")):
+        if not path.is_file() or path.name.endswith(".part"):
+            continue
+        if not (path.suffix in {".pth", ".index", ".json"} or path.name == "state.json"):
+            continue
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for block in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(block)
+        files.append({"path": str(path.relative_to(root)), "bytes": path.stat().st_size,
+                      "sha256": digest.hexdigest()})
+    return {"version": 1, "files": files}
 
 
 def restore(drive_dir: str = "RVC_Iraqi") -> dict:
@@ -78,6 +98,16 @@ def snapshot(drive_dir: str = "RVC_Iraqi") -> dict:
         report["runs"] = _sync(p.runs, root / "runs", "runs")
     if p.models.is_dir():
         report["models"] = _sync(p.models, root / "models", "models")
+    manifest = {
+        "version": 1,
+        "runs": _artifact_manifest(root / "runs") if (root / "runs").is_dir() else None,
+        "models": _artifact_manifest(root / "models") if (root / "models").is_dir() else None,
+    }
+    manifest_path = root / "snapshot_manifest.json"
+    partial = manifest_path.with_name(".snapshot_manifest.json.part")
+    partial.write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
+    os.replace(partial, manifest_path)
+    report["manifest"] = str(manifest_path)
     return report
 
 

@@ -7,6 +7,7 @@ re-run at zero cost. Numerics match upstream exactly (RMVPE threshold 0.03,
 from __future__ import annotations
 
 import logging
+import os
 import time
 from pathlib import Path
 from typing import Callable
@@ -28,6 +29,31 @@ from rvc_platform.infrastructure.paths import get_paths
 logger = logging.getLogger(__name__)
 
 ProgressFn = Callable[[float, str], None]
+
+
+def _atomic_save_npy(path: Path, array: np.ndarray) -> None:
+    """Write an npy atomically so interrupted Colab jobs never cache a partial file."""
+    path = Path(path)
+    tmp = path.with_name(f".{path.name}.part")
+    try:
+        with tmp.open("wb") as handle:
+            np.save(handle, array, allow_pickle=False)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def _valid_npy(path: Path) -> bool:
+    """Return true only for a readable, non-empty numeric cache file."""
+    try:
+        if not path.is_file() or path.stat().st_size < 128:
+            return False
+        arr = np.load(path, mmap_mode="r", allow_pickle=False)
+        return arr.ndim >= 1 and arr.size > 0 and np.isfinite(arr).all()
+    except (OSError, ValueError, EOFError):
+        return False
 
 
 def _read_16k(wav_path: Path, normalize: bool) -> torch.Tensor:
@@ -66,7 +92,7 @@ def extract_f0(run_dir: Path, method: str, device: str, is_half: bool,
     for idx, wav_path in enumerate(files):
         out1 = f0_dir / f"{wav_path.name}.npy"
         out2 = f0nsf_dir / f"{wav_path.name}.npy"
-        if out1.exists() and out2.exists():
+        if _valid_npy(out1) and _valid_npy(out2):
             skipped += 1
             continue
         try:
@@ -83,7 +109,7 @@ def extract_f0(run_dir: Path, method: str, device: str, is_half: bool,
             if np.all(f0 == 0):
                 failed += 1
                 continue  # fully unvoiced chunk is meaningless to RVC training
-            np.save(out2, f0.astype(np.float32), allow_pickle=False)
+            _atomic_save_npy(out2, f0.astype(np.float32))
             f0_mel = 1127 * np.log(1 + f0 / 700)
             f0_mel[f0_mel > 0] = (f0_mel[f0_mel > 0] - f0_mel_min) * (f0_bin - 2) / (
                 f0_mel_max - f0_mel_min
@@ -92,7 +118,7 @@ def extract_f0(run_dir: Path, method: str, device: str, is_half: bool,
             f0_mel[f0_mel > f0_bin - 1] = f0_bin - 1
             coarse = np.rint(f0_mel).astype(np.int64)
             assert coarse.max() <= 255 and coarse.min() >= 1
-            np.save(out1, coarse, allow_pickle=False)
+            _atomic_save_npy(out1, coarse)
             success += 1
         except Exception:
             failed += 1
@@ -123,7 +149,7 @@ def extract_features(run_dir: Path, version: str, device: str, is_half: bool,
     files = sorted(wav_dir.glob("*.wav"))
     if not files:
         raise AssetMissingError("no 1_16k_wavs chunks", "run preprocess first")
-    todo = [f for f in files if not (out_dir / f"{f.stem}.npy").exists()]
+    todo = [f for f in files if not _valid_npy(out_dir / f"{f.stem}.npy")]
     success = failed = 0
     started = time.time()
     for idx, wav_path in enumerate(todo):
@@ -137,7 +163,7 @@ def extract_features(run_dir: Path, version: str, device: str, is_half: bool,
                 )
             feats = feats.squeeze(0).float().cpu().numpy()
             if np.isnan(feats).sum() == 0:
-                np.save(out_dir / f"{wav_path.stem}.npy", feats, allow_pickle=False)
+                _atomic_save_npy(out_dir / f"{wav_path.stem}.npy", feats)
                 success += 1
             else:
                 failed += 1
