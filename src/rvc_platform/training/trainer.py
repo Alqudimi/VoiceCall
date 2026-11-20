@@ -96,6 +96,8 @@ class Trainer:
         self._validator: best_model.ValidationEvaluator | None = None
         self._epoch_mel_acc: torch.Tensor | None = None
         self._epoch_start_step = 0
+        # GAN-health watcher state (see _after_epoch)
+        self._val_kl_history: list[float] = []
         # researched quality levers (see UPGRADE_REPORT_AR.md):
         # generator EMA shadow, multi-scale discriminator + its optimizer/
         # scheduler (D2), early-stop bookkeeping
@@ -545,13 +547,36 @@ class Trainer:
                     logger.exception("validation evaluator unavailable; "
                                      "falling back to train-mel scoring")
                     validator = None
-        metric = "composite" if (validator is not None and validator.has_speaker) else (
-            "val_mel" if validator is not None else "train_mel")
+        # selection metric, strongest available:
+        #   composite     (val_mel + spk_weight*(1-val_spk))   — speechbrain present
+        #   composite_f0  (val_mel + f0_weight*val_f0_rmse/100) — no speechbrain
+        #   val_mel                                              — no validator
+        # val_mel ALONE tracks spectral smoothness and is deaf to speaker
+        # identity — the v1.3.2 defect: best models sounded far from the
+        # target speaker. The F0 composite keeps selection honest without
+        # the optional dependency (both are "lower is better").
+        if validator is not None and validator.has_speaker:
+            metric = "composite"
+        elif validator is not None:
+            metric = "composite_f0"
+            # only trustworthy while the evaluator actually produces it
+            # (f0 eval needs the rmvpe asset; checked in _after_epoch)
+        else:
+            metric = "val_mel" if validator is not None else "train_mel"
         self._tracker = best_model.BestModelTracker(
             self.checkpoint_dir / best_model.BEST_STATE_NAME,
             metric=metric, mode="min",
         )
         had_best = self._tracker.load()
+        if had_best and self._tracker.best and self._tracker.best.metric != metric:
+            # scores of different metrics are not comparable — a resumed run
+            # whose metric changed (e.g. val_mel -> composite_f0 after this
+            # release) starts the best bar fresh instead of freezing on a
+            # lower-scale legacy score forever
+            old_metric = self._tracker.best.metric
+            self._tracker.reset()
+            logger.info("best-model metric changed (%s -> %s); best bar reset",
+                        old_metric, metric)
         if split is not None and split.rederived and had_best:
             # scores across different data splits are not comparable
             self._tracker.reset()
@@ -608,6 +633,31 @@ class Trainer:
                 return
             c_mel = float(self.hps.train.get("c_mel", 1.0) or 1.0)
             scores = {"train_mel": float(self._epoch_mel_acc) / steps / c_mel}
+        # metric degradation guard: composite_f0 needs the rmvpe asset; when
+        # the evaluator could not produce it, fall back to val_mel for THIS
+        # epoch so a missing optional metric never freezes the best bar
+        if (self._tracker.metric == "composite_f0"
+                and "composite_f0" not in scores and "val_mel" in scores):
+            scores["composite_f0"] = scores["val_mel"]
+        # GAN health monitor: a steadily CLIMBING val_kl with flat val_mel is
+        # the signature of discriminator overwinning — the generator drifts
+        # away from the data manifold (audio sounds "far from the speaker")
+        # while the mel proxy still improves. Surface it once it is clear.
+        kl = scores.get("val_kl")
+        if kl is not None:
+            hist = self._val_kl_history
+            hist.append(float(kl))
+            if len(hist) == 10:
+                first, last = hist[0], hist[-1]
+                if last > first * 1.5 and last > first:
+                    logger.warning(
+                        "GAN health: val_kl climbed %.2f -> %.2f over the last "
+                        "10 epochs while val_mel stayed flat — the discriminator "
+                        "is winning; consider --d-lr-scale 0.5 (slower D), a "
+                        "lower --lr, or fewer epochs (early stop is armed)",
+                        first, last,
+                    )
+                self._val_kl_history.clear()
         info = self._tracker.update(scores, epoch, self.global_step)
         best = self._tracker.best.to_dict() if self._tracker.best else None
         self.emit("training.validation", epoch=epoch,

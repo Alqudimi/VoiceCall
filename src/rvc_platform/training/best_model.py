@@ -414,6 +414,13 @@ class ValidationEvaluator:
                 out["val_mel"], out["val_spk"], self.spk_weight)
         if f0_items > 0:
             out["val_f0_rmse"] = sums["val_f0_rmse"] / f0_items
+        # selection metric when speechbrain is unavailable: fold the voiced-
+        # F0 RMSE in so the best-model bar reflects pitch/prosody fidelity
+        # too, not just spectral smoothness (see composite_score_f0)
+        if spk_items == 0 and f0_items > 0:
+            f0_weight = float(self.hps.train.get("f0_weight", 0.5) or 0.5)
+            out["composite_f0"] = self._metrics.composite_score_f0(
+                out["val_mel"], out["val_f0_rmse"], f0_weight)
         return out
 
     def _batch_f0_rmse(self, y_hat, pitchf, ids_slice) -> float | None:

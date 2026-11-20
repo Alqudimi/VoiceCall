@@ -1,6 +1,6 @@
 # Iraqi Voice Studio — منصة تحويل الصوت RVC v2
 
-**الإصدار:** 1.3.2 | **اسم الحزمة:** `rvc-platform` | **الترخيص:** MIT
+**الإصدار:** 1.3.3 | **اسم الحزمة:** `rvc-platform` | **الترخيص:** MIT
 
 [![CI](https://github.com/Alqudimi/VoiceCall/actions/workflows/ci.yml/badge.svg)](https://github.com/Alqudimi/VoiceCall/actions/workflows/ci.yml)
 [![Lint](https://github.com/Alqudimi/VoiceCall/actions/workflows/lint.yml/badge.svg)](https://github.com/Alqudimi/VoiceCall/actions/workflows/lint.yml)
@@ -270,6 +270,12 @@ Windows/Colab حيث لا يوجد make. المجموعات: `install`, `env`, `
 قائمة الأهداف كاملة: `make help`. قائمة الأوامر: `uv run rvc-platform --help`.
 
 ---
+
+## إصلاحات v1.3.3
+
+1. **رفع HuggingFace لا يعمل أثناء التدريب** (خطأ استيقاظ الخيط: المهام كانت تُضاف للطابور دون إيقاظ خيط الرفع النائم — لا يرفع شيء حتى إيقاف التدريب): أُصلح بـ`notify()` فوري عند كل إضافة، مع تحذير صريح مرة واحدة عند غياب `HF_TOKEN` يشرح طريقة الإصلاح.
+2. **اختيار أفضل نموذج أصمّ لهوية المتحدث**: عند غياب speechbrain كان الاختيار يعتمد على `val_mel` وحده (مقياس طيفي لا يسمع "شخصية" الصوت). الآن: `composite` الكامل عند توفر speechbrain، وإلا `composite_f0 = val_mel + 0.5×(F0-RMSE/100)` — متاح دائماً مع rmvpe ويُبقي أمانة النبرة في الاختيار. تغيّر المقياس عند الاستئناف يُعاد ضبط سجل الأفضلية تلقائياً.
+3. **كاشف صحة GAN**: تصاعد `val_kl` المستمر (علامة سيطرة المميّز — الصوت يبتعد عن المتحدث بينما val_mel يتحسن شكلياً) أصبح يُكشف ويُحذّر مع التوصية.
 
 ## إصلاحات v1.3.2
 

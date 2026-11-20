@@ -168,3 +168,19 @@ def composite_score(val_mel: float, spk_sim: float | None,
     """Selection metric (lower is better): val_mel + w * (1 - spk_sim)."""
     penalty = (1.0 - float(spk_sim)) if spk_sim is not None else 0.0
     return float(val_mel) + float(spk_weight) * penalty
+
+
+def composite_score_f0(val_mel: float, f0_rmse: float | None,
+                       f0_weight: float = 0.5,
+                       f0_scale: float = 100.0) -> float:
+    """speechbrain-free selection metric (lower is better).
+
+    val_mel + f0_weight * (f0_rmse / f0_scale): the mel L1 is a spectral
+    shape match that cannot hear speaker identity, while the voiced-F0 RMSE
+    (Hz, normalised around 100 Hz — typical F0 errors on small data) adds
+    the prosody/pitch dimension that val_mel alone ignores. Used when the
+    ECAPA speaker embedder is unavailable, so best-model selection never
+    degenerates to "pick the spectrally-smoothest, personality-free epoch".
+    """
+    penalty = (float(f0_rmse) / float(f0_scale)) if f0_rmse is not None else 0.0
+    return float(val_mel) + float(f0_weight) * penalty

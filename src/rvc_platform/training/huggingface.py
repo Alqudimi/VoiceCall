@@ -161,6 +161,7 @@ class HfBackgroundPublisher:
         self._failed = 0
         self._last_error: str | None = None
         self._last_best_key: str | None = None
+        self._token_warned = False
 
     # ---------------------------------------------------------------- api
     @property
@@ -237,7 +238,7 @@ class HfBackgroundPublisher:
 
     # ------------------------------------------------------------- queueing
     def _enqueue(self, job: dict) -> None:
-        with self._lock:
+        with self._has_work:
             if self._closed:
                 raise RuntimeError("publisher closed; cannot enqueue")
             if job["kind"] == "best":
@@ -251,8 +252,13 @@ class HfBackgroundPublisher:
                     logger.info("superseded %d queued best-model upload(s)",
                                 before - len(self._jobs))
             self._jobs.append(job)
-            started = self._thread is not None and self._thread.is_alive()
-        if not started:
+            # wake the consumer thread — without this notify the thread sits
+            # in _has_work.wait() forever and NOTHING uploads until close()
+            # (that was the "models pile up in the queue, never uploaded"
+            # defect: jobs were enqueued, then instantly superseded by the
+            # next best model while the worker slept).
+            self._has_work.notify()
+        if self._thread is None or not self._thread.is_alive():
             self.start()
 
     # ---------------------------------------------------------------- loop
@@ -379,7 +385,16 @@ class HfBackgroundPublisher:
             api = HfApi(token=_resolve_token(self._token))
             _ensure_private_repo(api, self.repo_id)
         except Exception as exc:  # noqa: BLE001 — reported via job failure
-            logger.warning("HF API initialization failed: %s", exc)
+            # say it ONCE, loudly, with the fix — not once per failed attempt
+            if not self._token_warned:
+                self._token_warned = True
+                logger.warning(
+                    "HF uploads are DISABLED until fixed: %s\n"
+                    "  -> add your token to Colab secrets (key: HF_TOKEN, value: "
+                    "hf_...) and enable it for this notebook, then RESTART the "
+                    "training cell — uploads resume from the current best model.",
+                    exc,
+                )
             return False
         self._api, self._CommitOperationAdd = api, CommitOperationAdd
         self._repo_verified = True
