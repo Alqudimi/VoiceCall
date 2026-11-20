@@ -41,6 +41,7 @@ from rvc_platform.training import checkpointing
 from rvc_platform.training import losses as L
 from rvc_platform.training import mel_processing
 from rvc_platform.training import stft_loss
+from rvc_platform.training.augment import build_augmenter
 from rvc_platform.training.dataset import (
     DistributedBucketSampler,
     TextAudioCollate,
@@ -103,6 +104,12 @@ class Trainer:
         self._optim_d2: torch.optim.Optimizer | None = None
         self._sched_d2: torch.optim.lr_scheduler.LRScheduler | None = None
         self._early_stopped = False
+        # Phase-2 researched quality levers: online augmentation + the
+        # warmup/cosine factor schedules layered on G/D
+        self._augmenter = None               # augment.WaveformAugmenter | None
+        self._factor_g: torch.optim.lr_scheduler.LRScheduler | None = None
+        self._factor_d: torch.optim.lr_scheduler.LRScheduler | None = None
+        self._factor_d2: torch.optim.lr_scheduler.LRScheduler | None = None
 
     # ------------------------------------------------------------------ events
     def emit(self, topic: str, **payload) -> None:
@@ -185,14 +192,15 @@ class Trainer:
         net_g = net_g.to(self.device)
         net_d = disc_cls(hps.model["use_spectral_norm"]).to(self.device)
         optim_g = self._make_optimizer(net_g, hps)
-        optim_d = self._make_optimizer(net_d, hps)
+        d_lr = float(hps.train["learning_rate"]) * self._d_lr_scale(hps)
+        optim_d = self._make_optimizer(net_d, hps, lr=d_lr)
         # extra coarse-scale raw discriminators (HiFi-GAN MSD scales 2/4) with
         # their own optimizer — G/D checkpoints and pretrained bases untouched
         if self._use_msd():
             from rvc_platform.training import msd as msd_mod
 
             self._msd = msd_mod.MultiScaleDiscriminator().to(self.device)
-            self._optim_d2 = self._make_optimizer(self._msd, hps)
+            self._optim_d2 = self._make_optimizer(self._msd, hps, lr=d_lr)
             logger.info("multi-scale discriminator enabled (scales=%s) as D2",
                         getattr(self._msd, "scales", (2, 4)))
         return dataset, loader, net_g, net_d, optim_g, optim_d
@@ -213,7 +221,21 @@ class Trainer:
         return decay if 0.0 < decay < 1.0 else 0.0
 
     @staticmethod
-    def _make_optimizer(module: torch.nn.Module, hps) -> torch.optim.AdamW:
+    def _d_lr_scale(hps) -> float:
+        """Discriminator LR multiplier (1.0 = upstream parity).
+
+        Research (see UPGRADE_REPORT_AR.md §2.10): RVC fine-tuning starts
+        from a pretrained G/D pair; a slightly slower discriminator keeps
+        the inherited G/D balance longer at the start of fine-tuning (the
+        same rationale as lower-D-lr experiments in GAN literature)."""
+        try:
+            scale = float(hps.train.get("d_lr_scale", 1.0) or 1.0)
+        except (TypeError, ValueError):
+            return 1.0
+        return scale if 0.0 < scale <= 4.0 else 1.0
+
+    @staticmethod
+    def _make_optimizer(module: torch.nn.Module, hps, lr: float | None = None) -> torch.optim.AdamW:
         """AdamW with the fused CUDA kernel when available.
 
         The fused implementation is the same update rule executed in a single
@@ -222,16 +244,18 @@ class Trainer:
         the default implementation anywhere else.
         """
         kwargs = dict(betas=hps.train["betas"], eps=hps.train["eps"])
+        if lr is None:
+            lr = hps.train["learning_rate"]
         if next(module.parameters()).is_cuda:
             try:
                 return torch.optim.AdamW(
-                    module.parameters(), hps.train["learning_rate"],
+                    module.parameters(), lr,
                     fused=True, **kwargs,
                 )
             except (TypeError, RuntimeError):
                 logger.info("fused AdamW unavailable — default implementation")
         return torch.optim.AdamW(
-            module.parameters(), hps.train["learning_rate"], **kwargs
+            module.parameters(), lr, **kwargs
         )
 
     @staticmethod
@@ -596,6 +620,26 @@ class Trainer:
             self._sched_d2 = torch.optim.lr_scheduler.ExponentialLR(
                 self._optim_d2, gamma=self.hps.train["lr_decay"],
             )
+        # Phase-2: warmup (+optional cosine tail) factor schedule layered on
+        # the exponential decay — the factor multiplies the base lr per step.
+        warmup_epochs = self._warmup_epochs()
+        cosine_frac = self._cosine_frac()
+        if warmup_epochs > 0 or cosine_frac > 0:
+            from rvc_platform.training.schedules import WarmupCosineScheduler
+
+            mk = lambda opt: WarmupCosineScheduler(  # noqa: E731
+                opt, steps_per_epoch=self.steps_per_epoch,
+                warmup_epochs=warmup_epochs, total_epochs=self.hps.total_epoch,
+                cosine_frac=cosine_frac,
+            )
+            self._factor_g = mk(optim_g)
+            self._factor_d = mk(optim_d)
+            if self._optim_d2 is not None:
+                self._factor_d2 = mk(self._optim_d2)
+            logger.info("warmup/cosine factor schedule enabled: warmup=%s "
+                        "epochs, cosine_frac=%s", warmup_epochs, cosine_frac)
+        # Phase-2: online waveform augmentation (None when disabled)
+        self._augmenter = build_augmenter(self.hps, self.device)
         scaler = torch.amp.GradScaler("cuda", enabled=self.is_half)
         self.state = JobState.RUNNING
         started = time.time()
@@ -665,6 +709,32 @@ class Trainer:
                 logger.warning("EMA restore failed — re-initialised from weights",
                                exc_info=True)
 
+    def _warmup_epochs(self) -> int:
+        """Linear warmup epochs for fine-tune stability (0 = off)."""
+        env = os.environ.get("RVC_WARMUP_EPOCHS")
+        if env is not None and env.strip():
+            try:
+                return max(0, int(env))
+            except ValueError:
+                pass
+        try:
+            return max(0, int(self.hps.train.get("warmup_epochs", 1) or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    def _cosine_frac(self) -> float:
+        """Cosine-tail target lr fraction (0 = pure exponential decay)."""
+        env = os.environ.get("RVC_COSINE_FRAC")
+        if env is not None and env.strip():
+            try:
+                return min(1.0, max(0.0, float(env)))
+            except ValueError:
+                pass
+        try:
+            return min(1.0, max(0.0, float(self.hps.train.get("cosine_frac", 0.0) or 0.0)))
+        except (TypeError, ValueError):
+            return 0.0
+
     def _loop(self, net_g, net_d, optim_g, optim_d, sched_g, sched_d, scaler,
               loader, start_epoch: int) -> bool:
         hps = self.hps
@@ -699,6 +769,14 @@ class Trainer:
                     spec = spec.cuda(non_blocking=True)
                     spec_lengths = spec_lengths.cuda(non_blocking=True)
                     wave = wave.cuda(non_blocking=True)
+
+                # Phase-2: online augmentation of the REAL waveform the
+                # discriminators score (spec target untouched — the mel/STFT
+                # reconstruction losses always compare against the pristine
+                # ground truth, so the generator is never asked to reproduce
+                # noise; only D's "real" distribution is regularised).
+                if self._augmenter is not None:
+                    wave = self._augmenter.augment(wave)
 
                 with torch.autocast("cuda" if self.is_half else "cpu",
                                     enabled=self.is_half):
@@ -801,6 +879,16 @@ class Trainer:
                         self._ema.update(self._unwrap(net_g))
 
                 self.global_step += 1
+                # Phase-2: warmup/cosine factor schedule steps per training
+                # step (per-step granularity, unlike the per-epoch
+                # ExponentialLR). Stepped AFTER the optimizer so the first
+                # step of the run uses the warmup factor of step 0.
+                if self._factor_g is not None:
+                    self._factor_g.step()
+                if self._factor_d is not None:
+                    self._factor_d.step()
+                if self._factor_d2 is not None:
+                    self._factor_d2.step()
                 if self.global_step % hps.train["log_interval"] == 0 or batch_idx == 0:
                     lr = optim_g.param_groups[0]["lr"]
                     self.last_losses = {
@@ -811,6 +899,9 @@ class Trainer:
                         "fm": round(float(loss_fm), 4),
                         "lr": lr,
                     }
+                    if self._factor_g is not None:
+                        self.last_losses["lr_factor"] = round(
+                            float(self._factor_g._factor(self._factor_g.last_epoch)), 6)
                     if loss_stft is not None:
                         self.last_losses["stft"] = round(float(loss_stft), 4)
                     if self._ema is not None:

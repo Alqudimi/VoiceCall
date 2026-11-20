@@ -94,7 +94,27 @@ class DataPipeline:
             self.layout["gt_wavs"].parent, self.config.version,
             self.config.f0, self.config.speaker_id,
         )
-        return {"filelist": str(path)}
+        report = {"filelist": str(path)}
+        # Phase-2 researched lever: drop mostly-silent chunks from the
+        # training manifest (energy-VAD speech-ratio bar). Idempotent and
+        # reversible — audio files stay on disk; a re-run of this stage
+        # regenerates the raw filelist and re-applies the filter.
+        ratio = float(getattr(self.config, "speech_filter_ratio", 0.0) or 0.0)
+        if ratio > 0:
+            try:
+                from rvc_platform.training import vad_filter
+
+                kept, dropped = vad_filter.filter_filelist(
+                    path, path, self.layout["gt_wavs"], self.config.sr_int,
+                    min_speech_ratio=ratio,
+                )
+                report["filelist_filtered"] = {
+                    "kept": kept, "dropped": dropped, "min_speech_ratio": ratio,
+                }
+            except Exception:
+                logger.exception("filelist silence filter failed — "
+                                 "using the unfiltered filelist")
+        return report
 
     def persist_config(self) -> dict:
         cfg_path = self.config.save()

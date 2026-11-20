@@ -1,6 +1,6 @@
 # Iraqi Voice Studio — منصة تحويل الصوت RVC v2
 
-**الإصدار:** 1.0.0 | **اسم الحزمة:** `rvc-platform` | **الترخيص:** MIT
+**الإصدار:** 1.2.0 | **اسم الحزمة:** `rvc-platform` | **الترخيص:** MIT
 
 [![CI](https://github.com/Alqudimi/VoiceCall/actions/workflows/ci.yml/badge.svg)](https://github.com/Alqudimi/VoiceCall/actions/workflows/ci.yml)
 [![Lint](https://github.com/Alqudimi/VoiceCall/actions/workflows/lint.yml/badge.svg)](https://github.com/Alqudimi/VoiceCall/actions/workflows/lint.yml)
@@ -27,7 +27,7 @@
 |---|---|
 | [INSTALLATION.md](INSTALLATION.md) | التثبيت خطوة بخطوة (Ubuntu / Windows / Colab / GPU) |
 | [TRAINING.md](TRAINING.md) | تدريب نموذج صوتي جديد من بياناتك |
-| [UPGRADE_REPORT_AR.md](UPGRADE_REPORT_AR.md) | تقرير الترقية البحثية: EMA / MRSTFT / MSD / المقياس المركب (مراجع + أدلة) |
+| [UPGRADE_REPORT_AR.md](UPGRADE_REPORT_AR.md) | تقرير الترقية البحثية: EMA / MRSTFT / MSD / المقياس المركب / تعزيز لحظي / إحماء+جيبي / مرشّح كلام (مراجع + أدلة) |
 | [REALTIME.md](REALTIME.md) | البث اللحظي عبر WebSocket وقياس زمن الاستجابة |
 | [API.md](API.md) | توثيق كامل لواجهة REST/WebSocket |
 | [CONFIGURATION.md](CONFIGURATION.md) | كل مفاتيح الإعداد ومتغيرات البيئة |
@@ -43,7 +43,7 @@
 
 | القدرة | الوصف | القيد |
 |---|---|---|
-| تدريب نماذج صوت | خط كامل: فحص بيانات (بصمت MD5 + نسبة صمت)، تقطيع، استخراج F0 وHuBERT، فهرس FAISS، تدريب GAN مع استئناف دقيق — تلقائي أو **من نقطة محددة**، مع حفظ طارئ عند الانهيار، و**تتبّع أفضل نموذج** بـ**مقياس مركب** (val_mel + تشابه متحدث ECAPA + F0-RMSE) يُرفع ويُحدّث في `best/` على HuggingFace، و**وصفة الجودة البحثية مفعّلة افتراضيًا**: EMA للمولّد + خسارة MRSTFT + تمييزات MSD (scales 2/4) + إيقاف مبكر ضد الإفراط — انظر UPGRADE_REPORT_AR.md | GPU واحد فقط (لا يوجد DDP متعدد GPU) |
+| تدريب نماذج صوت | خط كامل: فحص بيانات (بصمت MD5 + نسبة صمت)، تقطيع، استخراج F0 وHuBERT، فهرس FAISS، تدريب GAN مع استئناف دقيق — تلقائي أو **من نقطة محددة**، مع حفظ طارئ عند الانهيار، و**تتبّع أفضل نموذج** بـ**مقياس مركب** (val_mel + تشابه متحدث ECAPA + F0-RMSE) يُرفع ويُحدّث في `best/` على HuggingFace، و**وصفة الجودة البحثية مفعّلة افتراضيًا**: EMA للمولّد + خسارة MRSTFT + تمييزات MSD (scales 2/4) + إيقاف مبكر ضد الإفراط + تعزيز لحظي للجانب الحقيقي + إحماء/ذيل جيبي لمعدل التعلم + مرشّح نسبة الكلام — انظر UPGRADE_REPORT_AR.md | GPU واحد فقط (لا يوجد DDP متعدد GPU) |
 | تحويل الملفات | Audio-to-Audio: WAV/MP3/FLAC/OGG/M4A/OPUS/WebM/AAC (عبر ffmpeg) + **تسجيل مباشر من الميكروفون** داخل تبويب التحويل | WAV/FLAC تعمل بدون ffmpeg |
 | البث اللحظي | من ميكروفون المتصفح إلى صوت محوّل عبر WebSocket، **مع اختيار الميكروفون وجهاز الإخراج** | يتطلب GPU من فئة CUDA (RTX) ونموذج f0 |
 | واجهة ويب عربية | لوحة تحكم RTL: لوحة التحكم / النماذج / تحويل الملفات / البث اللحظي / التدريب / الإعدادات | `http://127.0.0.1:8320` |

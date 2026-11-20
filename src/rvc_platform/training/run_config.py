@@ -56,6 +56,19 @@ class TrainingRunConfig(BaseModel):
     spk_weight: float = Field(default=1.0, ge=0.0)  # speaker-similarity weight in the composite best-model metric
     early_stop_patience: int = Field(default=0, ge=0, le=10_000)  # epochs without a new best before cooperative stop (0 = off)
     f0_eval: bool = True                         # F0-RMSE diagnostic in validation (needs rmvpe asset)
+    # ---- Phase-2 researched quality levers (see UPGRADE_REPORT_AR.md §2.8+) ---
+    augment: bool = Field(default=False)        # online waveform augmentation (noise/gain/dropout; light recipe)
+    aug_noise_p: float = Field(default=0.35, ge=0.0, le=1.0)
+    aug_noise_snr_db_min: float = Field(default=12.0, ge=-10.0, le=80.0)
+    aug_noise_snr_db_max: float = Field(default=30.0, ge=-10.0, le=90.0)
+    aug_gain_p: float = Field(default=0.5, ge=0.0, le=1.0)
+    aug_gain_db: float = Field(default=2.0, ge=0.0, le=12.0)
+    aug_dropout_p: float = Field(default=0.15, ge=0.0, le=1.0)
+    aug_dropout_ms: int = Field(default=60, ge=5, le=500)
+    warmup_epochs: int = Field(default=1, ge=0, le=50)  # linear LR ramp for fine-tune stability (0 = off)
+    cosine_frac: float = Field(default=0.0, ge=0.0, le=1.0)  # cosine tail target fraction (0 = pure exponential)
+    d_lr_scale: float = Field(default=1.0, gt=0.0, le=4.0)  # discriminator LR scale (1.0 = upstream)
+    speech_filter_ratio: float = Field(default=0.25, ge=0.0, le=1.0)  # min voiced ratio per chunk (0 = no filter)
     # ---- dataset-quality preprocessing options (any dataset, Colab-safe) -----
     denoise: bool = False                        # pre-slicing spectral-gate denoise (noisereduce; guarded no-op)
     loudness: bool = True                        # per-chunk RMS loudness normalisation (common training targets)
@@ -174,6 +187,19 @@ class TrainingRunConfig(BaseModel):
         train["spk_weight"] = self.spk_weight
         train["early_stop_patience"] = self.early_stop_patience
         train["f0_eval"] = 1 if self.f0_eval else 0
+        # Phase-2 researched quality levers
+        train["augment"] = 1 if self.augment else 0
+        train["aug_noise_p"] = self.aug_noise_p
+        train["aug_noise_snr_db_min"] = self.aug_noise_snr_db_min
+        train["aug_noise_snr_db_max"] = self.aug_noise_snr_db_max
+        train["aug_gain_p"] = self.aug_gain_p
+        train["aug_gain_db"] = self.aug_gain_db
+        train["aug_dropout_p"] = self.aug_dropout_p
+        train["aug_dropout_ms"] = self.aug_dropout_ms
+        train["warmup_epochs"] = self.warmup_epochs
+        train["cosine_frac"] = self.cosine_frac
+        train["d_lr_scale"] = self.d_lr_scale
+        train["speech_filter_ratio"] = self.speech_filter_ratio
         hps = HParams.from_template(
             {"train": train, "data": dict(template["data"]), "model": dict(template["model"])},
             version=self.version,

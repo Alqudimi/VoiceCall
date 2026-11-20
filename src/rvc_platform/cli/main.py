@@ -353,13 +353,19 @@ def prepare_dataset(
                                   help="best-effort spectral-gate denoise before slicing (noisereduce)"),
     loudness: bool = typer.Option(True, "--loudness/--no-loudness",
                                   help="per-chunk RMS loudness normalisation (-20 dBFS)"),
+    speech_filter: float = typer.Option(
+        0.25, "--speech-filter",
+        help="drop chunks whose voiced-frame ratio (energy VAD) is below this "
+             "value; 0 disables (recommended 0.2-0.3)",
+    ),
 ):
     """Full pipeline: check -> preprocess -> F0 -> HuBERT -> filelist -> index."""
     from rvc_platform.training.run_config import TrainingRunConfig
 
     cfg = TrainingRunConfig(experiment_name=experiment, dataset_path=dataset,
                             sample_rate=sr, f0_method=method,
-                            denoise=denoise, loudness=loudness)
+                            denoise=denoise, loudness=loudness,
+                            speech_filter_ratio=max(0.0, min(1.0, speech_filter)))
     DataPipelineRunner(cfg).all()
 
 
@@ -454,6 +460,23 @@ def train_start(
         None, "--resume-from",
         help="explicit checkpoint: G_<step>.pth name, absolute path, or 'latest'",
     ),
+    # ---- Phase-2 researched quality levers (UPGRADE_REPORT_AR.md §2.8+) ----
+    augment: Optional[bool] = typer.Option(
+        None, "--augment/--no-augment",
+        help="online waveform augmentation: light noise/gain/dropout on the real side",
+    ),
+    warmup: Optional[int] = typer.Option(
+        None, "--warmup",
+        help="linear LR warmup epochs for fine-tune stability (default 1; 0 = off)",
+    ),
+    cosine: Optional[float] = typer.Option(
+        None, "--cosine",
+        help="cosine-tail LR target fraction (e.g. 0.1; 0 = pure exponential decay)",
+    ),
+    d_lr_scale: Optional[float] = typer.Option(
+        None, "--d-lr-scale",
+        help="discriminator LR scale (1.0 = upstream parity; e.g. 0.9 slows D)",
+    ),
 ):
     """Start (or continue) a training run. Follows live progress on stdout."""
     from rvc_platform.training.run_config import TrainingRunConfig
@@ -467,6 +490,11 @@ def train_start(
         **({"use_msd": False} if no_msd else {}),
         **({"spk_weight": spk_weight} if spk_weight is not None else {}),
         **({"early_stop_patience": early_stop} if early_stop is not None else {}),
+        # Phase-2 levers
+        **({"augment": augment} if augment is not None else {}),
+        **({"warmup_epochs": warmup} if warmup is not None else {}),
+        **({"cosine_frac": cosine} if cosine is not None else {}),
+        **({"d_lr_scale": d_lr_scale} if d_lr_scale is not None else {}),
     }
     if dataset is not None:
         cfg = TrainingRunConfig(
