@@ -39,8 +39,8 @@ class TrainingRunConfig(BaseModel):
     version: str = "v2"
     f0: bool = True
     f0_method: str = "rmvpe"
-    epochs: int = Field(default=200, ge=1, le=10_000)
-    batch_size: int = Field(default=6, ge=1, le=64)
+    epochs: int = Field(default=300, ge=1, le=10_000)
+    batch_size: int = Field(default=8, ge=1, le=64)
     learning_rate: float = Field(default=1e-4, gt=0)
     lr_decay: float = Field(default=0.999875, gt=0.0, le=1.0)
     segment: int | None = None                  # None -> template value
@@ -48,13 +48,13 @@ class TrainingRunConfig(BaseModel):
     save_latest: bool = True                     # keep G_2333333/D_2333333 updated
     save_every_weights: bool = True              # periodic inference checkpoints
     save_best: bool = True                       # track + export the best-so-far model
-    val_split: float = Field(default=0.05, ge=0.0, le=0.5)  # held-out fraction for best-model scoring (0 = train-mel fallback)
+    val_split: float = Field(default=0.10, ge=0.0, le=0.5)  # held-out fraction for best-model scoring (0 = train-mel fallback)
     # ---- researched quality levers (see UPGRADE_REPORT_AR.md) -----------------
     ema_decay: float = Field(default=0.999, ge=0.0, lt=1.0)  # generator EMA (0 disables; BigVGAN-style)
     c_stft: float = Field(default=2.0, ge=0.0)  # multi-resolution STFT loss weight (0 = upstream objective)
     use_msd: bool = True                        # extra multi-scale (raw) discriminator scales 2/4 (HiFi-GAN MSD)
     spk_weight: float = Field(default=1.0, ge=0.0)  # speaker-similarity weight in the composite best-model metric
-    early_stop_patience: int = Field(default=0, ge=0, le=10_000)  # epochs without a new best before cooperative stop (0 = off)
+    early_stop_patience: int = Field(default=30, ge=0, le=10_000)  # epochs without a new best before cooperative stop (0 = off)
     f0_eval: bool = True                         # F0-RMSE diagnostic in validation (needs rmvpe asset)
     # ---- Phase-2 researched quality levers (see UPGRADE_REPORT_AR.md §2.8+) ---
     augment: bool = Field(default=False)        # online waveform augmentation (noise/gain/dropout; light recipe)
@@ -67,7 +67,7 @@ class TrainingRunConfig(BaseModel):
     aug_dropout_ms: int = Field(default=60, ge=5, le=500)
     warmup_epochs: int = Field(default=1, ge=0, le=50)  # linear LR ramp for fine-tune stability (0 = off)
     cosine_frac: float = Field(default=0.0, ge=0.0, le=1.0)  # cosine tail target fraction (0 = pure exponential)
-    d_lr_scale: float = Field(default=1.0, gt=0.0, le=4.0)  # discriminator LR scale (1.0 = upstream)
+    d_lr_scale: float = Field(default=0.75, gt=0.0, le=4.0)  # discriminator LR scale (1.0 = upstream)
     speech_filter_ratio: float = Field(default=0.25, ge=0.0, le=1.0)  # min voiced ratio per chunk (0 = no filter)
     # ---- dataset-quality preprocessing options (any dataset, Colab-safe) -----
     denoise: bool = False                        # pre-slicing spectral-gate denoise (noisereduce; guarded no-op)
