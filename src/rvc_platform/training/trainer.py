@@ -259,17 +259,83 @@ class Trainer:
         )
 
     @staticmethod
-    def _unwrap(module: torch.nn.Module) -> torch.nn.Module:
-        """Underlying module of a torch.compile wrapper (weights are shared)."""
+    def _unwrap(module) -> torch.nn.Module:
+        """Underlying module of a torch.compile / _CompileGuard wrapper
+        (weights are shared)."""
+        if isinstance(module, Trainer._CompileGuard):
+            return module._raw
         return getattr(module, "_orig_mod", module)
+
+    @staticmethod
+    def _is_compile_kernel_error(exc: BaseException) -> bool:
+        """Runtime errors raised from an Inductor-compiled graph.
+
+        dynamo's suppress_errors only guards TRACE-time failures; a kernel
+        that compiles fine but crashes at runtime (e.g. torch 2.7's
+        assert_size_stride layout assert on the f0 NSF path) propagates and
+        kills the run. Recognised by the inductor/dynamo frames in the
+        traceback — anything raised from there is a compiled-kernel defect.
+        """
+        import traceback
+
+        tb = traceback.extract_tb(exc.__traceback__)
+        return any(
+            "torchinductor" in (frame.filename or "")
+            or "_inductor" in (frame.filename or "")
+            or "torch/_dynamo" in (frame.filename or "")
+            for frame in reversed(tb)
+        )
+
+    class _CompileGuard:
+        """Call-time safety net around a torch.compile'd network.
+
+        Deliberately NOT an nn.Module (registering the networks as submodules
+        would prefix checkpoint keys); a transparent proxy instead. The first
+        failed call with a compiled-kernel defect permanently swaps that
+        network to eager — training continues, a clear warning names the
+        offending net, and later calls bypass the broken graph for free.
+        Everything except __call__ (train/eval/parameters/...) delegates to
+        the raw module, whose weights are shared with the compiled graph.
+        """
+
+        def __init__(self, compiled, raw, label: str):
+            self._compiled = compiled
+            self._raw = raw
+            self._label = label
+            self._fell_back = False
+
+        def __call__(self, *args, **kwargs):
+            if self._fell_back:
+                return self._raw(*args, **kwargs)
+            try:
+                return self._compiled(*args, **kwargs)
+            except Exception as exc:
+                if not Trainer._is_compile_kernel_error(exc):
+                    raise
+                self._fell_back = True
+                logger.warning(
+                    "torch.compile kernel failed on %s (%s: %s) — permanently "
+                    "falling back to eager execution for this network; "
+                    "training continues unaffected",
+                    self._label, type(exc).__name__, exc,
+                )
+                return self._raw(*args, **kwargs)
+
+        def __getattr__(self, name):
+            # _compiled/_raw/_label/_fell_back live in __dict__; everything
+            # else (train, eval, parameters, state_dict, ...) hits the raw
+            # module — the guard is invisible to the rest of the trainer.
+            return getattr(self.__dict__["_raw"], name)
 
     def _maybe_compile(self, net_g, net_d):
         """Optional torch.compile for both networks.
 
         Default "auto": enabled on CUDA, disabled elsewhere. Set
-        RVC_TORCH_COMPILE=0 to force off, =1 to force on. dynamo's
-        suppress_errors turns any compile failure into a silent fall-back to
-        eager execution, so a compile bug can never crash a training run.
+        RVC_TORCH_COMPILE=0 to force off, =1 to force on. Two layers of
+        protection: dynamo's suppress_errors catches TRACE-time failures
+        (silent eager fallback), and the _CompileGuard wrapper catches
+        RUNTIME kernel defects (first failure permanently swaps that
+        network to eager) — a compile bug can never crash a training run.
         Checkpoints keep byte-identical keys because state dicts are always
         read from the unwrapped module (see _unwrap / _checkpoint).
         """
@@ -294,8 +360,11 @@ class Trainer:
             )
             compiled_g = torch.compile(net_g)
             compiled_d = torch.compile(net_d)
-            logger.info("torch.compile enabled for G and D (auto eager fallback)")
-            return compiled_g, compiled_d
+            guarded_g = self._CompileGuard(compiled_g, net_g, "generator")
+            guarded_d = self._CompileGuard(compiled_d, net_d, "discriminator")
+            logger.info("torch.compile enabled for G and D "
+                        "(trace + runtime eager fallback)")
+            return guarded_g, guarded_d
         except Exception:
             logger.warning("torch.compile unavailable — continuing in eager mode",
                            exc_info=True)

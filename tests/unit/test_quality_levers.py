@@ -240,8 +240,8 @@ def test_run_config_quality_fields_defaults_and_validation(tmp_path):
     assert cfg.c_stft == 2.0
     assert cfg.use_msd is True
     assert cfg.spk_weight == 1.0
-    assert cfg.early_stop_patience == 0
-    assert cfg.val_split == 0.05
+    assert cfg.early_stop_patience == 30
+    assert cfg.val_split == 0.1
     assert cfg.denoise is False and cfg.loudness is True
 
     with pytest.raises(Exception):
@@ -257,7 +257,7 @@ def test_run_config_quality_fields_defaults_and_validation(tmp_path):
     assert hps.train["c_stft"] == 2.0
     assert hps.train["use_msd"] == 1
     assert hps.train["spk_weight"] == 1.0
-    assert hps.train["early_stop_patience"] == 0
+    assert hps.train["early_stop_patience"] == 30
     assert hps.train["f0_eval"] == 1
 
 

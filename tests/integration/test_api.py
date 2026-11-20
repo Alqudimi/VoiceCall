@@ -4,6 +4,8 @@ from __future__ import annotations
 import pytest
 from fastapi.testclient import TestClient
 
+from rvc_platform import __version__
+
 
 
 @pytest.fixture()
@@ -33,7 +35,7 @@ def test_health_and_system(client):
     assert resp.status_code == 200 and resp.json()["ok"] is True
     resp = client.get("/api/system")
     body = resp.json()
-    assert body["app_version"] == "1.0.0"
+    assert body["app_version"] == __version__
     assert body["device"] == "cpu"
     assert body["engine"] in {"unavailable", "error", "ready"}
     assert "gpu" in body and "ram" in body and "training" in body

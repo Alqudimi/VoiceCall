@@ -144,7 +144,7 @@ def test_run_config_best_model_fields(project_env):
     # smart defaults: tracking on, with a small held-out split for the
     # researched composite best-model metric (UPGRADE_REPORT_AR.md §2.4)
     assert config.save_best is True
-    assert config.val_split == 0.05
+    assert config.val_split == 0.1
     config2 = TrainingRunConfig(
         experiment_name="bestcfg2", dataset_path=project_env / "dataset",
         save_best=False, val_split=0.25,

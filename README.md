@@ -1,6 +1,6 @@
 # Iraqi Voice Studio — منصة تحويل الصوت RVC v2
 
-**الإصدار:** 1.2.0 | **اسم الحزمة:** `rvc-platform` | **الترخيص:** MIT
+**الإصدار:** 1.3.2 | **اسم الحزمة:** `rvc-platform` | **الترخيص:** MIT
 
 [![CI](https://github.com/Alqudimi/VoiceCall/actions/workflows/ci.yml/badge.svg)](https://github.com/Alqudimi/VoiceCall/actions/workflows/ci.yml)
 [![Lint](https://github.com/Alqudimi/VoiceCall/actions/workflows/lint.yml/badge.svg)](https://github.com/Alqudimi/VoiceCall/actions/workflows/lint.yml)
@@ -240,7 +240,7 @@ Windows/Colab حيث لا يوجد make. المجموعات: `install`, `env`, `
 | استخراج ميزات تجربة قائمة | `make extract-features EXPERIMENT=... F0_METHOD=rmvpe` | `uv run rvc-platform extract-features <exp> --f0-method rmvpe` |
 | خط البيانات الكامل | `make prepare-dataset DATASET=... EXPERIMENT=... SR=40k F0_METHOD=rmvpe` | `uv run rvc-platform prepare-dataset <dataset> <exp> --sr 40k --f0-method rmvpe` |
 | تدريب | `make train` | `uv run rvc-platform train start --dataset ... --experiment ... --epochs 200 --batch 6 --sr 40k` |
-| استئناف | `make train-resume` | `uv run rvc-platform train start --experiment <exp>` |
+| استئناف | `make train-resume` | `uv run rvc-platform train start --experiment <exp>` (v1.3.1: `--epochs/--batch/--lr/--save-every` تُطبَّق فعليًا على الجلسة القائمة دون إعادة تجهيز؛ SR وF0 مقفولان على ما جُهّز) |
 | استئناف من نقطة محددة | — | `uv run rvc-platform train start --experiment <exp> --resume-from G_48.pth` (أو `latest`) |
 | إيقاف تعاوني | `make train-stop` | `uv run rvc-platform train stop` (يقرأ `temp/trainer.pid` الذي يكتبه worker) |
 | نقاط الحفظ | `make checkpoints EXPERIMENT=<exp>` | `uv run rvc-platform train checkpoints <exp>` |
@@ -270,6 +270,11 @@ Windows/Colab حيث لا يوجد make. المجموعات: `install`, `env`, `
 قائمة الأهداف كاملة: `make help`. قائمة الأوامر: `uv run rvc-platform --help`.
 
 ---
+
+## إصلاحات v1.3.2
+
+1. **انهيار أول خطوة تدريب تحت `torch.compile` على كولاب** (`expected size 256==256, stride 1==320`): خطأ تخطيط في Inductor مع PyTorch 2.7. أُصلح جذرياً في `commons.py` (تقطيع متجه بدل حلقة الصفوف) و`models.py` (إعادة تشكيل مصدر NSF بدل transpose)، مع حارس `_CompileGuard` في المدرب يسقط تلقائياً إلى eager إن فشلت نواة مُجمَّعة — التدريب لا يتوقف بسبب compile أبداً.
+2. **حذف عجلات GPU عند تشغيل السكربتات** (`Uninstalled 2 packages`): `uv run` العارية تعيد مزامنة `uv.lock` فترجع torch إلى CPU. كل خلايا النوتبوك الآن تضبط `UV_NO_SYNC=1`، وخلية التدريب تفحص عجلة GPU وتصلحها تلقائياً، وسكربت التثبيت يحذّر ويشفئ CPU-torch ذاتياً في النهاية.
 
 ## الاختبارات
 

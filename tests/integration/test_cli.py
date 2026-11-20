@@ -98,3 +98,93 @@ def test_model_list_empty_message(project_env):
     result = runner.invoke(app, ["model", "list"])
     assert result.exit_code == 0
     assert "no models yet" in result.output
+
+
+# --------------------------------------------------------------- v1.3.1 ----
+def _make_prepared_run(project_env, exp="prepared_exp", sr="40k", f0="rmvpe"):
+    """A run with a prepared filelist + saved config (no checkpoints needed)."""
+    from rvc_platform.training.run_config import TrainingRunConfig
+
+    dataset = project_env / "ds_prep"
+    dataset.mkdir(exist_ok=True)
+    (dataset / "a.wav").write_bytes(b"RIFF")
+    run_dir = project_env / "runs" / exp
+    run_dir.mkdir(parents=True)
+    (run_dir / "filelist.txt").write_text(
+        f"{run_dir}/0_gt_wavs/a.wav|{run_dir}/3_feature768/a.npy|0\n",
+        encoding="utf-8")
+    config = TrainingRunConfig(
+        experiment_name=exp, dataset_path=str(dataset), sample_rate=sr,
+        f0_method=f0, epochs=100, batch_size=4, learning_rate=1e-4,
+        preload_base_models=False,
+    )
+    (run_dir / "run_config.json").write_text(config.model_dump_json(),
+                                            encoding="utf-8")
+    return run_dir
+
+
+def test_train_start_applies_knobs_to_existing_run(project_env):
+    """v1.3.1: without --dataset, epochs/batch/lr/save-every apply to a
+    prepared run instead of being silently ignored."""
+    run_dir = _make_prepared_run(project_env)
+    result = runner.invoke(app, [
+        "train", "start", "--experiment", "prepared_exp",
+        "--epochs", "250", "--batch", "8", "--lr", "2e-4",
+        "--save-every", "5",
+    ])
+    # worker will fail (no real data) — but the config on disk must show
+    # the applied knobs and the untouched prepared pipeline
+    persisted = json.loads((run_dir / "run_config.json").read_text(encoding="utf-8"))
+    assert persisted["epochs"] == 250
+    assert persisted["batch_size"] == 8
+    assert persisted["learning_rate"] == 2e-4
+    assert persisted["save_every_epoch"] == 5
+    assert result.exit_code in (0, 3)  # worker failure on fake data is fine
+
+
+def test_train_start_rejects_sr_mismatch_on_prepared_run(project_env):
+    """SR/F0 are locked to the prepared run — changing them must fail fast
+    instead of silently invalidating the extracted features."""
+    _make_prepared_run(project_env, sr="40k")
+    result = runner.invoke(app, [
+        "train", "start", "--experiment", "prepared_exp", "--sr", "48k",
+    ])
+    assert result.exit_code != 0
+    assert "40k" in result.output
+
+
+def test_train_start_dataset_only_moves_pointer_on_existing_run(project_env):
+    """v1.3.1: --dataset on an existing run only moves the pointer; it must
+    not wipe the saved prepare settings (denoise/loudness/speech filter)."""
+    from rvc_platform.training.run_config import TrainingRunConfig
+
+    run_dir = _make_prepared_run(project_env)
+    # overwrite the saved config with CUSTOM prepare settings
+    saved = TrainingRunConfig.load(run_dir)
+    saved.denoise, saved.loudness, saved.speech_filter_ratio = True, False, 0.35
+    (run_dir / "run_config.json").write_text(saved.model_dump_json(), encoding="utf-8")
+    other = project_env / "ds_other"
+    other.mkdir(exist_ok=True)
+    (other / "b.wav").write_bytes(b"RIFF")
+    result = runner.invoke(app, [
+        "train", "start", "--experiment", "prepared_exp",
+        "--dataset", str(other), "--epochs", "120",
+    ])
+    persisted = json.loads((run_dir / "run_config.json").read_text(encoding="utf-8"))
+    # custom prepare settings survive; dataset_path follows the new pointer
+    assert persisted["denoise"] is True
+    assert persisted["loudness"] is False
+    assert persisted["speech_filter_ratio"] == 0.35
+    assert persisted["epochs"] == 120
+    assert "ds_other" in persisted["dataset_path"]
+    assert result.exit_code in (0, 3)
+
+
+def test_train_start_rejects_f0_mismatch_on_prepared_run(project_env):
+    _make_prepared_run(project_env, f0="rmvpe")
+    result = runner.invoke(app, [
+        "train", "start", "--experiment", "prepared_exp",
+        "--f0-method", "fcpe",
+    ])
+    assert result.exit_code != 0
+    assert "rmvpe" in result.output

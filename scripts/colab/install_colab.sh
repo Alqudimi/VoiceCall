@@ -167,6 +167,22 @@ ok "wrote colab_wire_env.py — exec it in the next cell (see notebook cell 2)"
 log "environment verification"
 uv run rvc-platform install check
 [[ "$SKIP_ASSETS" == "0" ]] && uv run rvc-platform install doctor
+# GPU sanity: if a GPU machine somehow ended with CPU torch (e.g. a stray
+# `uv sync` ran mid-install), say it LOUDLY and self-heal — the silent
+# CPU-fallback was the #2 support issue (training 20x slower on Colab).
+if [[ -n "$GPU_VARIANT" ]]; then
+  TORCH_VER="$("$PROJECT_ROOT/.venv/bin/python" -c 'import torch; print(torch.__version__)' 2>/dev/null || true)"
+  if [[ "$TORCH_VER" == *"+cpu" ]]; then
+    log "WARNING: torch is the CPU build (${TORCH_VER}) on a GPU machine — reinstalling ${GPU_VARIANT} wheels"
+    if uv run rvc-platform env gpu "$GPU_VARIANT"; then
+      ok "CUDA torch restored"
+    else
+      log "CUDA reinstall failed — training will run on CPU (very slow). Fix: uv run rvc-platform env gpu $GPU_VARIANT"
+    fi
+  else
+    ok "GPU torch active: ${TORCH_VER:-unknown}"
+  fi
+fi
 ok "Colab setup complete"
 echo
 echo "  next steps (in new cells):"

@@ -411,15 +411,33 @@ app.add_typer(train_app, name="train")
 
 @train_app.command("start")
 def train_start(
-    dataset: Optional[Path] = typer.Option(None, "--dataset"),
+    dataset: Optional[Path] = typer.Option(
+        None, "--dataset",
+        help="raw dataset folder — only needed the FIRST time (before cell 3 "
+             "prepares the run); on an existing run it just moves the pointer",
+    ),
     experiment: str = typer.Option("iraqi_voice", "--experiment", "-e"),
-    sr: str = typer.Option("40k", "--sr"),
-    epochs: int = typer.Option(200, "--epochs"),
-    batch_size: int = typer.Option(6, "--batch"),
-    lr: float = typer.Option(1e-4, "--lr"),
-    save_every: int = typer.Option(10, "--save-every"),
+    sr: Optional[str] = typer.Option(
+        None, "--sr",
+        help="sample rate for a NEW run; on a prepared run it must match the "
+             "prepared value (locked — re-prepare to change)",
+    ),
+    epochs: Optional[int] = typer.Option(
+        None, "--epochs",
+        help="total epoch target (resume continues up to it); unset = keep saved",
+    ),
+    batch_size: Optional[int] = typer.Option(
+        None, "--batch", help="batch size; unset = keep the saved value"),
+    lr: Optional[float] = typer.Option(
+        None, "--lr", help="learning rate; unset = keep the saved value"),
+    save_every: Optional[int] = typer.Option(
+        None, "--save-every", help="checkpoint interval; unset = keep saved"),
     gpu: Optional[int] = typer.Option(None, "--gpu"),
-    f0_method: str = typer.Option("rmvpe", "--f0-method"),
+    f0_method: Optional[str] = typer.Option(
+        None, "--f0-method",
+        help="F0 extractor for a NEW run; on a prepared run it must match "
+             "the prepared value (locked — re-prepare to change)",
+    ),
     no_pretrained: bool = typer.Option(False, "--no-pretrained"),
     clean_start: bool = typer.Option(False, "--clean-start"),
     hf_repo: Optional[str] = typer.Option(None, "--hf-repo", help="private HF model repo (owner/name)"),
@@ -483,6 +501,9 @@ def train_start(
 
     paths = get_paths()
     run_dir = paths.runs / experiment
+    run_config_path = run_dir / "run_config.json"
+    existing_cfg = (TrainingRunConfig.load(run_dir)
+                    if run_config_path.is_file() else None)
     quality_overrides = {
         **({"ema_decay": 0.0} if no_ema else
            ({"ema_decay": ema_decay} if ema_decay is not None else {})),
@@ -497,21 +518,70 @@ def train_start(
         **({"d_lr_scale": d_lr_scale} if d_lr_scale is not None else {}),
     }
     if dataset is not None:
-        cfg = TrainingRunConfig(
-            experiment_name=experiment, dataset_path=dataset, sample_rate=sr,
-            epochs=epochs, batch_size=batch_size, learning_rate=lr,
-            save_every_epoch=save_every, gpu=gpu, f0_method=f0_method,
-            preload_base_models=not no_pretrained, clean_start=clean_start,
-            hf_repo_id=hf_repo,
-            **({"save_best": save_best} if save_best is not None else {}),
-            **({"val_split": val_split} if val_split is not None else {}),
-            **quality_overrides,
-        )
-    elif (run_dir / "run_config.json").is_file():
-        cfg = TrainingRunConfig.load(run_dir)
+        if existing_cfg is not None:
+            # v1.3.1: the run is already prepared — --dataset only moves the
+            # pointer; prepare settings (denoise/loudness/speech-filter) and
+            # the locked SR/F0 must survive, never reset to defaults.
+            cfg = existing_cfg
+            if sr is not None and sr != cfg.sample_rate:
+                raise typer.BadParameter(
+                    f"--sr {sr} does not match the prepared run ({cfg.sample_rate}); "
+                    "the data is already sliced/extracted at that rate — "
+                    "re-run prepare-dataset (and expect a new run) to change it")
+            if f0_method is not None and f0_method != cfg.f0_method:
+                raise typer.BadParameter(
+                    f"--f0-method {f0_method} does not match the prepared run "
+                    f"({cfg.f0_method}); F0 files are already extracted — "
+                    "re-run prepare-dataset to change it")
+            cfg.dataset_path = dataset
+            console.print(f"[yellow]prepared run {experiment}: --dataset only "
+                          "moved the raw-data pointer (no re-preparation)[/yellow]")
+        else:
+            cfg = TrainingRunConfig(
+                experiment_name=experiment, dataset_path=dataset,
+                sample_rate=sr or "40k",
+                epochs=epochs or 300, batch_size=batch_size or 8,
+                learning_rate=lr or 1e-4, save_every_epoch=save_every or 10,
+                gpu=gpu, f0_method=f0_method or "rmvpe",
+                preload_base_models=not no_pretrained, clean_start=clean_start,
+                hf_repo_id=hf_repo,
+                **({"save_best": save_best} if save_best is not None else {}),
+                **({"val_split": val_split} if val_split is not None else {}),
+                **quality_overrides,
+            )
+    elif existing_cfg is not None:
+        cfg = existing_cfg
+        # v1.3.1: apply the training knobs onto an existing run WITHOUT
+        # --dataset — the prepared pipeline (chunks/F0/features/filelist)
+        # lives inside runs/<exp>/ and is never re-executed by train start.
+        if sr is not None and sr != cfg.sample_rate:
+            raise typer.BadParameter(
+                f"--sr {sr} does not match the prepared run ({cfg.sample_rate}); "
+                "the data is already sliced/extracted at that rate — "
+                "re-run prepare-dataset (and expect a new run) to change it")
+        if f0_method is not None and f0_method != cfg.f0_method:
+            raise typer.BadParameter(
+                f"--f0-method {f0_method} does not match the prepared run "
+                f"({cfg.f0_method}); F0 files are already extracted — "
+                "re-run prepare-dataset to change it")
+        console.print(f"[green]continuing prepared run[/green] {experiment} "
+                      f"(sr={cfg.sample_rate}, f0={cfg.f0_method}, "
+                      f"dataset prepared at {cfg.dataset_path})")
     else:
         console.print("[red]no existing run and no --dataset given[/red]")
         raise typer.Exit(2)
+    if existing_cfg is not None:
+        # knobs always apply on top of the loaded (prepared) config
+        if epochs is not None:
+            cfg.epochs = epochs
+        if batch_size is not None:
+            cfg.batch_size = batch_size
+        if lr is not None:
+            cfg.learning_rate = lr
+        if save_every is not None:
+            cfg.save_every_epoch = save_every
+        if gpu is not None:
+            cfg.gpu = gpu
     cfg.clean_start = clean_start
     if hf_repo is not None:
         cfg.hf_repo_id = hf_repo

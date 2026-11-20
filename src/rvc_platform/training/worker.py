@@ -226,8 +226,18 @@ def main(argv: list[str] | None = None) -> int:
 
     _register_trainer_pid()
     try:
-        dataset_files = sorted(Path(config.dataset_path).rglob("*"))
-        signature = stable_dataset_signature(dataset_files)
+        # v1.3.1: sign the PREPARED data (the filelist the trainer actually
+        # reads, inside runs/<exp>/) instead of the raw dataset folder — on
+        # Colab the raw folder (/content/Voice) is wiped on runtime restart
+        # while runs/ is restored from Drive, which used to fail resume with
+        # "dataset changed" on an unchanged pipeline. Falls back to the raw
+        # folder signature only for not-yet-prepared legacy runs.
+        filelist = config.layout()["filelist"]
+        if filelist.is_file():
+            signature = stable_dataset_signature([filelist])
+        else:
+            dataset_files = sorted(Path(config.dataset_path).rglob("*"))
+            signature = stable_dataset_signature(dataset_files)
         completed = trainer.run(dataset_signature=signature)
         return 0 if completed else 0  # cooperative stop is also success (0)
     except Exception as exc:

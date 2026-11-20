@@ -54,22 +54,30 @@ def rand_gumbel_like(x):
     return g
 
 
+def _segment_gather_index(ids_str, segment_size, device):
+    """Row-start offsets expanded to a [rows, segment_size] gather index.
+
+    Shared helper for the slice_segments* functions: replaces the upstream
+    per-row Python slicing loop with one vectorised gather. Numerically
+    identical output, but torch.compile/Inductor can track the layout —
+    the loop's data-dependent indexing produced an assert_size_stride
+    mismatch that crashed the first compiled training step.
+    """
+    offsets = torch.arange(segment_size, device=device)
+    return ids_str.reshape(-1, 1).long() + offsets.reshape(1, -1)
+
+
 def slice_segments(x, ids_str, segment_size=4):
-    ret = torch.zeros_like(x[:, :, :segment_size])
-    for i in range(x.size(0)):
-        idx_str = ids_str[i]
-        idx_end = idx_str + segment_size
-        ret[i] = x[i, :, idx_str:idx_end]
-    return ret
+    # out[b, c, j] = x[b, c, ids_str[b] + j]  (x is [b, c, t])
+    idx = _segment_gather_index(ids_str, segment_size, x.device)
+    idx = idx.unsqueeze(1).expand(-1, x.size(1), -1)
+    return x.gather(2, idx)
 
 
 def slice_segments2(x, ids_str, segment_size=4):
-    ret = torch.zeros_like(x[:, :segment_size])
-    for i in range(x.size(0)):
-        idx_str = ids_str[i]
-        idx_end = idx_str + segment_size
-        ret[i] = x[i, idx_str:idx_end]
-    return ret
+    # out[b, j] = x[b, ids_str[b] + j]  (x is [b, t] — e.g. fine F0)
+    idx = _segment_gather_index(ids_str, segment_size, x.device)
+    return x.gather(1, idx)
 
 
 def rand_slice_segments(x, x_lengths=None, segment_size=4):

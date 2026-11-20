@@ -493,7 +493,19 @@ class GeneratorNSF(torch.nn.Module):
         n_res = None,
     ):
         har_source, noi_source, uv = self.m_source(f0, self.upp)
-        har_source = har_source.transpose(1, 2)
+        # (B, L, dim) -> (B, dim, L). The upstream bare transpose feeds the
+        # noise convs a 1-channel TRANSPOSED-STRIDE input, which trips a
+        # torch 2.7 Inductor layout bug (assert_size_stride mismatch) on the
+        # first torch.compile'd training step. reshape is value-identical for
+        # dim=1 — the only production shape here (SourceModuleHnNSF is built
+        # with harmonic_num=0) — and produces a clean layout; dim>1 keeps the
+        # upstream transpose, which is compile-safe (the bug is cin=1-only).
+        if har_source.shape[-1] == 1:
+            har_source = har_source.reshape(
+                har_source.shape[0], 1, har_source.shape[1]
+            )
+        else:
+            har_source = har_source.transpose(1, 2)
         if n_res is not None:
             n = int(n_res.item()) if isinstance(n_res, torch.Tensor) else int(n_res)
             if n * self.upp != har_source.shape[-1]:
