@@ -17,7 +17,7 @@ dependencies = [
     "torch>=2.4.1,<2.8",
     "torchaudio>=2.4.1,<2.8",
     # ---- model runtime ----
-    "transformers>=4.49.0,<4.50",       # HuBERT / ContentVec content encoder
+    "transformers>=4.49.0,<5.24",       # HuBERT / ContentVec content encoder
     "faiss-cpu>=1.8.0,<2",              # retrieval index
     "praat-parselmouth>=0.4.5,<1",      # "pm" F0 extractor
     "torchfcpe>=0.0.4,<0.1",            # "fcpe" F0 extractor
