@@ -10,9 +10,9 @@ keywords = ["rvc", "voice-conversion", "iraqi-arabic", "real-time-audio", "deep-
 
 dependencies = [
     # ---- numerical / audio core ----
-    "numpy>=1.26.4,<2",
+    "numpy>=1.26.4,<3",
     "scipy>=1.13.1,<2",
-    "librosa>=0.10.2,<0.11",
+    "librosa>=0.10.2,<1.1",
     "soundfile>=0.12.1,<1",
     "torch>=2.4.1,<2.8",
     "torchaudio>=2.4.1,<2.8",
