@@ -224,14 +224,14 @@ def test_run_config_phase2_fields_defaults_and_validation(tmp_path):
     assert cfg.augment is False
     assert cfg.warmup_epochs == 1
     assert cfg.cosine_frac == 0.0
-    assert cfg.d_lr_scale == 0.75
+    assert cfg.d_lr_scale == 1.0
     assert cfg.speech_filter_ratio == 0.25
     # to_hparams carries the levers into the trainer-visible train dict
     hps = cfg.to_hparams()
     assert hps.train["augment"] == 0
     assert hps.train["warmup_epochs"] == 1
     assert hps.train["cosine_frac"] == 0.0
-    assert hps.train["d_lr_scale"] == 0.75
+    assert hps.train["d_lr_scale"] == 1.0
 
 
 def test_run_config_phase2_enabled_roundtrip(tmp_path):

@@ -1,6 +1,6 @@
 # Iraqi Voice Studio — منصة تحويل الصوت RVC v2
 
-**الإصدار:** 1.3.3 | **اسم الحزمة:** `rvc-platform` | **الترخيص:** MIT
+**الإصدار:** 1.4.0 | **اسم الحزمة:** `rvc-platform` | **الترخيص:** MIT
 
 [![CI](https://github.com/Alqudimi/VoiceCall/actions/workflows/ci.yml/badge.svg)](https://github.com/Alqudimi/VoiceCall/actions/workflows/ci.yml)
 [![Lint](https://github.com/Alqudimi/VoiceCall/actions/workflows/lint.yml/badge.svg)](https://github.com/Alqudimi/VoiceCall/actions/workflows/lint.yml)
@@ -270,6 +270,24 @@ Windows/Colab حيث لا يوجد make. المجموعات: `install`, `env`, `
 قائمة الأهداف كاملة: `make help`. قائمة الأوامر: `uv run rvc-platform --help`.
 
 ---
+
+## إصلاحات ومواءمة رسمية v1.4.0 — تدقيق مقابل المصادر الأولية
+
+جميع التغييرات أدناه مُدقّقة مقابل المصادر الرسمية (RVC الرسمي، أوراق HiFi-GAN/VITS/BigVGAN، وثائق huggingface_hub، وبطاقة نموذج speechbrain):
+
+1. **[حرج] اسم نموذج ECAPA كان خاطئاً** — `spkrec-ecapa-voxcelebx` غير موجود في HuggingFace أصلاً (يرجع 401). حتى مع تثبيت speechbrain كان مقياس تشابه المتحدث يتعطل بصمت. صُحّح إلى `spkrec-ecapa-voxceleb` (EER 0.80%، Apache-2.0، يتطلب إدخال 16kHz — نعيد العينة تلقائياً).
+2. **[حرج] `index_rate` الافتراضي كان 0.0** — أي أن مزج الاسترجاع (الآلية الرسمية في RVC لسحب الطابع نحو المتحدث وتقليل تسريب الطابع، FAQ Q11) كان معطّلاً كلياً في كل عمليات التحويل. الافتراضي الآن **0.75** كما في WebUI الرسمي؛ `1.0` يفرض طابع مجموعة التدريب بالكامل.
+3. **مواءمة توازن GAN مع الرسمي** — كل المدربات الرسمية (HiFi-GAN، VITS، BigVGAN، so-vits-svc، RVC) تستخدم **نفس معدل التعلم للمولّد والمميّز**؛ حتى كود TTUR المرجعي يعطي D الأعلى (3x) لا الأدنى. الافتراضي `--d-lr-scale` أصبح **1.0** (كان 0.75 بلا سند أولي).
+4. **قص تدرج المولّد (BigVGAN §3.4)** — خيار جديد `--clip-grad-norm` (مثال 500؛ الافتراضي 0=مطابق للرسمي). BigVGAN يوثّق أن قص النorm العام يمنع "الانهيار المبكر للمولّد"، ونوصي به عند بدايات غير مستقرة.
+5. **تحذير التوكن الرسمي** — رسالة غياب HF_TOKEN الآن توجه إلى huggingface.co/settings/tokens وتوصي بالتوكن fine-grained (الخيار الرسمي للإنتاج) مع صياغة الإعداد في كولاب.
+
+**مصادر التدقيق:**
+- RVC الرسمي: `github.com/RVC-Project/Retrieval-based-Voice-Conversion-WebUI` (docs/en/faq_en.md Q9-Q11، webui.py، train/train.py، train/train_index.py)
+- HiFi-GAN: `arxiv.org/abs/2010.05646` + `github.com/jik876/hifi-gan` (λ_mel=45, λ_fm=2, ExponentialLR لكل-حقبة)
+- VITS: `arxiv.org/abs/2106.06103` (تسوس 0.999^{1/8}/حقبة)
+- BigVGAN: `arxiv.org/abs/2206.04658` (قص التدرج §3.4، snake activation)
+- huggingface_hub: `huggingface.co/docs/huggingface_hub/guides/upload` (رفع أول بأول، إعادة المحاولة المدمجة 429/5xx، `HF_XET_HIGH_PERFORMANCE=1` للرفع الأسرع)
+- speechbrain: `huggingface.co/speechbrain/spkrec-ecapa-voxceleb` (16kHz، VoxCeleb1+2)
 
 ## إصلاحات v1.3.3
 

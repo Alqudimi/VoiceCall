@@ -42,7 +42,11 @@ import torch
 
 logger = logging.getLogger(__name__)
 
-_SPEAKER_MODEL_HF = "speechbrain/spkrec-ecapa-voxcelebx"
+# The official ECAPA-TDNN speaker encoder (VoxCeleb1+2, EER 0.80%, Apache-2.0).
+# NOTE: "spkrec-ecapa-voxcelebx" does NOT exist on the Hub (HTTP 401) — the
+# previous id silently disabled speaker-similarity even with speechbrain
+# installed. Correct id verified: huggingface.co/speechbrain/spkrec-ecapa-voxceleb
+_SPEAKER_MODEL_HF = "speechbrain/spkrec-ecapa-voxceleb"
 
 
 class SpeakerEmbedder:
@@ -72,8 +76,10 @@ def try_build_speaker_embedder(device: str) -> SpeakerEmbedder | None:
         try:  # speechbrain < 1.0 layout
             from speechbrain.pretrained.interfaces import EncoderClassifier  # type: ignore
         except Exception:
-            logger.info("speechbrain not installed — speaker-similarity metric "
-                        "disabled (install with: uv pip install speechbrain)")
+            logger.info(
+                "speechbrain not installed — speaker-similarity metric disabled "
+                "(install with: uv pip install speechbrain — requires torch>=2.7.1, "
+                "already satisfied by this project's torch 2.7.x pin)")
             return None
     try:
         model = EncoderClassifier.from_hparams(

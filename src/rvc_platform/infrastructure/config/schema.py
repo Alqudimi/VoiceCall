@@ -49,7 +49,10 @@ class EngineConfig(BaseModel):
 
 class ConversionDefaults(BaseModel):
     pitch_shift: int = Field(default=0, ge=-24, le=24)
-    index_rate: float = Field(default=0.0, ge=0.0, le=1.0)
+    # official RVC default (webui.py): 0.75 — retrieval blending toward the
+    # training-set timbre; 0.0 disabled it entirely (the "far from the
+    # speaker" complaint). See RVC FAQ Q11 on index rate / timbre leakage.
+    index_rate: float = Field(default=0.75, ge=0.0, le=1.0)
     filter_radius: int = Field(default=3, ge=0, le=7)
     rms_mix_rate: float = Field(default=0.25, ge=0.0, le=1.0)
     protect: float = Field(default=0.33, ge=0.0, le=0.5)

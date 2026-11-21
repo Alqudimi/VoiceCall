@@ -133,7 +133,7 @@ def test_full_quality_recipe_one_epoch(project_env, tiny_discriminator):
     assert trainer._msd is not None and trainer._ema is not None
     assert trainer._tracker is not None
     # speechbrain is absent in this sandbox -> composite degrades to val_mel
-    assert trainer._tracker.metric in ("val_mel", "composite")
+    assert trainer._tracker.metric in ("val_mel", "composite", "composite_f0")
 
     ckpt_dir = run_dir / "checkpoints"
     assert (ckpt_dir / "G_final.pth").is_file()

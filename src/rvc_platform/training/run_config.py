@@ -67,7 +67,15 @@ class TrainingRunConfig(BaseModel):
     aug_dropout_ms: int = Field(default=60, ge=5, le=500)
     warmup_epochs: int = Field(default=1, ge=0, le=50)  # linear LR ramp for fine-tune stability (0 = off)
     cosine_frac: float = Field(default=0.0, ge=0.0, le=1.0)  # cosine tail target fraction (0 = pure exponential)
-    d_lr_scale: float = Field(default=0.75, gt=0.0, le=4.0)  # discriminator LR scale (1.0 = upstream)
+    # G/D LR ratio: every official vocoder/VC trainer (HiFi-GAN, VITS,
+    # BigVGAN, so-vits-svc, RVC) uses the IDENTICAL LR for G and D; TTUR's
+    # own reference code even gives D the HIGHER rate (3x). The old 0.75
+    # default had no primary-source support — 1.0 matches upstream exactly.
+    d_lr_scale: float = Field(default=1.0, gt=0.0, le=4.0)  # discriminator LR scale (1.0 = upstream, verified official)
+    # BigVGAN §3.4: global-norm G-gradient clipping prevents early training
+    # collapse (they use 1000; v2 config 500; ~100 recommended for small
+    # batches at the start). 0.0 = off = exact upstream behaviour.
+    clip_grad_norm: float = Field(default=0.0, ge=0.0, le=1e5)
     speech_filter_ratio: float = Field(default=0.25, ge=0.0, le=1.0)  # min voiced ratio per chunk (0 = no filter)
     # ---- dataset-quality preprocessing options (any dataset, Colab-safe) -----
     denoise: bool = False                        # pre-slicing spectral-gate denoise (noisereduce; guarded no-op)
@@ -199,6 +207,7 @@ class TrainingRunConfig(BaseModel):
         train["warmup_epochs"] = self.warmup_epochs
         train["cosine_frac"] = self.cosine_frac
         train["d_lr_scale"] = self.d_lr_scale
+        train["clip_grad_norm"] = self.clip_grad_norm
         train["speech_filter_ratio"] = self.speech_filter_ratio
         hps = HParams.from_template(
             {"train": train, "data": dict(template["data"]), "model": dict(template["model"])},

@@ -987,7 +987,15 @@ class Trainer:
                 scale_before = scaler.get_scale()
                 scaler.scale(loss_gen_all).backward()
                 scaler.unscale_(optim_g)
-                # see the D-side note: None-clipping is a no-op, skipped.
+                # optional global-norm gradient clipping on G (BigVGAN §3.4:
+                # "clipping the global norm of the gradient to 10^3 ...
+                # prevents the early training collapse of the generator";
+                # their v2 uses 500 and recommends ~100 for small-batch
+                # starts). 0.0 = disabled = exact upstream behaviour.
+                clip_g = float(hps.train.get("clip_grad_norm", 0.0) or 0.0)
+                if clip_g > 0.0:
+                    torch.nn.utils.clip_grad_norm_(
+                        net_g.parameters(), clip_g)
                 scaler.step(optim_g)
                 scaler.update()
                 if self._ema is not None:

@@ -1,6 +1,6 @@
 [project]
 name = "rvc-platform"
-version = "1.3.3"
+version = "1.4.0"
 description = "Iraqi Voice Studio — production-grade RVC v2 voice-conversion platform with Iraqi-Arabic specialization, full training pipeline, resumable checkpoints and real-time conversion"
 readme = "README.md"
 license = { text = "MIT" }
@@ -51,8 +51,9 @@ training = [
 # Researched quality levers (UPGRADE_REPORT_AR.md) — every one is OPTIONAL at
 # runtime (guarded imports degrade gracefully), so core environments stay
 # bootable; Colab installs this group to unlock the strongest configuration.
+# speechbrain >=1.0 requires torch>=2.7.1 — satisfied by the 2.7.x pin above.
 quality = [
-    "speechbrain>=1.0,<2",      # ECAPA speaker-similarity in the composite best-model metric
+    "speechbrain>=1.0,<2",      # ECAPA speaker-similarity (model: spkrec-ecapa-voxceleb, 16kHz input — auto-resampled)
     "torchcrepe>=0.0.23,<1",    # CREPE F0 extraction method (--f0-method crepe)
     "noisereduce>=3.0.0,<4",    # spectral-gate dataset denoising (--denoise)
 ]

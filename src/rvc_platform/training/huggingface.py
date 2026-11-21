@@ -390,9 +390,12 @@ class HfBackgroundPublisher:
                 self._token_warned = True
                 logger.warning(
                     "HF uploads are DISABLED until fixed: %s\n"
-                    "  -> add your token to Colab secrets (key: HF_TOKEN, value: "
-                    "hf_...) and enable it for this notebook, then RESTART the "
-                    "training cell — uploads resume from the current best model.",
+                    "  -> Create a token at https://huggingface.co/settings/tokens\n"
+                    "     (a fine-grained token with write access to your model repos\n"
+                    "     is the officially recommended production choice), add it to\n"
+                    "     Colab secrets (key: HF_TOKEN, value: hf_...), enable it for\n"
+                    "     this notebook, then RESTART the training cell — uploads resume\n"
+                    "     from the current best model.",
                     exc,
                 )
             return False

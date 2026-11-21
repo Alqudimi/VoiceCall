@@ -493,7 +493,11 @@ def train_start(
     ),
     d_lr_scale: Optional[float] = typer.Option(
         None, "--d-lr-scale",
-        help="discriminator LR scale (1.0 = upstream parity; e.g. 0.9 slows D)",
+        help="discriminator LR scale (1.0 = upstream parity — official GAN repos use identical G/D LR; e.g. 0.9 slows D)",
+    ),
+    clip_grad_norm: Optional[float] = typer.Option(
+        None, "--clip-grad-norm",
+        help="clip generator gradient global norm (BigVGAN §3.4 anti-collapse; e.g. 500; 0 = off = upstream)",
     ),
 ):
     """Start (or continue) a training run. Follows live progress on stdout."""
@@ -516,6 +520,7 @@ def train_start(
         **({"warmup_epochs": warmup} if warmup is not None else {}),
         **({"cosine_frac": cosine} if cosine is not None else {}),
         **({"d_lr_scale": d_lr_scale} if d_lr_scale is not None else {}),
+        **({"clip_grad_norm": clip_grad_norm} if clip_grad_norm is not None else {}),
     }
     if dataset is not None:
         if existing_cfg is not None:
