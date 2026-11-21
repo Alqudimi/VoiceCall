@@ -47,11 +47,11 @@ def test_models_crud_flow(client, project_env, synthetic_model_file):
     with open(synthetic_model_file, "rb") as fh:
         resp = client.post(
             "/api/models/upload",
-            files={"file": ("synthetic_v2_40k.pth", fh, "application/octet-stream")},
+            files={"file": ("synthetic_v2_48k.pth", fh, "application/octet-stream")},
         )
     assert resp.status_code == 200
     registered = resp.json()["registered"]
-    assert registered["sample_rate"] == 40_000
+    assert registered["sample_rate"] == 48_000
 
     listing = client.get("/api/models").json()
     assert len(listing) == 1 and listing[0]["f0"] is True

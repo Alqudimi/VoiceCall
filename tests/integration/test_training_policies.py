@@ -60,13 +60,15 @@ def _shrink(hps):
     hps.model["filter_channels"] = 256
     hps.model["n_layers"] = 2
     hps.model["upsample_initial_channel"] = 64
-    hps.train["segment_size"] = 3200
+    # keep the shrunk segment an exact multiple of the 48k hop (480) so the
+    # sliced spec frames stay aligned with the 10 ms f0 timeline
+    hps.train["segment_size"] = 2_880  # 6 hop-frames — small and divisible
     return hps
 
 
 def _make_run(project_env, n_chunks: int = 2):
 
-    sr = 40_000
+    sr = 48_000
     run_dir = project_env / "runs" / "policy"
     for sub in ("0_gt_wavs", "1_16k_wavs", "2a_f0", "2b-f0nsf", "3_feature768"):
         (run_dir / sub).mkdir(parents=True, exist_ok=True)
@@ -100,7 +102,7 @@ def _make_run(project_env, n_chunks: int = 2):
 
     config = TrainingRunConfig(
         experiment_name="policy", dataset_path=str(ds_dir),
-        sample_rate="40k", epochs=1, batch_size=1, save_every_epoch=1, val_split=0.0,
+        sample_rate="48k", version="v2", epochs=1, batch_size=1, save_every_epoch=1, val_split=0.0,
         preload_base_models=False, resume=True,
     )
     hps = config.to_hparams()
@@ -137,7 +139,7 @@ def test_explicit_resume_from_named_checkpoint(project_env, tiny_discriminator):
     # epoch 2 with HIGHER epochs -> periodic save lands on G_4 (steps continue)
     config2 = TrainingRunConfig(
         experiment_name="policy", dataset_path=config.dataset_path,
-        sample_rate="40k", epochs=3, batch_size=1, save_every_epoch=1,
+        sample_rate="48k", version="v2", epochs=3, batch_size=1, save_every_epoch=1,
         preload_base_models=False, resume=True,
     )
     events2: list[dict] = []
@@ -153,7 +155,7 @@ def test_explicit_resume_from_named_checkpoint(project_env, tiny_discriminator):
     # EXPLICIT resume from the older G_2: epoch must rewind to 2 (step 2)
     config3 = TrainingRunConfig(
         experiment_name="policy", dataset_path=config.dataset_path,
-        sample_rate="40k", epochs=3, batch_size=1, save_every_epoch=1,
+        sample_rate="48k", version="v2", epochs=3, batch_size=1, save_every_epoch=1,
         preload_base_models=False, resume=True, resume_from=ckpt_dir / "G_2.pth",
     )
     events3: list[dict] = []
@@ -180,7 +182,7 @@ def test_resume_from_by_name_and_latest_keyword(project_env, tiny_discriminator)
     # by bare name (relative to the run's checkpoint dir)
     cfg = TrainingRunConfig(
         experiment_name="policy", dataset_path=config.dataset_path,
-        sample_rate="40k", epochs=1, batch_size=1,
+        sample_rate="48k", version="v2", epochs=1, batch_size=1,
         preload_base_models=False, resume=True, resume_from="G_2.pth",
     )
     t = _trainer_for(cfg, run_dir, [])
@@ -189,7 +191,7 @@ def test_resume_from_by_name_and_latest_keyword(project_env, tiny_discriminator)
     # 'latest' keyword resolves to the newest state
     cfg_latest = TrainingRunConfig(
         experiment_name="policy", dataset_path=config.dataset_path,
-        sample_rate="40k", epochs=1, batch_size=1,
+        sample_rate="48k", version="v2", epochs=1, batch_size=1,
         preload_base_models=False, resume=True, resume_from="latest",
     )
     t_latest = _trainer_for(cfg_latest, run_dir, [])
@@ -200,7 +202,7 @@ def test_resume_from_by_name_and_latest_keyword(project_env, tiny_discriminator)
     # bogus path raises a clean error
     cfg_bad = TrainingRunConfig(
         experiment_name="policy", dataset_path=config.dataset_path,
-        sample_rate="40k", epochs=1, batch_size=1,
+        sample_rate="48k", version="v2", epochs=1, batch_size=1,
         preload_base_models=False, resume=True, resume_from="G_999.pth",
     )
     t_bad = _trainer_for(cfg_bad, run_dir, [])
@@ -251,7 +253,7 @@ def test_d_scheduler_state_is_restored(project_env, tiny_discriminator):
     # build a fresh trainer and drive _restore: sched_d must be loaded
     config2 = TrainingRunConfig(
         experiment_name="policy", dataset_path=config.dataset_path,
-        sample_rate="40k", epochs=1, batch_size=1,
+        sample_rate="48k", version="v2", epochs=1, batch_size=1,
         preload_base_models=False, resume=True,
     )
     t2 = _trainer_for(config2, run_dir, [])

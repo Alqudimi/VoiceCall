@@ -37,7 +37,7 @@ def test_realtime_ws_full_session(rt_client):
         }))
         started = json.loads(ws.receive_text())
         assert started["type"] == "started"
-        assert started["sample_rate"] == 40_000
+        assert started["sample_rate"] == 48_000
         assert started["block_ms"] == block_ms
 
         # stream 8 synthetic blocks

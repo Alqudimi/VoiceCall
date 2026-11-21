@@ -67,12 +67,12 @@ def _shrink(hps):
     hps.model["filter_channels"] = 256
     hps.model["n_layers"] = 2
     hps.model["upsample_initial_channel"] = 64
-    hps.train["segment_size"] = 3200
+    hps.train["segment_size"] = 2_880  # multiple of the 48k hop (480)
     return hps
 
 
 def _make_run(project_env, n_chunks: int = 6):
-    sr = 40_000
+    sr = 48_000
     run_dir = project_env / "runs" / "bestrun"
     for sub in ("0_gt_wavs", "1_16k_wavs", "2a_f0", "2b-f0nsf", "3_feature768"):
         (run_dir / sub).mkdir(parents=True, exist_ok=True)
@@ -109,7 +109,7 @@ def _make_run(project_env, n_chunks: int = 6):
 
     config = TrainingRunConfig(
         experiment_name="bestrun", dataset_path=str(ds_dir),
-        sample_rate="40k", epochs=2, batch_size=1, save_every_epoch=1,
+        sample_rate="48k", version="v2", epochs=2, batch_size=1, save_every_epoch=1,
         preload_base_models=False, resume=True,
         save_best=True, val_split=0.34,          # 6 chunks -> 2 val / 4 train
     )
@@ -176,7 +176,7 @@ def test_best_model_tracking_end_to_end(project_env, tiny_discriminator):
     # ---- resume must not regress the bar even if epoch 3 gets worse
     config3 = TrainingRunConfig(
         experiment_name="bestrun", dataset_path=config.dataset_path,
-        sample_rate="40k", epochs=3, batch_size=1, save_every_epoch=1,
+        sample_rate="48k", version="v2", epochs=3, batch_size=1, save_every_epoch=1,
         preload_base_models=False, resume=True,
         save_best=True, val_split=0.34,
     )

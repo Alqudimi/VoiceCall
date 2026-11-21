@@ -66,12 +66,12 @@ def _shrink(hps: HParams) -> HParams:
     hps.model["filter_channels"] = 256
     hps.model["n_layers"] = 2
     hps.model["upsample_initial_channel"] = 64
-    hps.train["segment_size"] = 3200
+    hps.train["segment_size"] = 2_880  # multiple of the 48k hop (480)
     return hps
 
 
 def _make_run(project_env, n_chunks: int = 4):
-    sr = 40_000
+    sr = 48_000
     run_dir = project_env / "runs" / "recipe"
     for sub in ("0_gt_wavs", "1_16k_wavs", "2a_f0", "2b-f0nsf", "3_feature768"):
         (run_dir / sub).mkdir(parents=True, exist_ok=True)
@@ -106,7 +106,7 @@ def _make_run(project_env, n_chunks: int = 4):
     (run_dir / "filelist.txt").write_text("\n".join(lines), encoding="utf-8")
     config = TrainingRunConfig(
         experiment_name="recipe", dataset_path=str(ds_dir),
-        sample_rate="40k", epochs=1, batch_size=1, save_every_epoch=1,
+        sample_rate="48k", version="v2", epochs=1, batch_size=1, save_every_epoch=1,
         preload_base_models=False, resume=True,
         # ---- full researched recipe (defaults, stated explicitly for the test)
         ema_decay=0.9, c_stft=2.0, use_msd=True, spk_weight=1.0,
@@ -194,7 +194,7 @@ def test_full_quality_recipe_one_epoch(project_env, tiny_discriminator):
     events2: list[dict] = []
     config2 = TrainingRunConfig(
         experiment_name="recipe", dataset_path=config.dataset_path,
-        sample_rate="40k", epochs=2, batch_size=1, save_every_epoch=1,
+        sample_rate="48k", version="v2", epochs=2, batch_size=1, save_every_epoch=1,
         preload_base_models=False, resume=True,
         ema_decay=0.9, c_stft=2.0, use_msd=True, val_split=0.25,
     )
@@ -229,7 +229,7 @@ def test_early_stop_patience_triggers_cooperative_stop(project_env,
 
     config3 = TrainingRunConfig(
         experiment_name="recipe_es", dataset_path=config2.dataset_path,
-        sample_rate="40k", epochs=3, batch_size=1, save_every_epoch=1,
+        sample_rate="48k", version="v2", epochs=3, batch_size=1, save_every_epoch=1,
         preload_base_models=False, resume=False,
         ema_decay=0.0, c_stft=0.0, use_msd=False, val_split=0.25,
         early_stop_patience=1,

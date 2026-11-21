@@ -35,8 +35,8 @@ class TrainingRunConfig(BaseModel):
 
     experiment_name: str = Field(pattern=r"^[A-Za-z0-9_\-]{1,64}$")
     dataset_path: Path
-    sample_rate: str = "40k"                     # 32k | 40k | 48k
-    version: str = "v2"
+    sample_rate: str = "40k"                     # 32k | 40k | 48k (40k = v1-only officially)
+    version: str = "v1"                          # 40k default pairs with its official v1 template
     f0: bool = True
     f0_method: str = "rmvpe"
     epochs: int = Field(default=300, ge=1, le=10_000)
@@ -176,7 +176,7 @@ class TrainingRunConfig(BaseModel):
     def to_hparams(self, template: dict | None = None) -> HParams:
         """Build the hps object the vendored trainer/dataset expects."""
         if template is None:
-            template = load_template(self.sample_rate)
+            template = load_template(self.sample_rate, self.version)
         train = dict(template["train"])
         if self.batch_size:
             train["batch_size"] = self.batch_size
@@ -252,16 +252,41 @@ class TrainingRunConfig(BaseModel):
             raise DatasetError(f"no audio files in {ds}")
 
 
-def load_template(sample_rate: str) -> dict:
+def load_template(sample_rate: str, version: str = "v2") -> dict:
     """Model hyper-parameter template: project override first, packaged copy
-    (guaranteed to exist with the installed package) as fallback."""
+    (guaranteed to exist with the installed package) as fallback.
+
+    Official RVC keeps SEPARATE configs per (version, sample-rate): v1 and v2
+    differ in the generator's upsample_rates/upsample_kernel_sizes (and v1_48k
+    segment_size) for the SAME rate — a shared per-rate template would break
+    loading of any officially-trained checkpoint of one of the two versions.
+    """
     sr = sample_rate.lower().strip()
+    ver = (version or "v2").lower().strip()
     if sr not in SR_ALIASES:
         raise ConfigurationError(f"unknown sample rate template: {sample_rate}")
+    if ver not in ("v1", "v2"):
+        raise ConfigurationError(f"unknown template version: {version}")
+    if ver == "v2" and sr == "40k":
+        # official v2 ships configs only for 32k/48k (configs/v2/ has no
+        # 40k.json) — silently substituting the v1 generator shape would
+        # produce checkpoints incompatible with official v2 tooling.
+        raise ConfigurationError(
+            "40k is a v1-only sample rate officially (configs/v2 has 32k/48k "
+            "only); use v1 with 40k, or v2 with 32k/48k",
+        )
     candidates = [
         get_paths().root / "configs" / "training" / f"{sr}.json",
         Path(__file__).resolve().parent / "templates" / f"{sr}.json",
+        Path(__file__).resolve().parent / "templates" / f"{ver}_{sr}.json",
     ]
+    # v2 keeps the plain name for backwards compatibility with existing
+    # project overrides; v1 resolves to its versioned template.
+    if ver == "v1":
+        candidates = [
+            get_paths().root / "configs" / "training" / f"v1_{sr}.json",
+            Path(__file__).resolve().parent / "templates" / f"v1_{sr}.json",
+        ]
     for path in candidates:
         if path.is_file():
             return json.loads(path.read_text(encoding="utf-8"))

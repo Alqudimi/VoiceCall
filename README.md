@@ -1,6 +1,6 @@
 # Iraqi Voice Studio — منصة تحويل الصوت RVC v2
 
-**الإصدار:** 1.7.0 | **اسم الحزمة:** `rvc-platform` | **الترخيص:** MIT
+**الإصدار:** 1.8.0 | **اسم الحزمة:** `rvc-platform` | **الترخيص:** MIT
 
 [![CI](https://github.com/Alqudimi/VoiceCall/actions/workflows/ci.yml/badge.svg)](https://github.com/Alqudimi/VoiceCall/actions/workflows/ci.yml)
 [![Lint](https://github.com/Alqudimi/VoiceCall/actions/workflows/lint.yml/badge.svg)](https://github.com/Alqudimi/VoiceCall/actions/workflows/lint.yml)
@@ -270,6 +270,26 @@ Windows/Colab حيث لا يوجد make. المجموعات: `install`, `env`, `
 قائمة الأهداف كاملة: `make help`. قائمة الأوامر: `uv run rvc-platform --help`.
 
 ---
+
+## إصلاح القوالب لكل (نسخة، معدل) v1.8.0 — الجولة السابعة (إصلاح توافق checkpoints)
+
+جُلبت `train/train.py` و`train/preprocess.py` و`train/process_ckpt.py` وكل ملفات `configs/v1,v2` الرسمية وقورنت حرفياً:
+
+| المكوّن | النتيجة |
+|---|---|
+| حلقة التدريب (train.py) | **مطابقة**: نفس توليفة الخسائر (gen+fm+mel·45+kl·1) تحت autocast معطّل، AdamW بbetas [0.8,0.99]/eps 1e-9، ExponentialLR بgamma 0.999875 — وحفظنا أكمل (scheduler/scaler/RNG كاملة بينما الرسمي يفقدها) |
+| preprocess.py | **مطابق**: نفس القاطع (-42dB/1500/400/15/500)، نفس التطبيع (alpha 0.75/max 0.9)، حارس peak>2.5 — والرسمي نفسه يستخدم `lfilter` السببي هنا (filtfilt معلّق عنده) كما عندنا تماماً |
+| process_ckpt.py | **مطابق حرفياً**: نفس مصفوفة config ذات الـ18 عنصراً، نفس استثناء enc_q، نفس half()، نفس المفاتيح (weight/config/info/sr/f0/version) |
+
+**الانحراف الجوهري المكتشف — القوالب كانت مشتركة بين v1 وv2 لنفس المعدل**: الرسمي يقدّم قوالب منفصلة لكل (نسخة، معدل) وتختلف بنية المولّد بينهما لنفس المعدل! (v1_32k upsample=[10,4,2,2,2] مقابل v2_32k [10,8,2,2]؛ وv1_48k segment=11520 مقابل v2_48k 17280). قالبنا المشترك كان يعني: **أي وزة v1 مدرّبة رسمياً لن تُحمّل عندنا** (والعكس). الإصلاح:
+
+- **6 قوالب رسمية حرفية**: `v1_32k/40k/48k.json` + `v2_32k/48k.json` منزّلة verbatim من configs الرسمية + نسختان بالاسم القديم للتوافق الخلفي (=v2)
+- **`load_template(sr, version)`** يميّز النسخة، مع **رفض صريح لـ40k+v2** (لا وجود رسمياً لـv2 بـ40k — configs/v2 فيها 32k/48k فقط؛ الصمت كان سيولّد checkpoints غير متوافقة مع أدوات RVC الرسمية)
+- الافتراضي أصبح متسقاً: `40k+v1` (المعدل الافتراضي نفسه مع قالبه الرسمي الصحيح)
+- **22 اختبار انحدار جديد** (`test_official_templates.py`): أشكال المولّد لكل النسخ/المعدلات، ثوابت التدريب، segment لكل قالب، اختلاف v1/v2 لنفس المعدل (الخطأ الذي أُصلح)، رفض 40k-v2، عدم وجود قالب v2_40k مخترَع، وتوافق hop/win
+- اختبارات التكامل نُقّلت كلها للأزواج الرسمية (v2/48k أو v1/40k) وقصاصاتها صارت مضاعفات hop الصحيحة
+
+الجناح الكامل: **197/197 أخضر** (146 وحدة + 51 تكامل).
 
 ## تدقيق معماري شامل + مجموعة الصمت الرسمية v1.7.0 — الجولة السادسة (الأعمق)
 

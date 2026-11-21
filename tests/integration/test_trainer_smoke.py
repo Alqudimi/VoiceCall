@@ -66,7 +66,7 @@ def _shrink(hps):
     hps.model["filter_channels"] = 256
     hps.model["n_layers"] = 2
     hps.model["upsample_initial_channel"] = 64
-    hps.train["segment_size"] = 3200  # tiny segments keep D-activations RAM small
+    hps.train["segment_size"] = 2_880  # multiple of the 48k hop (480)  # tiny segments keep D-activations RAM small
     return hps
 
 
@@ -74,7 +74,7 @@ def _shrink(hps):
 
 def _make_run(project_env, n_chunks: int = 3) -> tuple[TrainingRunConfig, HParams, Path]:
 
-    sr = 40_000
+    sr = 48_000
     run_dir = project_env / "runs" / "smoke"
     for sub in ("0_gt_wavs", "1_16k_wavs", "2a_f0", "2b-f0nsf", "3_feature768"):
         (run_dir / sub).mkdir(parents=True, exist_ok=True)
@@ -119,7 +119,7 @@ def _make_run(project_env, n_chunks: int = 3) -> tuple[TrainingRunConfig, HParam
     config = TrainingRunConfig(
         experiment_name="smoke",
         dataset_path=str(ds_dir),
-        sample_rate="40k",
+        sample_rate="48k", version="v2",
         epochs=1,
         batch_size=1,
         save_every_epoch=1,
@@ -167,7 +167,7 @@ def test_train_one_epoch_and_real_resume(project_env, tiny_discriminator):
     # ---- TRUE resume: second run continues epoch/step, no fresh start ----
     config2 = TrainingRunConfig(
         experiment_name="smoke", dataset_path=config.dataset_path,
-        sample_rate="40k", epochs=2, batch_size=1, save_every_epoch=1,
+        sample_rate="48k", version="v2", epochs=2, batch_size=1, save_every_epoch=1,
         preload_base_models=False, resume=True, val_split=0.0,
     )
     hps2 = _shrink(config2.to_hparams())
@@ -195,7 +195,7 @@ def test_train_one_epoch_and_real_resume(project_env, tiny_discriminator):
     )
     config3 = TrainingRunConfig(
         experiment_name="smoke", dataset_path=config.dataset_path,
-        sample_rate="40k", epochs=3, batch_size=1,
+        sample_rate="48k", version="v2", epochs=3, batch_size=1,
         preload_base_models=False, resume=True, val_split=0.0,
     )
     hps3 = _shrink(config3.to_hparams())
@@ -226,7 +226,7 @@ def test_train_one_epoch_and_real_resume(project_env, tiny_discriminator):
     (ckpt_dir / "state.json").unlink()
     config4 = TrainingRunConfig(
         experiment_name="smoke", dataset_path=config.dataset_path,
-        sample_rate="40k", epochs=5, batch_size=1,
+        sample_rate="48k", version="v2", epochs=5, batch_size=1,
         preload_base_models=False, resume=True, val_split=0.0,
     )
     hps4 = _shrink(config4.to_hparams())

@@ -22,19 +22,19 @@ from rvc_platform.engine.rvc.models import models as rvc_models
 def test_checkpoint_roundtrip_matches_rvc_format(synthetic_model_file, rvc_hparams_40k):
     net_g, cpt = ckpt_mod.load_checkpoint(synthetic_model_file, "cpu", False)
     assert isinstance(net_g, rvc_models.SynthesizerTrnMs768NSFsid)
-    assert cpt["sr"] == 40_000 and cpt["f0"] == 1 and cpt["version"] == "v2"
+    assert cpt["sr"] == 48_000 and cpt["f0"] == 1 and cpt["version"] == "v2"
     assert len(cpt["config"]) == 18
     # weights are fp16 in the file, model runs fp32 on CPU
     assert next(net_g.parameters()).dtype == torch.float32
     info = ckpt_mod.inspect_checkpoint(synthetic_model_file)
-    assert info["sr"] == 40_000 and info["version"] == "v2"
+    assert info["sr"] == 48_000 and info["version"] == "v2"
 
 
 def test_generator_infer_shapes():
     net_g = rvc_models.SynthesizerTrnMs768NSFsid(
         1025, 32, 192, 192, 768, 2, 6, 3, 0, "1", [3, 7, 11],
         [[1, 3, 5], [1, 3, 5], [1, 3, 5]], [10, 10, 2, 2], 512,
-        [16, 16, 4, 4], 109, 256, is_half=False, sr=40_000,
+        [16, 16, 4, 4], 109, 256, is_half=False, sr=48_000,
     )
     net_g.eval()
     phone = torch.randn(1, 40, 768)
@@ -70,7 +70,7 @@ def test_file_conversion_end_to_end(
     engine = RVCInferenceEngine(profile, AudioProcessingEngine())
     info = engine.load_model(synthetic_model_file, None)
     assert engine.status == "ready"
-    assert info.sample_rate == 40_000
+    assert info.sample_rate == 48_000
 
     # build a real small index for the loaded model and reload with it
     feats_dir = project_env / "3_feature768"
@@ -90,7 +90,7 @@ def test_file_conversion_end_to_end(
     import soundfile as sf
 
     data, sr = sf.read(str(result.output_path))
-    assert sr == 40_000
+    assert sr == 48_000
     assert len(data) >= 16_000 * 3.2  # ~4s input minus silence margins
     assert float(np.max(np.abs(data))) > 0.01  # non-silent output
     assert result.realtime_factor > 0  # measurable speed reported
