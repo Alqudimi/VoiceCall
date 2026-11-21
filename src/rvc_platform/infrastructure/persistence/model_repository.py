@@ -31,9 +31,16 @@ class ModelRepository:
     # ---- discovery ----
     def _read_registry(self) -> dict:
         try:
-            return json.loads(self._registry_path.read_text(encoding="utf-8"))
+            data = json.loads(self._registry_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
-            return {"models": {}}
+            data = {}
+        if not isinstance(data, dict):
+            data = {}
+        if not isinstance(data.get("models"), dict):
+            # malformed-but-valid-JSON registry (e.g. {} or {"models": []})
+            # must never crash register/delete/note — drop the broken section
+            data["models"] = {}
+        return data
 
     def _write_registry(self, data: dict) -> None:
         tmp = self._registry_path.with_suffix(".tmp")
@@ -79,7 +86,16 @@ class ModelRepository:
         )
 
     def _find_index(self, pth: Path) -> Path | None:
-        candidates = sorted(self.dir.glob(f"{pth.stem}*.index"))
+        """Exact ``<stem>.index`` first, then underscore-bounded variants.
+
+        A bare prefix glob (``<stem>*.index``) cross-grabs: model ``ahmed``
+        would silently pick up ``ahmed2.index`` — blending ANOTHER speaker's
+        retrieval features — and ``delete("ahmed")`` would unlink it.
+        """
+        exact = self.dir / f"{pth.stem}.index"
+        if exact.is_file():
+            return exact
+        candidates = sorted(self.dir.glob(f"{pth.stem}_*.index"))
         return candidates[0] if candidates else None
 
     def list_models(self) -> list[ModelInfo]:
@@ -135,7 +151,10 @@ class ModelRepository:
             raise ModelNotFoundError(name)
         pth.unlink()
         if with_index:
-            for idx in self.dir.glob(f"{Path(name).stem}*.index"):
+            exact = self.dir / f"{Path(name).stem}.index"
+            if exact.is_file():
+                exact.unlink()
+            for idx in self.dir.glob(f"{Path(name).stem}_*.index"):
                 idx.unlink()
         registry = self._read_registry()
         registry["models"].pop(Path(name).stem, None)
