@@ -94,6 +94,24 @@ def inspect_checkpoint(path: Path) -> dict:
     }
 
 
+def normalize_speaker_info(speaker_info) -> list:
+    """Upstream train/process_ckpt.py: dedupe + validate id/name pairs
+    (ids 0..109, non-empty names), sorted by id."""
+    result = []
+    seen = set()
+    for item in speaker_info or []:
+        try:
+            speaker_id = int(item["id"])
+            speaker_name = str(item["name"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if speaker_id < 0 or speaker_id > 109 or not speaker_name or speaker_id in seen:
+            continue
+        seen.add(speaker_id)
+        result.append({"id": speaker_id, "name": speaker_name})
+    return sorted(result, key=lambda item: item["id"])
+
+
 def export_inference_checkpoint(
     state_dict: dict,
     hps,
@@ -138,6 +156,9 @@ def export_inference_checkpoint(
     opt["sr"] = sample_rate
     opt["f0"] = if_f0
     opt["version"] = version
+    speaker_info = normalize_speaker_info(getattr(hps, "speaker_info", []))
+    if speaker_info:
+        opt["speaker_info"] = speaker_info
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(opt, out_path)

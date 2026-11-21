@@ -30,6 +30,15 @@ class FeatureIndex:
             raise CheckpointError(f"index file not found: {index_path}")
         self.path = index_path
         self.index = faiss.read_index(str(index_path))
+        # upstream rtrvc/vc warning: only added_*.index (with stored vectors)
+        # can blend; trained_*.index files cannot serve retrieval
+        self.is_trained_only = "trained_" in index_path.name and "added_" not in index_path.name
+        if self.is_trained_only:
+            logger.warning(
+                "index %s is a trained_* index (no stored vectors) — retrieval "
+                "blending is disabled; use the added_*.index instead",
+                index_path.name,
+            )
         try:
             self.vectors = self.index.reconstruct_n(0, self.index.ntotal)
         except Exception:  # some IVF variants cannot reconstruct

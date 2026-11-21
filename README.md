@@ -1,6 +1,6 @@
 # Iraqi Voice Studio — منصة تحويل الصوت RVC v2
 
-**الإصدار:** 1.9.0 | **اسم الحزمة:** `rvc-platform` | **الترخيص:** MIT
+**الإصدار:** 1.9.1 | **اسم الحزمة:** `rvc-platform` | **الترخيص:** MIT
 
 [![CI](https://github.com/Alqudimi/VoiceCall/actions/workflows/ci.yml/badge.svg)](https://github.com/Alqudimi/VoiceCall/actions/workflows/ci.yml)
 [![Lint](https://github.com/Alqudimi/VoiceCall/actions/workflows/lint.yml/badge.svg)](https://github.com/Alqudimi/VoiceCall/actions/workflows/lint.yml)
@@ -270,6 +270,25 @@ Windows/Colab حيث لا يوجد make. المجموعات: `install`, `env`, `
 قائمة الأهداف كاملة: `make help`. قائمة الأوامر: `uv run rvc-platform --help`.
 
 ---
+
+## اكتمال تدقيق مجلد التدريب الرسمي v1.9.1 — الجولة التاسعة (train/ + infer/vc/modules + webui)
+
+جُلبت الملفات الرسمية الستة المتبقية من `train/` (process_ckpt، losses، mel_processing، data_utils، preprocess، utils — 1714 سطراً) و`infer/vc/modules.py` وقورنت كلها سطراً بسطر:
+
+| المكوّن | النتيجة |
+|---|---|
+| losses.py | المعادلات الأربع (feature/disc/gen/KL) — **مطابقة حرفياً** (تحققت بتنفيذ يدوي) |
+| mel_processing.py | pad/reflect/2e-7/hann-cache/mel-basis-cache — **مطابقة حرفياً** |
+| data_utils.py | TextAudioLoader + Collate (sort تنازلي/zero-pad/stack) — **مطابقة** |
+| train/preprocess.py | Slicer (-42dB/1500/400/15/500) + norm_write (alpha 0.75/max 0.9/رفض >2.5) — **مطابقة** |
+| train/utils.py | ExponentialLR(lr_decay) — عندنا **أدق**: نحفظ حالة الجدولة كاملة في checkpoints (الرسمي يقرّبها بlast_epoch=epoch_str-2) |
+| vc_single | peak-guard /0.95، change_rms، resample — **مطابقة** |
+
+**إصلاحان:**
+1. حقل **`speaker_info`** الجديد الرسمي (نماذج متعددة المتحدثين) يُصدَّر الآن في checkpoints مع نفس دالة التطبيع (dedupe/ids 0..109/ترتيب) — دونه كانت نماذجنا المصدَّرة تفتقد أسماء المتحدثين في الأدوات الرسمية
+2. تحذير **trained_*.index** كالرسمي: عند تحميل فهرس trained (بلا متجهات مخزنة) نُسجّل تحذيراً واضحاً أن مزج الاسترجاع معطّل — بدل الصمت السابق
+
+10 اختبارات انحدار جديدة تثبّت ما سبق (تشمل تنفيذ المعادلات يدوياً). الجناح: **239 وحدة + 51 تكامل = 290/290 أخضر**.
 
 ## محاذاة الاستدلال الفوري والتحويل v1.9.0 — الجولة الثامنة (رtrvc/realtime_gui/pipeline الرسمية)
 
