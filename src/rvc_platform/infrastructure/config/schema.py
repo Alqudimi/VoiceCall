@@ -63,10 +63,12 @@ class ConversionDefaults(BaseModel):
 
 class RealtimeConfig(BaseModel):
     block_ms: int = Field(default=160, ge=60, le=500)       # audio block granularity
-    lookback_ms: int = Field(default=200, ge=100, le=2500)  # F0 history window
-                                                           # (upstream allows 2500)
-    crossfade_ms: int = Field(default=8, ge=0, le=40)       # block-to-block blend
-    silence_threshold_db: float = Field(default=-40.0, le=-20.0, ge=-70.0)
+    lookback_ms: int = Field(default=2500, ge=100, le=2500)  # F0 history window
+                                                           # (upstream extra_time=2.5s)
+    crossfade_ms: int = Field(default=50, ge=0, le=80)      # block-to-block blend
+                                                           # (upstream crossfade_time=0.05s)
+    silence_threshold_db: float = Field(default=-60.0, le=-20.0, ge=-70.0)
+                                                           # upstream threhold=-60 (gate off)
     keep_alive_s: float = Field(default=60.0, ge=5.0, le=600.0)
     f0_method: Literal["rmvpe", "fcpe", "pm"] = "rmvpe"
     max_sessions: int = Field(default=2, ge=1, le=16)       # VRAM guard per server

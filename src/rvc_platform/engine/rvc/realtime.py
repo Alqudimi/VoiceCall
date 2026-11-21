@@ -52,9 +52,9 @@ class RealTimeRVC:
         self,
         profile: DeviceProfile,
         block_ms: int = 160,
-        crossfade_ms: int = 8,
+        crossfade_ms: int = 50,
         extra_ms: int = 2500,
-        silence_threshold_db: float = -40.0,
+        silence_threshold_db: float = -60.0,
         f0_method: str = "rmvpe",
     ) -> None:
         self.profile = profile
@@ -76,6 +76,7 @@ class RealTimeRVC:
         total_units = self.extra_units + self.crossfade_units + self.sola_search_units + self.block_units
         self.input_wav = torch.zeros(total_units * _UNIT, device=self.device, dtype=torch.float32)
         self.cache_pitch = torch.zeros(_PITCH_CACHE, device=self.device, dtype=torch.long)
+        self._rms_buffer = np.zeros(_UNIT * 4, dtype=np.float32)  # 40 ms gate history
         self.cache_pitchf = torch.zeros(_PITCH_CACHE, device=self.device, dtype=torch.float32)
         self.sola_buffer = torch.zeros(
             self.sola_buffer_units * _UNIT, device=self.device, dtype=torch.float32
@@ -290,21 +291,34 @@ class RealTimeRVC:
         if block.shape[0] < expected:
             block = np.pad(block, (0, expected - block.shape[0]))
 
-        # input noise gate (upstream RMS threshold logic, 10 ms grid)
+        # input noise gate (upstream realtime_gui RMS-threshold logic, 10 ms
+        # grid): the 40 ms rms_buffer carries energy across block boundaries
+        # so the attack of a word starting near a boundary is not clipped.
+        # Like upstream, the gated output is 20 ms LONGER than the block (the
+        # previous block's tail is re-gated with better context) and the last
+        # (block+20ms) samples of the sliding window are rewritten with it.
         with self._settings_lock:
             threshold_db = self.silence_threshold_db
             rms_mix_rate = self.rms_mix_rate
         block = block.astype(np.float32, copy=True)
-        if threshold_db > -70.0:
-            env = librosa.feature.rms(y=block, frame_length=_UNIT * 4, hop_length=_UNIT, center=False)[0]
-            db = librosa.amplitude_to_db(env, ref=1.0)
+        n_write = expected                      # samples written into the window
+        if threshold_db > -60.0:
+            x = np.append(self._rms_buffer, block)
+            env = librosa.feature.rms(
+                y=x, frame_length=_UNIT * 4, hop_length=_UNIT,
+            )[:, 2:]
+            self._rms_buffer[:] = x[-_UNIT * 4:]
+            x = x[2 * _UNIT - _UNIT // 2:]
+            db = librosa.amplitude_to_db(env, ref=1.0)[0] < threshold_db
             for i in range(db.shape[0]):
-                if db[i] < threshold_db:
-                    block[i * _UNIT : (i + 1) * _UNIT] = 0.0
+                if db[i]:
+                    x[i * _UNIT:(i + 1) * _UNIT] = 0.0
+            block = x[_UNIT // 2:]
+            n_write = block.shape[0]           # expected + 2 units (20 ms)
 
         # slide window
-        self.input_wav[: -expected] = self.input_wav[expected:].clone()
-        self.input_wav[-expected:] = torch.from_numpy(block).to(self.device)
+        self.input_wav[:-n_write] = self.input_wav[n_write:].clone()
+        self.input_wav[-n_write:] = torch.from_numpy(block).to(self.device)
 
         infer_wav = self._infer(self.input_wav)   # (1, samples)
 
@@ -314,8 +328,8 @@ class RealTimeRVC:
             rms1 = librosa.feature.rms(y=src, frame_length=_UNIT * 4, hop_length=_UNIT, center=False)
             rms2 = librosa.feature.rms(y=infer_wav.cpu().numpy(), frame_length=_UNIT * 4, hop_length=_UNIT, center=False)
             n = infer_wav.shape[-1]
-            r1 = F.interpolate(torch.from_numpy(rms1).float().unsqueeze(0), size=n, mode="linear")[0, 0]
-            r2 = F.interpolate(torch.from_numpy(rms2).float().unsqueeze(0), size=n, mode="linear")[0, 0]
+            r1 = F.interpolate(torch.from_numpy(rms1).float().unsqueeze(0), size=n, mode="linear", align_corners=True)[0, 0]
+            r2 = F.interpolate(torch.from_numpy(rms2).float().unsqueeze(0), size=n, mode="linear", align_corners=True)[0, 0]
             r2 = torch.max(r2, torch.zeros_like(r2) + 1e-3)
             infer_wav = infer_wav * torch.pow(r1 / r2, 1.0 - rms_mix_rate)
 

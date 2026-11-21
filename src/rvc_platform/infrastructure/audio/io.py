@@ -79,12 +79,13 @@ def load_audio(path: Path, target_sr: int, ffmpeg: bool | None = None) -> np.nda
     if ffmpeg is None:
         ffmpeg = probe_ffmpeg()
     if ffmpeg:
-        # 16-bit PCM s16le -> numpy (identical to upstream RVC behaviour)
+        # float32 PCM f32le -> numpy (current official infer/audio.py
+        # _load_audio_ffmpeg: full precision, no int16 quantisation loss)
         cmd = [
             "ffmpeg", "-nostdin", "-y", "-i", str(path),
             "-t", str(MAX_DURATION_S),
             "-vn", "-ac", "1", "-ar", str(target_sr),
-            "-f", "s16le", "-",
+            "-f", "f32le", "-acodec", "pcm_f32le", "-",
         ]
         try:
             proc = subprocess.run(cmd, capture_output=True, timeout=FFMPEG_TIMEOUT_S)
@@ -95,8 +96,7 @@ def load_audio(path: Path, target_sr: int, ffmpeg: bool | None = None) -> np.nda
                 f"ffmpeg failed to decode {path.name}: "
                 f"{proc.stderr.decode(errors='ignore')[-500:]}"
             )
-        audio = np.frombuffer(proc.stdout, dtype=np.int16).astype(np.float32) / 32768.0
-        return audio
+        return np.frombuffer(proc.stdout, dtype=np.float32).flatten()
     # fallback: soundfile readers + scipy/librosa resample on read is not
     # supported directly, so decode then resample via the DSP module
     try:

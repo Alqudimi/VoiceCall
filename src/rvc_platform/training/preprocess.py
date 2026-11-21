@@ -3,8 +3,9 @@
 Stages (each idempotent, each reported):
 1. ``check``     — inventory, decode probe, corrupt-file detection, duration
                    stats, duplicate detection (content hash), silence ratio;
-2. ``preprocess``— silence-aware slicing (vendored Slicer), 3.7 s chunks with
-                   0.3 s overlap, high-pass 48 Hz, peak-normalisation
+2. ``preprocess``— silence-aware slicing (vendored Slicer), 3.0 s chunks with
+                   0.3 s overlap (official per_process=3.0, configs/config.py),
+                   high-pass 48 Hz, peak-normalisation
                    (alpha 0.75 / max 0.9 — upstream constants), dual output:
                    target-sr ``0_gt_wavs`` + 16 kHz ``1_16k_wavs``;
 
@@ -404,7 +405,7 @@ class DatasetPreprocessor:
     to reproduce the upstream output exactly).
     """
 
-    def __init__(self, sr: int, exp_dir: Path, per: float = 3.7,
+    def __init__(self, sr: int, exp_dir: Path, per: float = 3.0,
                  progress=None, denoise: bool = False, loudness: bool = True,
                  loudness_target_db: float = -20.0) -> None:
         self.denoise = bool(denoise)

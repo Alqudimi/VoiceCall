@@ -1,6 +1,6 @@
 # Iraqi Voice Studio — منصة تحويل الصوت RVC v2
 
-**الإصدار:** 1.8.0 | **اسم الحزمة:** `rvc-platform` | **الترخيص:** MIT
+**الإصدار:** 1.9.0 | **اسم الحزمة:** `rvc-platform` | **الترخيص:** MIT
 
 [![CI](https://github.com/Alqudimi/VoiceCall/actions/workflows/ci.yml/badge.svg)](https://github.com/Alqudimi/VoiceCall/actions/workflows/ci.yml)
 [![Lint](https://github.com/Alqudimi/VoiceCall/actions/workflows/lint.yml/badge.svg)](https://github.com/Alqudimi/VoiceCall/actions/workflows/lint.yml)
@@ -270,6 +270,29 @@ Windows/Colab حيث لا يوجد make. المجموعات: `install`, `env`, `
 قائمة الأهداف كاملة: `make help`. قائمة الأوامر: `uv run rvc-platform --help`.
 
 ---
+
+## محاذاة الاستدلال الفوري والتحويل v1.9.0 — الجولة الثامنة (رtrvc/realtime_gui/pipeline الرسمية)
+
+جُلبت ملفات المستودع الرسمي الحالية — `infer/rtrvc.py` (الاستدلال الفوري الجديد)، `realtime_gui.py` (999 سطراً)، `infer/vc/pipeline.py`، `infer/audio.py`، `configs/config.py`، `train/train_index.py` — وقورنت كلها سطراً بسطر:
+
+| المكوّن | النتيجة |
+|---|---|
+| الاستدلال الفوري (rtrvc) | SOLA/cache_pitch/k=8/interpolate×2 **مطابق** + إصلاح 6 انحرافات (أدناه) |
+| vc pipeline | change_rms/protect blend/p_len guard/opt_ts chunking/feats0 — **مطابق حرفياً** |
+| get_f0 (pm/rmvpe/fcpe) | thred 0.03، local_argmax/0.006، pm بوسط pad — **مطابق** |
+| بناء فهرس FAISS | 16√N≤N/39 خلايا IVF، MiniBatchKMeans 10000/256·n_cpu فوق 200k، دفعات 8192 — **مطابق حرفياً** |
+| fcpe/torchgate | fcpe **مطابق**؛ torchgate غير مُستخدم عندنا (التنقية عندنا noisereduce اختياري) |
+
+**الانحرافات المُصلحة (7):**
+1. **بوابة الصمت الفورية**: كانت تعزل كل كتلة (تقصّ هجوم أول كلمة عند حدود كل كتلة) — الآن ذاكرة rms_buffer 40ms عبر الكتل + إسقاط إطارين + إزاحة ±5ms، **مُتحقّق رقمياً مطابق لrealtime_gui** في كل أحجام الكتل
+2. عتبة البوابة الافتراضية -60dB (معطّلة) كما الرسمي — كانت -40 مفعّلة
+3. crossfade افتراضي 50ms (الرسمي 0.05s) — كان 8ms
+4. نافذة lookback الافتراضية 2500ms (الرسمي extra_time 2.5s) — كانت 200ms
+5. `align_corners=True` في مزج غلاف RMS الفوري (كالرسمي)
+6. **ميزانية تقسيم الاستدلال تُختار بـis_half لا بنوع الجهاز** (configs/config.py: 3/10/60/65 لfull) — كانت تعطي CUDA+fp32 ميزانية CPU
+7. فك ffmpeg أصبح **f32le كامل الدقة** (infer/audio.py الرسمي الحالي) — كنا نُكمّم إلى int16؛ و`per` للتقطيع 3.0s الرسمية الحالية (كانت 3.7 القديمة)
+
+11 اختبار انحدار جديد (`test_round8_alignment.py`) يثبّت كل ما سبق. الجناح: **229 وحدة + 51 تكامل = 280/280 أخضر**.
 
 ## إصلاح القوالب لكل (نسخة، معدل) v1.8.0 — الجولة السابعة (إصلاح توافق checkpoints)
 

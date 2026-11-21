@@ -1080,7 +1080,8 @@ def realtime_benchmark(
     model: str = typer.Argument(..., help="f0 model name in models/"),
     blocks: int = typer.Option(40, "--blocks", help="number of synthetic blocks"),
     block_ms: int = typer.Option(160, "--block-ms"),
-    crossfade_ms: int = typer.Option(8),
+    crossfade_ms: int = typer.Option(50, "--crossfade-ms",
+                                     help="block crossfade (upstream 0.05 s)"),
 ):
     """Measure REAL engine latency with synthetic blocks (no mic needed)."""
     from rvc_platform.engine.rvc.realtime import RealTimeRVC

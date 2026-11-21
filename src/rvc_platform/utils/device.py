@@ -27,16 +27,16 @@ class DeviceProfile:
     gpu_memory_gb: float
     sm: float
 
-    # official RVC pipeline split budget (seconds) for the vc pipeline
+    # official RVC pipeline split budget (seconds), configs/config.py
+    # device_config(): chosen by is_half (not device type), with the <=4 GB
+    # override applied last — same on CPU and CUDA.
     @property
     def split_params(self) -> tuple[int, int, int, int]:
-        if self.device.startswith("cuda"):
-            if self.gpu_memory_gb is not None and self.gpu_memory_gb <= 4:
-                return 1, 5, 30, 32
-            if self.is_half:
-                return 3, 10, 60, 65
-            return 1, 6, 38, 41
-        return 1, 6, 38, 41  # CPU budget (conservative)
+        if self.gpu_memory_gb is not None and 0 < self.gpu_memory_gb <= 4:
+            return 1, 5, 30, 32
+        if self.is_half:            # 6G-VRAM budget
+            return 3, 10, 60, 65
+        return 1, 6, 38, 41         # 5G-VRAM budget
 
 
 def select_device(index: int | None = None) -> DeviceProfile:
