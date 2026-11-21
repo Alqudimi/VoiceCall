@@ -1,6 +1,6 @@
 # Iraqi Voice Studio — منصة تحويل الصوت RVC v2
 
-**الإصدار:** 1.9.1 | **اسم الحزمة:** `rvc-platform` | **الترخيص:** MIT
+**الإصدار:** 1.9.2 | **اسم الحزمة:** `rvc-platform` | **الترخيص:** MIT
 
 [![CI](https://github.com/Alqudimi/VoiceCall/actions/workflows/ci.yml/badge.svg)](https://github.com/Alqudimi/VoiceCall/actions/workflows/ci.yml)
 [![Lint](https://github.com/Alqudimi/VoiceCall/actions/workflows/lint.yml/badge.svg)](https://github.com/Alqudimi/VoiceCall/actions/workflows/lint.yml)
@@ -270,6 +270,20 @@ Windows/Colab حيث لا يوجد make. المجموعات: `install`, `env`, `
 قائمة الأهداف كاملة: `make help`. قائمة الأوامر: `uv run rvc-platform --help`.
 
 ---
+
+## ملفات الاختبارات الكاملة بتغطية موسّعة v1.9.2 — الجولة العاشرة
+
+قُيست التغطية الحقيقية أولاً (pytest-cov): وحدة 38% / مجمّعة 61%، ثم كُتبت **5 دفعات جديدة** (147 اختباراً) تغطي كل وحدة كانت بلا اختبارات:
+
+| الدفعة | الملفات | أبرز السيناريوهات |
+|---|---|---|
+| 1 (35) | soup + fcpe + rmvpe + transforms + _ffmpeg_load + interfaces | checkpoint soup (uniform/MWA/فشول)، FCPE (CPU+DML branches)، RMVPE كاملاً بأوزان E2E حقيقية، spline round-trip 1e-9، بروتوكولات runtime-checkable |
+| 2 (23) | dataset + mute_asset + vad_filter + data_pipeline + colab | اللودران + collate + bucket sampler مع process-group حقيقي، mute asset توليد كامل، colab sync/manifest/restore بدون Drive |
+| 3 (25) | feature_extract + eval_metrics + huggingface | استخراج f0 حقيقي بPraat (pitch 150Hz)، كاشات npy ذرّية، composite scores، مساعدات HF بلا شبكة |
+| 4 (39) | auth + loader + slicer + io + pipeline + manager + environment | حرس bearer/WS، دمج yaml/env، slicer الصمت الرسمي كاملاً، magic sniffing، إدارة عمليات حقيقية (spawn/stop/tail) |
+| 5 (7) | system_service + tunnel_service | status الكامل + تحلّل الخدمات، فشول tunnel (binary/خادم/regex) |
+
+**النتيجة:** وحدة **51%** (من 38%) ومجمّعة **76%** (من 61%) — والجناح كله أخضر (239→386 وحدة + 51 تكامل). ما تبقّى دون 100% موثّق: cli/main.py (593 سطراً — أغلبها طبعات مساعدة)، training_service/trainer internals (تُغطى وظيفياً بتكامل trainer_smoke)، cuda_graph (يتطلب GPU فيزيائي)، rmvpe/fcpe بعض فروع ONNX/DML (تتطلب DirectML/Windows)، و_web/ (لا منطق قابل للاستيراد). أضيفت pytest-cov كأداة قياس دائمة.
 
 ## اكتمال تدقيق مجلد التدريب الرسمي v1.9.1 — الجولة التاسعة (train/ + infer/vc/modules + webui)
 

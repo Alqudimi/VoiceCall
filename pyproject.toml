@@ -1,6 +1,6 @@
 [project]
 name = "rvc-platform"
-version = "1.9.1"
+version = "1.9.2"
 description = "Iraqi Voice Studio — production-grade RVC v2 voice-conversion platform with Iraqi-Arabic specialization, full training pipeline, resumable checkpoints and real-time conversion"
 readme = "README.md"
 license = { text = "MIT" }
@@ -85,6 +85,7 @@ torchaudio = [{ index = "pytorch-cpu" }]
 dev = [
     "pytest>=8.2,<9",
     "pytest-asyncio>=0.23,<2",
+    "pytest-cov>=6,<8",
     "psutil>=6.0,<7",
 ]
 
