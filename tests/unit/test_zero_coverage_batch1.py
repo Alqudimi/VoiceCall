@@ -410,13 +410,20 @@ class TestTransforms:
 
 # --------------------------------------------------------------------------- #
 # infrastructure/audio/_ffmpeg_load.py — vendored any-format loader
+# (guarded at CLASS level: a missing optional dep skips only this section,
+# never the whole module)
 # --------------------------------------------------------------------------- #
-ffmpeg_load = pytest.importorskip(
-    "rvc_platform.infrastructure.audio._ffmpeg_load",
-    reason="requires ffmpeg-python + av",
-)
+try:
+    from rvc_platform.infrastructure.audio import _ffmpeg_load as ffmpeg_load
+
+    _FFMPEG_LOAD_MISSING = False
+except Exception:  # ffmpeg-python / av not installed in this env
+    ffmpeg_load = None
+    _FFMPEG_LOAD_MISSING = True
 
 
+@pytest.mark.skipif(_FFMPEG_LOAD_MISSING,
+                    reason="requires ffmpeg-python + av")
 class TestFfmpegLoad:
     def test_module_constants(self):
         assert ffmpeg_load.AUDIO_LOAD_BACKEND in ("ffmpeg", "torchaudio_cuda")

@@ -271,6 +271,21 @@ Windows/Colab حيث لا يوجد make. المجموعات: `install`, `env`, `
 
 ---
 
+## اكتمال ملفات الاختبارات — الجولة الحادية عشرة (172 اختباراً جديداً)
+
+أُعيد بناء البيئة بعد إعادة تدوير الصندوق (uv sync --frozen)، وأُصلح حارس `importorskip` في الدفعة الأولى ليصبح على مستوى الفئة بدل الملف (كان يُسقط 35 اختباراً كاملة عند غياب ffmpeg-python)، وأُضيفت المكتبتان الاختياريتان لمجموعة dev. ثم **4 دفعات جديدة**:
+
+| الدفعة | الملف | الاختبارات | المحتوى |
+|---|---|---|---|
+| 6 | `test_cli_commands.py` | 45 | كل أوامر CLI: install doctor/check، env sync/gpu/verify، clean، data-check، prepare-dataset، train start (كل فروع sr/f0 lock + resume-from + epoch guidance)، colab، model، status/logs/web-status، والمساعدات النقية (_port_open/_api/_terminate_group) مع خادم TCP حقيقي |
+| 7 | `test_services_batch7.py` | 45 | TrainingService كاملاً (status من progress.json، resume/latest، export by-epoch، prepare خيط خلفي بنجاح وفشل HuBERT)، worker guards، AudioDatasetImporter (overlap/force/report)، download_assets بمُنزّل مزيّف، ModelService (upload payload/تسمية upload_hash/delete) |
+| 8 | `test_api_batch8.py` | 46 | كل مسارات API عبر TestClient: system/models/convert/training/tunnel/realtime + حرس bearer (401/صحة/health استثناء) + مغلّف الأخطاء الموحّد (raise_server_exceptions=False) + schemas + logging setup مع ملف platform.log حقيقي |
+| 9 | `test_engine_batch9.py` | 36 | المحرك: f0 utilities (interp/median/shift/coarse)، change_rms بدلالته الصحيحة (rate=1 مطابقة، rate=0 مغلف المصدر)، FeatureIndex بfaiss حقيقي (بناء IVF + blend + newest)، hubert (v1 final_proj=256 / v2 last_hidden)، مولّد v2 كامل بinfer()، MPD/PosteriorEncoder/RCL بالتوقيعات الرسمية، RVCInferenceEngine تحويل كامل بوزان عشوائية، RealTimeRVC (blocks/latency/reset/update_settings) |
+
+**النتيجة:** الوحدة **52% → 72%**، المجمّعة (وحدة+تكامل) **76% → 81%** — والجناح كله أخضر (وحدة 72% + 15 ملف تكامل).
+
+**ما تبقّى دون 100% (موثّق):** trainer.py الداخلي (650 سطراً — يحتاج حلقة تدريب حقيقية؛ يغطيه test_trainer_smoke وظيفياً)، cuda_graph (يتطلب GPU فيزيائي لالتقاط CUDA Graph)، فروع ONNX/DirectML في rmvpe/fcpe (تتطلب Windows)، colab drive فروع التحميل الحقيقي، وبقية أسطر print/branch الدفاعية في CLI.
+
 ## ملفات الاختبارات الكاملة بتغطية موسّعة v1.9.2 — الجولة العاشرة
 
 قُيست التغطية الحقيقية أولاً (pytest-cov): وحدة 38% / مجمّعة 61%، ثم كُتبت **5 دفعات جديدة** (147 اختباراً) تغطي كل وحدة كانت بلا اختبارات:
