@@ -12,6 +12,6 @@ Layered architecture (see docs/ARCHITECTURE.md):
     cli           unified command line interface (mirrors the Makefile)
 """
 
-__version__ = "1.6.0"
+__version__ = "1.7.0"
 APP_NAME = "Iraqi Voice Studio"
 APP_SLUG = "rvc-platform"

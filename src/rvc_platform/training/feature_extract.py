@@ -262,8 +262,14 @@ def extract_features(run_dir: Path, version: str, device: str, is_half: bool,
 
 
 def write_filelist(run_dir: Path, version: str, f0: bool,
-                   speaker_id: int = 0) -> Path:
-    """Generate filelist.txt (upstream line format)."""
+                   speaker_id: int = 0, sample_rate_hz: int | None = None) -> Path:
+    """Generate filelist.txt (upstream line format).
+
+    Upstream webui.py appends TWO mute-silence lines per speaker id (by
+    reference into logs/mute) before shuffling — teaching silence-in ->
+    silence-out. We do the same via ``mute_asset.mute_filelist_lines``.
+    ``sample_rate_hz`` (the experiment's target rate) selects mute32k/40k/48k.
+    """
     run_dir = Path(run_dir)
     gt_dir = run_dir / "0_gt_wavs"
     feature_dir = run_dir / ("3_feature768" if version == "v2" else "3_feature256")
@@ -288,8 +294,26 @@ def write_filelist(run_dir: Path, version: str, f0: bool,
             "no complete training entries",
             "preprocess + f0 + feature extraction must finish first",
         )
+    # upstream dose: two mute lines per speaker, shuffled into the filelist
+    from rvc_platform.training.mute_asset import mute_filelist_lines
+    sr_hz = int(sample_rate_hz or _infer_sr_hz(run_dir) or 48_000)
+    lines.extend(mute_filelist_lines(sr_hz, version, f0, speaker_id))
     rng = np.random.default_rng(1234)
     rng.shuffle(lines)
     filelist = run_dir / "filelist.txt"
     filelist.write_text("\n".join(lines), encoding="utf-8")
     return filelist
+
+
+def _infer_sr_hz(run_dir: Path) -> int | None:
+    """Best-effort target-sr discovery for the mute line (0_gt_wavs header)."""
+    try:
+        wavs = sorted((Path(run_dir) / "0_gt_wavs").glob("*.wav"))
+        if wavs:
+            import soundfile as sf
+
+            info = sf.info(str(wavs[0]))
+            return int(info.samplerate)
+    except Exception:
+        pass
+    return None

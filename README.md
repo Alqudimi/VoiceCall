@@ -1,6 +1,6 @@
 # Iraqi Voice Studio — منصة تحويل الصوت RVC v2
 
-**الإصدار:** 1.6.0 | **اسم الحزمة:** `rvc-platform` | **الترخيص:** MIT
+**الإصدار:** 1.7.0 | **اسم الحزمة:** `rvc-platform` | **الترخيص:** MIT
 
 [![CI](https://github.com/Alqudimi/VoiceCall/actions/workflows/ci.yml/badge.svg)](https://github.com/Alqudimi/VoiceCall/actions/workflows/ci.yml)
 [![Lint](https://github.com/Alqudimi/VoiceCall/actions/workflows/lint.yml/badge.svg)](https://github.com/Alqudimi/VoiceCall/actions/workflows/lint.yml)
@@ -270,6 +270,28 @@ Windows/Colab حيث لا يوجد make. المجموعات: `install`, `env`, `
 قائمة الأهداف كاملة: `make help`. قائمة الأوامر: `uv run rvc-platform --help`.
 
 ---
+
+## تدقيق معماري شامل + مجموعة الصمت الرسمية v1.7.0 — الجولة السادسة (الأعمق)
+
+جولة تدقيق آلية كاملة على مستوى السطر: نُزّلت ملفات المعمارية الرسمية الخمسة (attentions/commons/models/modules/transforms — 2486 سطراً) وقورنت هيكلياً وعددياً مع نسختنا:
+
+| المكوّن | النتيجة |
+|---|---|
+| `transforms.py` (PRQ flow transform) | **مطابق هيكلياً بالكامل** (أداة مقارنة مطبّعة: أجسام متطابقة) |
+| `models.py` | **4/4 أصناف SynthesizerTrn** بنفس البنية؛ حارس `n*upp != har` بنفس الشرط الرسمي |
+| `commons.py` | slice_segments/slice_segments2 **بنفس الدلالات** (تجهير gather بنفس النوافذ) |
+| `attentions.py` / `modules.py` | فروق `super().__init__()` التجميلية فقط |
+| rmvpe الداخلية | cents_mapping/pad-32/thred=0.03/htk/clamp — **مطابقة بالكامل** |
+| get_f0 الرسمي | 3 طرق (pm/rmvpe/fcpe): pm عندنا مطابق (عتبة 0.6، أرضية 50، خطوة 10ms، الحشو المركزي) |
+| `train/data_utils.py` | phone repeat×2، حد 900، `.spec.pt` بنمط الحفظ نفسه، طول التقدير `//3·hop`، ترتيب الكوليت التنازلي — **مطابق سطراً بسطر** |
+
+**الفجوة الجوهرية الوحيدة المكتشفة — مجموعة الصمت الرسمية (mute) كانت غائبة تماماً**: الرسمي يصنّف `mute.zip` "مطلوبة لتدريب v1/v2": يفكّها إلى `logs/mute/` (صمت 10ث لكل معدل عينة + ميزات HuBERT معدة + F0 صفرية) ويضمّ **سطرين لكل متحدث** في filelist بالمرجع — تُدرّب النموذج صمت→صمت وتمنع "طنين" التحويل على الدخل الهادئ. نفّذنا التكافؤ الوظيفي الكامل:
+
+- **`training/mute_asset.py`** (جديد): يولّد الأصل بنفس بنية الرسمي (mute32k/40k/48k.wav + 3_feature768/256/mute.npy + 2a_f0/2b-f0nsf صفرية)، ويستخرج الميزات عبر خط HuBERT عندنا نفسه (أو أصفاراً عند غياب الأصل مع تحذير وإعادة توليد). **أولوية للنسخة الرسمية**: لو فُكّ mute.zip الأصلية إلى logs/mute تُستخدم حرفياً.
+- **`write_filelist`** الآن يضمّ **سطرين لكل speaker_id** بنفس جرعة الرسمي، مخلوطين بالبذرة الحتمية نفسها (1234)، ويستنتج معدل العينة تلقائياً.
+- **5 اختبارات انحدار** (`test_mute_asset.py`): البنية الرسمية، جرعة السطرين، النسخة non-f0، التكامل مع filelist (كل المسارات موجودة، 3+2 أسطر)، وحتمية الخلط. الجناح: **259/259 أخضر**.
+
+التبعيات دُقّقت مقابل `requirments_*_py312.txt` الرسمية: كل مكتبات مسار v1/v2 الحرجة (numpy/scipy/librosa/transformers<4.50/parselmouth/torchfcpe/faiss) بنفس النطاقات؛ ملفات المعمارية الرسمية لا تحتاج local-attention/einops/hyper-connections لمسارنا.
 
 ## تدقيق التطابق الرسمي الشامل v1.6.0 — جولة رابعة على كل مكوّنات الأنباق المتبقية
 
