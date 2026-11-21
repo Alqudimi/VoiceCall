@@ -53,7 +53,7 @@ class ConversionDefaults(BaseModel):
     # training-set timbre; 0.0 disabled it entirely (the "far from the
     # speaker" complaint). See RVC FAQ Q11 on index rate / timbre leakage.
     index_rate: float = Field(default=0.75, ge=0.0, le=1.0)
-    filter_radius: int = Field(default=3, ge=0, le=7)
+    filter_radius: int = Field(default=0, ge=0, le=7)   # official default: median filter OFF (legacy knob: >2 = kernel-3)
     rms_mix_rate: float = Field(default=0.25, ge=0.0, le=1.0)
     protect: float = Field(default=0.33, ge=0.0, le=0.5)
     denoise: bool = False

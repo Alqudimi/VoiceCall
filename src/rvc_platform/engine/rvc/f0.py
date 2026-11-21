@@ -59,12 +59,20 @@ def interp_unvoiced(f0: np.ndarray) -> np.ndarray:
 
 
 def median_filter_f0(f0: np.ndarray, radius: int) -> np.ndarray:
-    """RVC's 'filter radius' knob: median smoothing of the F0 contour."""
-    if radius < 2 or f0.size == 0:
+    """RVC's legacy 'filter radius' knob — OFFICIAL semantics.
+
+    Upstream WebUI applied ``signal.medfilt(f0, 3)`` — a FIXED kernel of 3 —
+    only when ``filter_radius > 2``; the current official pipeline removed
+    median filtering from inference entirely (infer/vc/pipeline.py get_f0 has
+    no filter_radius). We preserve the legacy knob for opt-in users with its
+    exact kernel (3, never 2r+1 — a kernel-7 default over-smooths vibrato and
+    pitch dynamics); the platform default (radius 0) matches current official.
+    """
+    if radius <= 2 or f0.size == 0:
         return f0
     from scipy.signal import medfilt
 
-    return medfilt(f0, kernel_size=2 * int(radius) + 1).astype(f0.dtype)
+    return medfilt(f0, kernel_size=3).astype(f0.dtype)
 
 
 def shift_f0(f0: np.ndarray, semitones: float) -> np.ndarray:
@@ -125,7 +133,11 @@ class ParselmouthExtractor:
     def extract(self, audio_16k: np.ndarray) -> np.ndarray:
         import parselmouth
 
-        f0_min = 65.0
+        # upstream get_f0('pm'): f0_min=50, time_step=window/sr*1000 = 10 ms,
+        # voicing_threshold=0.6, pitch_ceiling=1100 (infer/vc/pipeline.py).
+        # 50 Hz floor (not Praat's 65 default) keeps deep male voices — a
+        # 65 Hz floor zeroes the bottom of many Iraqi male speakers.
+        f0_min = 50.0
         l_pad = int(np.ceil(1.5 / f0_min * 16000))
         r_pad = l_pad + 1
         padded = np.pad(np.asarray(audio_16k), (l_pad, r_pad))
@@ -136,9 +148,16 @@ class ParselmouthExtractor:
             pitch_ceiling=1100,
         )
         f0 = sound.selected_array["frequency"].astype(np.float32)
+        # upstream centres the length mismatch: pad_size=(p_len-len+1)//2 on
+        # BOTH sides so the F0 timeline stays aligned with HuBERT frames —
+        # right-only padding shifts pitch frames relative to features.
         p_len = len(audio_16k) // 160 + 1
         if len(f0) < p_len:
-            f0 = np.pad(f0, (0, p_len - len(f0)))
+            pad_size = (p_len - len(f0) + 1) // 2
+            f0 = np.pad(f0, (pad_size, p_len - len(f0) - pad_size))
+        elif len(f0) > p_len:
+            start = (len(f0) - p_len) // 2
+            f0 = f0[start : start + p_len]
         return f0[:p_len]
 
 

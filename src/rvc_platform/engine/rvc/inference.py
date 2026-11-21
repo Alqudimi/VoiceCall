@@ -286,10 +286,18 @@ class RVCInferenceEngine:
         if audio16k.size == 0:
             raise ConversionError(f"empty audio: {input_path.name}")
         duration = audio16k.size / _SR_HUBERT
+        # upstream input peak-guard (infer/vc/modules.py vc_single):
+        # scale down ONLY when peaks exceed 0.95 — clipped input saturates
+        # HuBERT features before conversion even starts.
+        audio_max = float(np.abs(audio16k).max() / 0.95)
+        if audio_max > 1.0:
+            audio16k = (audio16k / audio_max).astype(np.float32)
 
         # pre-pass conditioning (optional denoise is ours, highpass = upstream)
+        # filtfilt (zero-phase) is the official filter: lfilter's causal
+        # phase distortion smears HuBERT features at onsets/attacks.
         bh, ah = signal.butter(N=5, Wn=48, btype="high", fs=_SR_HUBERT)
-        audio16k = signal.lfilter(bh, ah, audio16k)
+        audio16k = signal.filtfilt(bh, ah, audio16k)
         if settings.denoise:
             audio16k = self.audio.denoise(audio16k, _SR_HUBERT)
 

@@ -88,7 +88,7 @@ class ConversionSettings:
     pitch_shift: int = 0                       # semitones, -24..24
     f0_method: str = F0Method.RMVPE.value
     index_rate: float = 0.75                    # 0..1 retrieval blend (official RVC default; 1.0 forces training-set timbre — RVC FAQ Q11)
-    filter_radius: int = 3                     # median filter radius on F0 (>=2 enables)
+    filter_radius: int = 0                     # legacy F0 median-smoothing knob (official default OFF; >2 applies fixed kernel-3)
     rms_mix_rate: float = 0.25                 # 0..1 output loudness-envelope share
     protect: float = 0.33                      # 0..0.5 voiceless-consonant protection
     output_sample_rate: int | None = None       # None -> model native rate
