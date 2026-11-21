@@ -604,6 +604,31 @@ def train_start(
         cfg.resume = True
         console.print(f"[cyan]explicit resume point: {resume_from}[/cyan]")
 
+    # official epoch guidance (RVC FAQ Q9) derived from the measured dataset
+    # quality (SNR) in the prepare-dataset report — surfaced BEFORE hours are
+    # spent; best-effort: a missing/legacy report simply skips the hint
+    try:
+        import json as _json
+        report_path = run_dir / "dataset_report.json"
+        if report_path.is_file():
+            report = _json.loads(report_path.read_text(encoding="utf-8"))
+            rec = report.get("epoch_recommendation") or {}
+            snr = report.get("mean_snr_db")
+            if rec and snr is not None and cfg.epochs > rec.get("max", 0):
+                console.print(
+                    f"[yellow]official guidance:[/yellow] dataset measured "
+                    f"SNR {snr} dB ({rec.get('quality')}) — FAQ Q9 recommends "
+                    f"[b]{rec.get('min')}-{rec.get('max')} epochs[/b]; you asked "
+                    f"for {cfg.epochs}. {rec.get('reason')}"
+                )
+                console.print(
+                    "[yellow]training anyway (--epochs was explicit); if "
+                    "val_mel/speaker-sim plateau, stop early via "
+                    "'rvc-platform train stop' (checkpoint kept).[/yellow]"
+                )
+    except Exception:  # noqa: BLE001 — guidance is best-effort, never blocks
+        pass
+
     from rvc_platform.training.worker import main as worker_main
     # run in-process so the CLI shows live JSONL events; the worker registers
     # its pid in temp/trainer.pid so `train stop` reaches it from any terminal

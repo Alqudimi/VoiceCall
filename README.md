@@ -1,6 +1,6 @@
 # Iraqi Voice Studio — منصة تحويل الصوت RVC v2
 
-**الإصدار:** 1.4.0 | **اسم الحزمة:** `rvc-platform` | **الترخيص:** MIT
+**الإصدار:** 1.4.1 | **اسم الحزمة:** `rvc-platform` | **الترخيص:** MIT
 
 [![CI](https://github.com/Alqudimi/VoiceCall/actions/workflows/ci.yml/badge.svg)](https://github.com/Alqudimi/VoiceCall/actions/workflows/ci.yml)
 [![Lint](https://github.com/Alqudimi/VoiceCall/actions/workflows/lint.yml/badge.svg)](https://github.com/Alqudimi/VoiceCall/actions/workflows/lint.yml)
@@ -270,6 +270,18 @@ Windows/Colab حيث لا يوجد make. المجموعات: `install`, `env`, `
 قائمة الأهداف كاملة: `make help`. قائمة الأوامر: `uv run rvc-platform --help`.
 
 ---
+
+## محرّك توصية الحقب الرسمي v1.4.1 — FAQ Q9 كمقياس آلي
+
+تدقيق معماري شامل (قالب 40k مطابق حرفياً 100% لـ`configs/v1/40k.json` الرسمي — تحقّق مباشر من المستودع؛ سلسلة v2+40k ومولّد 768-بُعد وHuBERT طبقة-9 + final_proj كلها مطابقة للرسمي؛ الأصول من `lj1995/VoiceConversionWebUI` الرسمي).
+
+**الجديد — قياس جودة البيانات يتحول إلى توصية حقب رسمية آلية:**
+- فحص البيانات الآن يقيس **SNR لكل ملف** (نسبة الصوت لأرضية الضجيج، بالمئينات 80 مقابل 10 لسلامة من النقرات) و**أرضية الضجيج** — إضافة للمدة/الصمت/التكرارات السابقة.
+- التقرير (`dataset_report.json`) يشمل الآن `mean_snr_db` و`noise_floor_db` و`epoch_recommendation` مشتقة حرفياً من نص FAQ Q9 الرسمي: **ضجيجي (<20dB) → 20-30 حقبة فقط** ("رفعها أكثر لن يحسّن الجودة — يتعلم الضجيج")، جيد → 50-150، **نظيف (≥35dB) → حتى 200**.
+- أمر `train start` يقرأ التقرير ويعرض التوجيه قبل بدء الساعات: إذا طلبت حقباً فوق توصية بياناتك المقيسة، تُنبَّه مع سبب القياس، مع نصيحة التوقف المبكر عند استقرار val_mel/speaker-sim.
+- كل شيء best-effort: تقرير قديم بلا SNR = لا تحذير، لا كسر توافق.
+
+**مصادر:** `github.com/RVC-Project/Retrieval-based-Voice-Conversion-WebUI` (faq_en.md Q9/Q10، configs/v1/40k.json، hubert التحقق من models.py الرسمي) + قائمة `pretrained_v2` من `huggingface.co/lj1995/VoiceConversionWebUI`.
 
 ## إصلاحات ومواءمة رسمية v1.4.0 — تدقيق مقابل المصادر الأولية
 

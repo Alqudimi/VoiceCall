@@ -67,6 +67,8 @@ class DatasetReport:
     empty_audio: list[str] = field(default_factory=list)
     mean_silence_ratio: float | None = None
     capped_at: int | None = None      # set when max_files truncated the scan
+    mean_snr_db: float | None = None  # measured dataset cleanliness (FAQ Q9 lever)
+    noise_floor_db: float | None = None
 
     @property
     def ok(self) -> bool:
@@ -94,6 +96,12 @@ class DatasetReport:
                 if self.mean_silence_ratio is not None else None
             ),
             "capped_at": self.capped_at,
+            "mean_snr_db": (round(self.mean_snr_db, 1)
+                            if self.mean_snr_db is not None else None),
+            "noise_floor_db": (round(self.noise_floor_db, 1)
+                               if self.noise_floor_db is not None else None),
+            "epoch_recommendation": recommend_epochs(
+                self.mean_snr_db, self.total_duration_s),
             "recommended_min_duration_s": 600.0,
             "meets_recommendation": self.total_duration_s >= 600.0,
         }
@@ -142,6 +150,8 @@ class DatasetChecker:
         seen_hashes: dict[str, str] = {}
         durations: list[float] = []
         silence_ratios: list[float] = []
+        snr_values: list[float] = []
+        noise_floors: list[float] = []
         # decode + md5 + silence ratio per file (thread pool when probing the
         # real loader — ffmpeg decoding releases the GIL); results are
         # consumed in file order so the report matches the sequential scan.
@@ -164,12 +174,16 @@ class DatasetChecker:
                 seen_hashes[digest] = path.name
             durations.append(audio.size / 16_000)
             silence_ratios.append(silence)
+            snr_values.append(_snr_db(audio))
+            noise_floors.append(_noise_floor_db(audio))
         report.usable_files = len(durations)
         if durations:
             report.total_duration_s = float(sum(durations))
             report.min_duration_s = float(min(durations))
             report.max_duration_s = float(max(durations))
             report.mean_silence_ratio = float(np.mean(silence_ratios))
+            report.mean_snr_db = float(np.median(snr_values))
+            report.noise_floor_db = float(np.median(noise_floors))
         return report
 
 
@@ -183,6 +197,76 @@ def _silence_ratio(audio: np.ndarray, threshold_db: float = -40.0) -> float:
     rms = np.sqrt((frames ** 2).mean(axis=1))
     db = 20.0 * np.log10(np.maximum(rms, 1e-9))
     return float(np.mean(db < threshold_db))
+
+
+def _noise_floor_db(audio: np.ndarray) -> float:
+    """Estimated noise floor (dBFS, 10th-percentile frame RMS).
+
+    Frames quieter than the voice (pauses, breaths, room tone) carry the
+    noise floor; the 10th-percentile RMS is a robust estimate that ignores
+    both speech and isolated clicks.
+    """
+    frame = 160  # 10 ms @ 16 kHz — same framing as _silence_ratio
+    x = np.asarray(audio, dtype=np.float32).ravel()
+    if x.size < frame:
+        return -120.0
+    frames = x[: (x.size // frame) * frame].reshape(-1, frame)
+    rms = np.sqrt((frames ** 2).mean(axis=1))
+    db = 20.0 * np.log10(np.maximum(rms, 1e-9))
+    return float(np.percentile(db, 10))
+
+
+def _snr_db(audio: np.ndarray) -> float:
+    """Global speech-to-noise-floor ratio in dB (loud 80th pct vs quiet 10th pct).
+
+    A single-number cleanliness metric: >35 dB ≈ studio, 20-35 dB ≈ good,
+    <20 dB ≈ noisy (phone/recording noise the GAN will happily learn).
+    """
+    frame = 160
+    x = np.asarray(audio, dtype=np.float32).ravel()
+    if x.size < frame * 4:  # need at least 4 frames for percentiles
+        return 0.0
+    frames = x[: (x.size // frame) * frame].reshape(-1, frame)
+    rms = np.sqrt((frames ** 2).mean(axis=1))
+    db = 20.0 * np.log10(np.maximum(rms, 1e-9))
+    loud = float(np.percentile(db, 80))
+    quiet = float(np.percentile(db, 10))
+    return loud - quiet
+
+
+def recommend_epochs(snr_db: float | None, total_duration_s: float) -> dict:
+    """Official RVC FAQ Q9 epoch guidance, derived from measured dataset quality.
+
+    FAQ Q9 (docs/en/faq_en.md, RVC-Project): "If the training dataset's
+    audio quality is poor and the noise floor is high, 20-30 epochs are
+    sufficient. Setting it too high won't improve the audio quality of your
+    low-quality training set." / "If the training set audio quality is high,
+    the noise floor is low ... 200 is acceptable."
+    FAQ Q10: "A dataset of around 10min to 50min is recommended" (less than
+    1 min is not supported).
+
+    Returns a dict with the recommended range and the exact reason string,
+    so the CLI/API can surface official guidance instead of guessing.
+    """
+    if snr_db is None:
+        return {"min": 20, "max": 200, "quality": "unknown",
+                "reason": "SNR not measured — official FAQ allows 20 (noisy) "
+                          "to 200 (clean); start low and watch val_mel/speaker-sim"}
+    if snr_db < 20.0:
+        return {"min": 20, "max": 30, "quality": "noisy",
+                "reason": "measured SNR %.1f dB < 20 dB — official FAQ Q9: "
+                          "noisy/high-floor data needs only 20-30 epochs; "
+                          "more will NOT improve quality (it learns the noise)"
+                          % snr_db}
+    if snr_db < 35.0:
+        return {"min": 50, "max": 150, "quality": "good",
+                "reason": "measured SNR %.1f dB — decent quality; 50-150 "
+                          "epochs per official FAQ Q9 (10-50 min datasets), "
+                          "watch the composite metric" % snr_db}
+    return {"min": 100, "max": 200, "quality": "clean",
+            "reason": "measured SNR %.1f dB ≥ 35 dB — clean data; official "
+                      "FAQ Q9 allows up to 200 epochs for high-quality sets"
+                      % snr_db}
 
 
 def _denoise_audio(audio: np.ndarray, sr: int) -> np.ndarray:
