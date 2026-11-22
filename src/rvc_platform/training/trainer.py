@@ -688,6 +688,23 @@ class Trainer:
             self.emit("training.best_model", path=str(out_path),
                       epoch=info.epoch, global_step=info.global_step,
                       metric=info.metric, score=info.score)
+            try:
+                from rvc_platform.infrastructure.paths import get_paths
+                from rvc_platform.training.huggingface import newest_index_file
+                models_dir = get_paths().models
+                models_dir.mkdir(parents=True, exist_ok=True)
+                target_pth = models_dir / f"{self.config.experiment_name}.pth"
+                target_idx = models_dir / f"{self.config.experiment_name}.index"
+                if target_pth.is_symlink() or target_pth.is_file():
+                    target_pth.unlink(missing_ok=True)
+                target_pth.symlink_to(out_path)
+                newest_idx = newest_index_file(self.config.run_dir)
+                if newest_idx and Path(newest_idx).is_file():
+                    if target_idx.is_symlink() or target_idx.is_file():
+                        target_idx.unlink(missing_ok=True)
+                    target_idx.symlink_to(Path(newest_idx))
+            except Exception:
+                logger.debug("models auto-link skipped")
             if self._best_export_cb is not None:
                 try:
                     self._best_export_cb(str(out_path), metadata)

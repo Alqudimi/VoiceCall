@@ -915,7 +915,7 @@ def inference(
     output: Path = typer.Option(None, "--output", "-o"),
     pitch: int = typer.Option(0, "--pitch", "-t"),
     f0_method: str = typer.Option("rmvpe", "--f0-method"),
-    index_rate: float = typer.Option(0.0, "--index-rate"),
+    index_rate: float = typer.Option(0.75, "--index-rate", help="retrieval index blend rate (0.75 recommended for exact voice match)"),
     filter_radius: int = typer.Option(3, "--filter-radius"),
     rms_mix_rate: float = typer.Option(0.25, "--rms"),
     protect: float = typer.Option(0.33, "--protect"),

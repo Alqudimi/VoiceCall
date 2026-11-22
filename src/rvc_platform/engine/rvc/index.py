@@ -43,6 +43,13 @@ class FeatureIndex:
             self.vectors = self.index.reconstruct_n(0, self.index.ntotal)
         except Exception:  # some IVF variants cannot reconstruct
             self.vectors = None
+        # Optimize IVF search: search multiple Voronoi cells (nprobe=16) for high-accuracy timbre matching
+        try:
+            ivf = faiss.extract_index_ivf(self.index)
+            if ivf is not None and ivf.nprobe < 8:
+                ivf.nprobe = 16
+        except Exception:
+            pass
 
     @property
     def size(self) -> int:
@@ -58,19 +65,34 @@ class FeatureIndex:
         ``w_j ∝ (1/score_j)^2`` (softmax-free weighting used by RVC).
         Returns the blended features (shape == feats.shape).
         """
-        if index_rate <= 0 or self.size == 0:
+        if index_rate <= 0 or self.size == 0 or self.vectors is None:
             return feats
-        feats32 = feats.astype("float32", copy=False)
+        feats32 = np.ascontiguousarray(feats.astype("float32", copy=False))
+        try:
+            ivf = faiss.extract_index_ivf(self.index)
+            if ivf is not None and ivf.nprobe < 8:
+                ivf.nprobe = 16
+        except Exception:
+            pass
+
         score, ix = self.index.search(feats32, k)
-        if not (ix >= 0).all():
-            # trained_* index (no stored vectors) cannot blend
+        valid_mask = ix >= 0
+        if not valid_mask.any():
             return feats
-        if self.vectors is None:
-            return feats
-        weight = np.square(1 / np.maximum(score, 1e-8))
-        weight /= weight.sum(axis=1, keepdims=True)
-        blended = np.sum(self.vectors[ix] * np.expand_dims(weight, axis=2), axis=1)
-        mixed = blended.astype(feats.dtype) * index_rate + feats * (1 - index_rate)
+
+        safe_ix = np.where(valid_mask, ix, 0)
+        weight = np.square(1.0 / np.maximum(score, 1e-8))
+        weight = np.where(valid_mask, weight, 0.0)
+        weight_sum = weight.sum(axis=1, keepdims=True)
+        weight = np.where(weight_sum > 0, weight / np.maximum(weight_sum, 1e-8), 0.0)
+
+        blended = np.sum(self.vectors[safe_ix] * np.expand_dims(weight, axis=2), axis=1)
+        has_retrieval = (weight_sum > 0).squeeze(-1)
+        mixed = feats.copy()
+        mixed[has_retrieval] = (
+            blended[has_retrieval].astype(feats.dtype) * index_rate
+            + feats[has_retrieval] * (1.0 - index_rate)
+        )
         return mixed.astype(feats.dtype)
 
 
