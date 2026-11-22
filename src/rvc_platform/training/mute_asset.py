@@ -125,14 +125,19 @@ def _try_extract_silence_feature(wav_16k: Path, out_npy: Path, dim: int) -> bool
         try:
             audio, sr = sf.read(str(wav_16k), dtype="float32")
             assert sr == MUTE_SR_16K
-            feats = extract_hubert_features(
-                model, torch.from_numpy(audio).view(1, -1), version,
-            )          # (1, frames20ms, dim)
-            np.save(out_npy, feats[0].float().numpy().astype(np.float32))
+            # same guard as feature_extract.py: no autograd graph on inference
+            with torch.no_grad():
+                feats = extract_hubert_features(
+                    model, torch.from_numpy(audio).view(1, -1), version,
+                )      # (1, frames20ms, dim)
+            np.save(out_npy,
+                    feats[0].detach().float().cpu().numpy().astype(np.float32))
             return True
         finally:
             del model
-    except (FileNotFoundError, ImportError, OSError) as exc:
+    except (FileNotFoundError, ImportError, OSError, RuntimeError) as exc:
+        # RuntimeError included: grad-traced tensors / GPU OOM must degrade to
+        # the zero-feature fallback instead of killing a Colab prepare run
         logger.info("mute feature extraction unavailable (%s) — zero fallback", exc)
         return False
 

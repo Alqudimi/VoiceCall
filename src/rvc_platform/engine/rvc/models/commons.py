@@ -63,8 +63,12 @@ def _segment_gather_index(ids_str, segment_size, device):
     the loop's data-dependent indexing produced an assert_size_stride
     mismatch that crashed the first compiled training step.
     """
-    offsets = torch.arange(segment_size, device=device)
-    return ids_str.reshape(-1, 1).long() + offsets.reshape(1, -1)
+    # Validation batches can yield CPU ids while activations are on CUDA.
+    # gather requires its index tensor to be on the same device as the input.
+    device = torch.device(device)
+    ids_str = ids_str.to(device=device, dtype=torch.long)
+    offsets = torch.arange(segment_size, device=device, dtype=torch.long)
+    return ids_str.reshape(-1, 1) + offsets.reshape(1, -1)
 
 
 def slice_segments(x, ids_str, segment_size=4):
