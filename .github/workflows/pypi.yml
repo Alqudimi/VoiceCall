@@ -25,7 +25,7 @@ jobs:
     environment: pypi
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Download release dist artifact
         uses: actions/download-artifact@v4
