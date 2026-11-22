@@ -34,7 +34,6 @@ def main() -> int:
     if args.export:
         from rvc_platform.engine.rvc import checkpoint as engine_ckpt
         from rvc_platform.training.run_config import TrainingRunConfig
-        from rvc_platform.training.utils import HParams
 
         run_dir = Path(args.run_dir)
         cfg = TrainingRunConfig.load(run_dir)

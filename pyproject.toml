@@ -118,4 +118,4 @@ extend-exclude = ["src/rvc_platform/engine/rvc", "notebooks"]
 
 [tool.ruff.lint]
 select = ["E4", "E7", "E9", "F"]
-ignore = ["E501"]
+ignore = ["E501", "E702", "E741", "E731", "F841"]

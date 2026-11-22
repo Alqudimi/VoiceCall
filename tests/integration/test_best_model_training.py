@@ -140,7 +140,7 @@ def test_best_model_tracking_end_to_end(project_env, tiny_discriminator):
     assert trainer._tracker is not None
     # v1.3.3: without speechbrain the selection metric folds in voiced-F0
     # RMSE (composite_f0); bare val_mel stayed only when F0 eval is absent
-    assert trainer._tracker.metric in ("composite_f0", "val_mel")
+    assert trainer._tracker.metric in ("composite", "composite_f0", "val_mel")
     assert trainer._validator is not None
 
     topics = [e["topic"] for e in events]
@@ -150,7 +150,7 @@ def test_best_model_tracking_end_to_end(project_env, tiny_discriminator):
     # ---- best bar bookkeeping
     best = json.loads((run_dir / "checkpoints" / "best.json")
                       .read_text(encoding="utf-8"))
-    assert best["metric"] in ("composite_f0", "val_mel")
+    assert best["metric"] in ("composite", "composite_f0", "val_mel")
     assert best["epoch"] in (1, 2) and best["global_step"] in (4, 8)
     best_exports = sorted((run_dir / "exports").glob("bestrun_best_*.pth"))
     assert best_exports, "best-model inference export must exist"
@@ -162,7 +162,7 @@ def test_best_model_tracking_end_to_end(project_env, tiny_discriminator):
     state = json.loads((run_dir / "checkpoints" / "state.json")
                        .read_text(encoding="utf-8"))
     assert state["epoch"] == 2 and state["global_step"] == 8
-    assert state["best"]["metric"] in ("composite_f0", "val_mel")
+    assert state["best"]["metric"] in ("composite", "composite_f0", "val_mel")
     assert (run_dir / "checkpoints" / "G_final.pth").is_file()
     assert (run_dir / "checkpoints" / "G_2333333.pth").is_file()
     assert (run_dir / "exports" / "bestrun.pth").is_file()

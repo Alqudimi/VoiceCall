@@ -24,12 +24,16 @@ COLAB_LOCAL_WORKSPACE="${COLAB_LOCAL_WORKSPACE:-1}"
 
 # ------------------------------------------------------------- environment --
 log "detecting execution environment"
-if [[ -n "${COLAB_GPU:-}" || -d /usr/local/lib/python3.*/dist-packages/google.colab  || -d /content ]]; then
+if [[ -n "${COLAB_GPU:-}" || -d /content ]]; then
   ok "Google Colab detected"
 else
   log "not a Colab VM — continuing anyway (generic Linux path)"
 fi
-nvidia-smi -L 2>/dev/null && ok "GPU available" || log "no GPU (CPU mode only)"
+if nvidia-smi -L >/dev/null 2>&1; then
+  ok "GPU available"
+else
+  log "no GPU (CPU mode only)"
+fi
 python3 - <<'EOF' 2>/dev/null || true
 import torch
 print(f"[colab] torch={torch.__version__} cuda={torch.cuda.is_available()}")

@@ -7,7 +7,6 @@ uniform error envelope, and every endpoint's success + failure paths.
 from __future__ import annotations
 
 import io
-import json
 import logging
 from pathlib import Path
 

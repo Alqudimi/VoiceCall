@@ -19,6 +19,7 @@ ok()   { printf '\033[1;32m[ok]\033[0m %s\n' "$*"; }
 
 # ---------------------------------------------------------------- system ----
 log "detecting system"
+# shellcheck source=/dev/null
 . /etc/os-release 2>/dev/null || { warn "/etc/os-release missing — not Ubuntu?"; }
 log "OS: ${PRETTY_NAME:-unknown} | arch: $(uname -m)"
 # enforce a supported Ubuntu base (20.04+) unless --any-ubuntu is passed

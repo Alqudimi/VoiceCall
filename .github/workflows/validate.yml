@@ -156,7 +156,9 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install actionlint (official installer script)
-        run: bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
+        run: |
+          bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
+          sudo install ./actionlint /usr/local/bin/
 
       - name: Run actionlint on .github/workflows
         run: actionlint -color

@@ -54,7 +54,7 @@ class TrainingRunConfig(BaseModel):
     c_stft: float = Field(default=2.0, ge=0.0)  # multi-resolution STFT loss weight (0 = upstream objective)
     use_msd: bool = True                        # extra multi-scale (raw) discriminator scales 2/4 (HiFi-GAN MSD)
     spk_weight: float = Field(default=1.0, ge=0.0)  # speaker-similarity weight in the composite best-model metric
-    early_stop_patience: int = Field(default=0, ge=0, le=10_000)  # epochs without a new best before cooperative stop (0 = off by default)
+    early_stop_patience: int = Field(default=30, ge=0, le=10_000)  # epochs without a new best before cooperative stop (0 = off)
     f0_eval: bool = True                         # F0-RMSE diagnostic in validation (needs rmvpe asset)
     # ---- Phase-2 researched quality levers (see UPGRADE_REPORT_AR.md §2.8+) ---
     augment: bool = Field(default=False)        # online waveform augmentation (noise/gain/dropout; light recipe)
@@ -280,6 +280,11 @@ def load_template(sample_rate: str, version: str = "v2") -> dict:
         raise ConfigurationError(f"unknown sample rate template: {sample_rate}")
     if ver not in ("v1", "v2"):
         raise ConfigurationError(f"unknown template version: {version}")
+    if ver == "v2" and sr == "40k":
+        raise ConfigurationError(
+            "40k is a v1-only sample rate officially (configs/v2 has 32k/48k "
+            "only); use v1 with 40k, or v2 with 32k/48k",
+        )
     candidates = [
         get_paths().root / "configs" / "training" / f"v2_{sr}.json",
         Path(__file__).resolve().parent / "templates" / f"v2_{sr}.json",

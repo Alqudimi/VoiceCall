@@ -8,16 +8,12 @@ run-config fields validation.
 """
 from __future__ import annotations
 
-import math
-from pathlib import Path
 
 import numpy as np
 import pytest
 import torch
-from torch import nn
 
 from rvc_platform.training.augment import (
-    DEFAULTS,
     WaveformAugmenter,
     build_augmenter,
 )

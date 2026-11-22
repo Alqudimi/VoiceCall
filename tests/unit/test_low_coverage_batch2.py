@@ -172,7 +172,6 @@ def _hparams(sr=40_000):
 
 
 def _write_chunk(d: Path, name: str, sr: int, seconds: float = 1.0):
-    import torch
 
     wav = (np.random.default_rng(7).standard_normal(int(sr * seconds))
            * 0.2).astype(np.float32)

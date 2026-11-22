@@ -1,8 +1,6 @@
 """Unit tests — batch 5 (final): system_service + tunnel_service coverage."""
 from __future__ import annotations
 
-from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 

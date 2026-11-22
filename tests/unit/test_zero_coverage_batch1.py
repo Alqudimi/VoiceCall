@@ -21,7 +21,6 @@ import torch
 # training/soup.py
 # --------------------------------------------------------------------------- #
 from rvc_platform.training.soup import (
-    G_STEP_RE,
     _softmax_mwa,
     _score_from_payload,
     _step_key,
@@ -249,7 +248,8 @@ class TestRmvpe:
     def test_is_half_string_coercion(self, rmvpe_instance):
         # constructor accepts "false"/"true" strings (upstream behaviour)
         from rvc_platform.engine.rvc.rmvpe import E2E, RMVPE
-        import tempfile, os
+        import tempfile
+        import os
 
         model = E2E(4, 1, (2, 2))
         fd, path = tempfile.mkstemp(suffix=".pt")

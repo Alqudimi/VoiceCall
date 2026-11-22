@@ -134,7 +134,7 @@ def _probe_gpu_smi() -> tuple[bool, str | None, list[GPUInfo]]:
 
 
 def detect_system() -> SystemProfile:
-    is_colab = bool(os.environ.get("COLAB_GPU")) or Path("/usr/lib/python3/dist-packages/google").is_dir() or "google.colab" in sys_modules()
+    is_colab = bool(os.environ.get("COLAB_GPU")) or "google.colab" in sys_modules()
     is_notebook = "ipykernel" in sys_modules()
     drive_path = Path("/content/drive/MyDrive")
     drive_mounted = drive_path.is_dir() and any(drive_path.iterdir())

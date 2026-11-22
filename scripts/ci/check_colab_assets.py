@@ -74,8 +74,21 @@ def repo_relative_refs(text: str) -> list[str]:
     return sorted(set(re.findall(repo_file_pattern, without_urls)))
 
 
+def resolve_ref(ref: str) -> Path:
+    p = root / ref
+    if p.is_file():
+        return p
+    parts = Path(ref).parts
+    for i, part in enumerate(parts):
+        if part in ("scripts", "src", "configs", "notebooks"):
+            cand = root / Path(*parts[i:])
+            if cand.is_file():
+                return cand
+    return p
+
+
 for ref in repo_relative_refs(nb_src):
-    if not (root / ref).is_file():
+    if not resolve_ref(ref).is_file():
         failures.append(f"notebook references a file that is missing in the repo: {ref}")
 
 # the notebook must drive the OFFICIAL installer (not ad-hoc commands)
@@ -116,7 +129,7 @@ for owner, repo in clone_urls:
 
 # repo-relative files referenced by the installer must exist
 for ref in repo_relative_refs(installer):
-    if not (root / ref).is_file():
+    if not resolve_ref(ref).is_file():
         failures.append(f"installer references a file that is missing in the repo: {ref}")
 
 # --------------------------------------------------------------- verdict -----

@@ -87,7 +87,6 @@ class TestCompositeF0Metric:
 
     def test_best_model_f0_selection_prefers_pitch_fidelity(self):
         """Two epochs with equal val_mel: the one with better F0 must win."""
-        from rvc_platform.training import best_model as bm
 
         tracker = BestModelTracker(Path("/tmp/x.json"), metric="composite_f0",
                                    mode="min")

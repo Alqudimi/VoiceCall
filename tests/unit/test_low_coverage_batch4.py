@@ -7,7 +7,6 @@ processes/manager.py (41%), utils/environment.py (73%).
 from __future__ import annotations
 
 import time
-from pathlib import Path
 
 import numpy as np
 import pytest
@@ -37,7 +36,7 @@ class TestAuth:
         assert auth.check_header("") is False
 
     def test_guard_http_disabled_and_enabled(self):
-        from fastapi import HTTPException, Request
+        from fastapi import HTTPException
 
         from rvc_platform.infrastructure.security.auth import TokenAuth
 
@@ -175,8 +174,6 @@ class TestConfigLoader:
                                                    monkeypatch):
         from rvc_platform.infrastructure.config.loader import (
             ConfigLoader,
-            get_config,
-            reset_config,
         )
 
         monkeypatch.delenv("RVC_SERVER_PORT", raising=False)

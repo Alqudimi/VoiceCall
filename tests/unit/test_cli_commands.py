@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -276,7 +275,6 @@ class TestTrainCommands:
 
     def test_train_checkpoints_lists(self, project_env, tmp_path,
                                      monkeypatch):
-        from rvc_platform.infrastructure.paths import get_paths
 
         run = _prepared_run(project_env, tmp_path, name="ckpts", sr="32k")
         ck = run / "checkpoints"

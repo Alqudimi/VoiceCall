@@ -86,6 +86,10 @@ class Paths:
     def conversions(self) -> Path:
         return self.data / "conversions"
 
+    @property
+    def static_dir(self) -> Path:
+        return self.root / "src" / "rvc_platform" / "web"
+
     def ensure(self) -> "Paths":
         for d in (
             self.assets, self.models, self.data, self.runs, self.cache,
@@ -121,3 +125,11 @@ def reset_paths() -> None:
     """Reset the singleton — used by tests and by the Colab runner."""
     global _paths
     _paths = None
+
+
+class _PathsProxy:
+    def __getattr__(self, name: str):
+        return getattr(get_paths(), name)
+
+
+paths = _PathsProxy()

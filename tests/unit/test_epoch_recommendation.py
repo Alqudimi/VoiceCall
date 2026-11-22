@@ -8,12 +8,10 @@ SNR (80th vs 10th percentile frame RMS) and derives the range.
 from __future__ import annotations
 
 import numpy as np
-import pytest
 
 from rvc_platform.training.preprocess import (
     DatasetChecker,
     _noise_floor_db,
-    _silence_ratio,
     _snr_db,
     recommend_epochs,
 )

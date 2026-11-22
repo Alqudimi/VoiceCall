@@ -2,7 +2,7 @@
 # The ignore list keeps vendored upstream-derived code (engine/rvc) and the
 # web UI's variable naming from producing false positives.
 [codespell]
-ignore-words-list = ontext,thred,devided,allready,padd,threhold
+ignore-words-list = ontext,thred,devided,allready,padd,threhold,caf,fro,filetest
 skip = ./.git,./.venv,./dist,./site,./uv.lock,./logs,./runs,./models,./assets,./data,./.codespellrc
 count = false
 quiet-level = 2
