@@ -957,12 +957,11 @@ class Trainer:
                     self._optim_d2.zero_grad(set_to_none=True)
                 scaler.scale(loss_disc).backward()
                 scaler.unscale_(optim_d)
-                # upstream "clips" with value None — a no-op whose per-parameter
-                # .item() norm bookkeeping forces a GPU->CPU sync every step;
-                # skipped with identical numerics (no clamping happens anyway).
+                torch.nn.utils.clip_grad_norm_(net_d.parameters(), max_norm=10.0)
                 scaler.step(optim_d)
                 if self._optim_d2 is not None:
                     scaler.unscale_(self._optim_d2)
+                    torch.nn.utils.clip_grad_norm_(self._msd.parameters(), max_norm=10.0)
                     scaler.step(self._optim_d2)
 
                 with torch.autocast("cuda" if self.is_half else "cpu",
@@ -1004,9 +1003,8 @@ class Trainer:
                 # their v2 uses 500 and recommends ~100 for small-batch
                 # starts). 0.0 = disabled = exact upstream behaviour.
                 clip_g = float(hps.train.get("clip_grad_norm", 0.0) or 0.0)
-                if clip_g > 0.0:
-                    torch.nn.utils.clip_grad_norm_(
-                        net_g.parameters(), clip_g)
+                torch.nn.utils.clip_grad_norm_(
+                    net_g.parameters(), clip_g if clip_g > 0.0 else 10.0)
                 scaler.step(optim_g)
                 scaler.update()
                 if self._ema is not None:

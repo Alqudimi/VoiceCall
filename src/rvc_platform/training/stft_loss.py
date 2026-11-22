@@ -43,11 +43,15 @@ def _mag(x: torch.Tensor, n_fft: int, hop: int, win: int) -> torch.Tensor:
 
 
 def spectral_convergence(mag_ref: torch.Tensor, mag_pred: torch.Tensor) -> torch.Tensor:
-    return torch.norm(mag_ref - mag_pred, p="fro") / (torch.norm(mag_ref, p="fro") + _EPS)
+    diff_norm = torch.norm(mag_ref - mag_pred, p="fro")
+    ref_norm = torch.norm(mag_ref, p="fro")
+    return diff_norm / torch.clamp_min(ref_norm, 1e-3)
 
 
 def log_magnitude_l1(mag_ref: torch.Tensor, mag_pred: torch.Tensor) -> torch.Tensor:
-    return torch.mean(torch.abs(torch.log(mag_ref) - torch.log(mag_pred)))
+    log_ref = torch.log(torch.clamp_min(mag_ref, 1e-5))
+    log_pred = torch.log(torch.clamp_min(mag_pred, 1e-5))
+    return torch.mean(torch.abs(log_ref - log_pred))
 
 
 def mr_stft_loss(
@@ -71,4 +75,5 @@ def mr_stft_loss(
         mag_ref = _mag(y_true, n_fft, hop, win)
         mag_pred = _mag(y_pred, n_fft, hop, win)
         total = total + spectral_convergence(mag_ref, mag_pred) + log_magnitude_l1(mag_ref, mag_pred)
-    return total / len(resolutions)
+    res_loss = total / len(resolutions)
+    return torch.clamp(res_loss, max=25.0)

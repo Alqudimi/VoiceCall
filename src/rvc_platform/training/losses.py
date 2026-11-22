@@ -51,7 +51,7 @@ def generator_loss(disc_outputs):
     return loss, gen_losses
 
 
-def kl_loss(z_p, logs_q, m_p, logs_p, z_mask):
+def kl_loss(z_p, logs_q, m_p, logs_p, z_mask, free_bits: float = 0.0):
     """
     z_p, logs_q: [b, h, t_t]
     m_p, logs_p: [b, h, t_t]
@@ -59,11 +59,16 @@ def kl_loss(z_p, logs_q, m_p, logs_p, z_mask):
     z_p = z_p.float()
     logs_q = logs_q.float()
     m_p = m_p.float()
-    logs_p = logs_p.float()
+    # Clamp logs_p to prevent numerical divergence / exp(-2*logs_p) explosion
+    logs_p = torch.clamp(logs_p.float(), min=-6.0, max=4.0)
     z_mask = z_mask.float()
 
     kl = logs_p - logs_q - 0.5
     kl += 0.5 * ((z_p - m_p) ** 2) * torch.exp(-2.0 * logs_p)
+    # Numerical protection: clamp individual element loss to prevent destabilizing gradient shocks
+    kl = torch.clamp(kl, min=0.0, max=10.0)
+    if free_bits > 0.0:
+        kl = torch.clamp(kl - free_bits, min=0.0)
     kl = torch.sum(kl * z_mask)
-    l_kl = kl / torch.sum(z_mask)
+    l_kl = kl / torch.clamp(torch.sum(z_mask), min=1.0)
     return l_kl
