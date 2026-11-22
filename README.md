@@ -286,6 +286,20 @@ Windows/Colab حيث لا يوجد make. المجموعات: `install`, `env`, `
 
 **ما تبقّى دون 100% (موثّق):** trainer.py الداخلي (650 سطراً — يحتاج حلقة تدريب حقيقية؛ يغطيه test_trainer_smoke وظيفياً)، cuda_graph (يتطلب GPU فيزيائي لالتقاط CUDA Graph)، فروع ONNX/DirectML في rmvpe/fcpe (تتطلب Windows)، colab drive فروع التحميل الحقيقي، وبقية أسطر print/branch الدفاعية في CLI.
 
+## اكتمال ملفات الاختبارات — الجولة الثانية عشرة (107 اختبارات جديدة)
+
+ثلاث دفعات جديدة تُغلق آخر الفجوات القابلة للاختبار في هذا الصندوق:
+
+| الدفعة | الملف | العدد | المحتوى |
+|---|---|---|---|
+| 10 | `test_models_batch10.py` | 37 | كتل VITS كاملة: commons (slice/timing/KL/gumbel/fused)، modules (LayerNorm/ConvReluNorm/DDSConv/WN/ResBlock1+2 مع remove_weight_norm)، attentions (Encoder/Decoder/MHA بالتوقيعات الرسمية)، BestModelTracker (min/max + NaN/فاسد + roundtrip)، derive_validation_split (تثبيت sha256 + إعادة الاشتقاق عند تغيّر المحتوى أو النسبة أو تلف meta)، preprocess heuristics (silence_ratio/noise_floor/md5) |
+| 11 | `test_pipeline_batch11.py` | 36 | checkpointing كاملاً: build_full_payload (نسخ CPU)، write_checkpoint_files + مرايا G/D/D2 latest + ترتيب الكتابة الآمن، save/load_full roundtrip بتطابق بتّي، iteration legacy، state corrupt، list_checkpoints (G/G-final/G-latest + probe fallback)، latest_step (الأعلى/final يفوز عند التساوي/استثناء المرآة)، Slicer (تحقق + قطع كلام/صمت + get_rms)، mel_processing (ضغط/تطبيع roundtrip + spectrogram 513-bin + mel 128)، write_filelist (صيغة upstream + أسطر mute المطلقة + تخطي الناقص + إرث sr) |
+| 12 | `test_infra_batch12.py` | 34 | EventBus (fanout + wildcard + history bounded + مشترك معطوب + singleton)، detect_system (colab/notebook/probes)، colab runner بـDrive محاكى (restore/snapshot مع manifest/status/env/main)، _ffmpeg_load internals (channel_first/format mono-stereo/resampler cache/wav2 m4a/transcode تنظيف الفاشل)، فجوات API الأخيرة (runs listing/logs نصي/events/checkpoints/prepare idle/api/logs/tunnel shape) |
+
+**النتيجة النهائية:** الوحدة **72% → 75%**، المجمّعة (وحدة+تكامل) **81% → 83%** — الجناحان أخضران بالكامل (688+ اختبار وحدة + 15 ملف تكامل).
+
+**ما تبقّى دون 100% (قصور بيئة لا نقص اختبارات):** cuda_graph (يتطلب GPU فيزيائي لالتقاط CUDA Graph)، trainer.py الحلقة الداخلية (650 سطراً؛ يحتاج تدريباً حقيقياً ساعات — يغطيه test_trainer_smoke وظيفياً)، فروع ONNX/DirectML في rmvpe/fcpe (تتطلب Windows/GPU)، worker فروع النشر الفعلية، وأسطر print/branch الدفاعية المتفرقة في CLI والخدمات.
+
 ## ملفات الاختبارات الكاملة بتغطية موسّعة v1.9.2 — الجولة العاشرة
 
 قُيست التغطية الحقيقية أولاً (pytest-cov): وحدة 38% / مجمّعة 61%، ثم كُتبت **5 دفعات جديدة** (147 اختباراً) تغطي كل وحدة كانت بلا اختبارات:
