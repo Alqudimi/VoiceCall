@@ -911,7 +911,7 @@ def model_info(name: str):
 @app.command("inference")
 def inference(
     input: Path = typer.Argument(..., help="audio file"),
-    model: str = typer.Argument(..., help="model name in models/"),
+    model: str = typer.Argument(..., help="model name in models/ or path to .pth"),
     output: Path = typer.Option(None, "--output", "-o"),
     pitch: int = typer.Option(0, "--pitch", "-t"),
     f0_method: str = typer.Option("rmvpe", "--f0-method"),
@@ -921,6 +921,7 @@ def inference(
     protect: float = typer.Option(0.33, "--protect"),
     output_sr: Optional[int] = typer.Option(None, "--output-sr"),
     denoise: bool = typer.Option(False, "--denoise"),
+    index: Optional[Path] = typer.Option(None, "--index", "-i", help="path to retrieval .index file"),
 ):
     """Convert one audio file to the target voice (Audio-to-Audio)."""
     from rvc_platform.core.entities import ConversionSettings
@@ -929,18 +930,29 @@ def inference(
     from rvc_platform.engine.rvc.inference import RVCInferenceEngine
     from rvc_platform.utils.device import select_device
 
-    repo = ModelRepository(get_paths().models)
-    info = repo.get(model)
+    model_p = Path(model)
+    if model_p.is_file():
+        model_path = model_p
+        index_path = index
+        if not index_path:
+            cand = model_p.parent / f"{model_p.stem}.index"
+            if cand.is_file():
+                index_path = cand
+    else:
+        repo = ModelRepository(get_paths().models)
+        info = repo.get(model)
+        model_path = info.path
+        index_path = index or (info.index_path if info.index_path else None)
+
     profile = select_device(None)
     engine = RVCInferenceEngine(profile, AudioProcessingEngine())
-    index_path = info.index_path if info.index_path else None
-    engine.load_model(info.path, index_path)
+    engine.load_model(model_path, index_path)
     settings = ConversionSettings(
         pitch_shift=pitch, f0_method=f0_method, index_rate=index_rate,
         filter_radius=filter_radius, rms_mix_rate=rms_mix_rate, protect=protect,
         output_sample_rate=output_sr, denoise=denoise,
     )
-    out = output or get_paths().data / "conversions" / f"{Path(input).stem}_{model}.wav"
+    out = output or get_paths().data / "conversions" / f"{Path(input).stem}_{model_p.stem}.wav"
     result = engine.convert_file(Path(input), Path(out), settings)
     console.print(f"[green]converted -> {result.output_path}[/green]")
     console.print_json(json.dumps(result.speed_report))
