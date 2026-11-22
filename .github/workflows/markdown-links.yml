@@ -32,7 +32,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Run lychee on all markdown files
-        uses: lycheeverse/lychee-action@v1
+        uses: lycheeverse/lychee-action@v2
         with:
           args: >-
             --verbose --no-progress --max-retries 2 --timeout 20
