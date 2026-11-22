@@ -140,7 +140,7 @@ def main(argv: list[str] | None = None) -> int:
     layout = config.ensure_layout()
     hps = config.to_hparams()
     hps.pretrainG, hps.pretrainD = ("", "")
-    if config.preload_base_models and not clean_start_requested:
+    if config.preload_base_models:
         g, d = config.resolve_pretrained()
         if g.is_file() and d.is_file():
             hps.pretrainG, hps.pretrainD = str(g), str(d)

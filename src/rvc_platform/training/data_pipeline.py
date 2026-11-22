@@ -93,6 +93,7 @@ class DataPipeline:
         path = feature_extract.write_filelist(
             self.layout["gt_wavs"].parent, self.config.version,
             self.config.f0, self.config.speaker_id,
+            sample_rate_hz=self.config.sr_int,
         )
         report = {"filelist": str(path)}
         # Phase-2 researched lever: drop mostly-silent chunks from the

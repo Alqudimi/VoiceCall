@@ -42,3 +42,4 @@ configs/user.yaml
 
 # --- local lint caches ---
 .ruff_cache/
+colab_wire_env.py

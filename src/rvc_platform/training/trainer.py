@@ -332,23 +332,17 @@ class Trainer:
     def _maybe_compile(self, net_g, net_d):
         """Optional torch.compile for both networks.
 
-        Default "auto": enabled on CUDA, disabled elsewhere. Set
-        RVC_TORCH_COMPILE=0 to force off, =1 to force on. Two layers of
-        protection: dynamo's suppress_errors catches TRACE-time failures
-        (silent eager fallback), and the _CompileGuard wrapper catches
-        RUNTIME kernel defects (first failure permanently swaps that
-        network to eager) — a compile bug can never crash a training run.
+        Default "0" (disabled): Set RVC_TORCH_COMPILE=1 to force on.
+        Audio training involves dynamic sequence lengths per bucket, which causes
+        PyTorch Inductor / Triton to recompile graphs repeatedly, freezing training
+        and pinning the CPU on SymPy/LLVM codegen. Eager mode on CUDA uses
+        cuDNN pre-compiled kernels directly with 0 compilation latency.
         Checkpoints keep byte-identical keys because state dicts are always
         read from the unwrapped module (see _unwrap / _checkpoint).
         """
-        choice = os.environ.get("RVC_TORCH_COMPILE", "auto").strip().lower()
-        if choice in ("0", "off", "false", "no", "none"):
-            return net_g, net_d
-        if choice in ("1", "on", "true", "yes"):
-            enabled = True
-        else:  # auto
-            enabled = self.device.startswith("cuda")
-        if not enabled:
+        choice = os.environ.get("RVC_TORCH_COMPILE", "0").strip().lower()
+        if choice not in ("1", "on", "true", "yes"):
+            logger.info("torch.compile disabled (eager execution mode active for maximum audio training throughput)")
             return net_g, net_d
         try:
             import torch._dynamo

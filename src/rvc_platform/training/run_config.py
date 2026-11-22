@@ -35,8 +35,8 @@ class TrainingRunConfig(BaseModel):
 
     experiment_name: str = Field(pattern=r"^[A-Za-z0-9_\-]{1,64}$")
     dataset_path: Path
-    sample_rate: str = "40k"                     # 32k | 40k | 48k (40k = v1-only officially)
-    version: str = "v1"                          # 40k default pairs with its official v1 template
+    sample_rate: str = "48k"                     # 32k | 40k | 48k (48k default for highest acoustic fidelity)
+    version: str = "v2"                          # v2 default for state-of-the-art voice conversion
     f0: bool = True
     f0_method: str = "rmvpe"
     epochs: int = Field(default=300, ge=1, le=10_000)
@@ -54,7 +54,7 @@ class TrainingRunConfig(BaseModel):
     c_stft: float = Field(default=2.0, ge=0.0)  # multi-resolution STFT loss weight (0 = upstream objective)
     use_msd: bool = True                        # extra multi-scale (raw) discriminator scales 2/4 (HiFi-GAN MSD)
     spk_weight: float = Field(default=1.0, ge=0.0)  # speaker-similarity weight in the composite best-model metric
-    early_stop_patience: int = Field(default=30, ge=0, le=10_000)  # epochs without a new best before cooperative stop (0 = off)
+    early_stop_patience: int = Field(default=0, ge=0, le=10_000)  # epochs without a new best before cooperative stop (0 = off by default)
     f0_eval: bool = True                         # F0-RMSE diagnostic in validation (needs rmvpe asset)
     # ---- Phase-2 researched quality levers (see UPGRADE_REPORT_AR.md §2.8+) ---
     augment: bool = Field(default=False)        # online waveform augmentation (noise/gain/dropout; light recipe)
@@ -107,6 +107,14 @@ class TrainingRunConfig(BaseModel):
         v = v.lower().strip()
         if v not in SR_ALIASES:
             raise ValueError(f"sample_rate must be one of {list(SR_ALIASES)}")
+        return v
+
+    @field_validator("version")
+    @classmethod
+    def _ver(cls, v: str) -> str:
+        v = v.lower().strip()
+        if v not in ("v1", "v2"):
+            raise ValueError("version must be 'v1' or 'v2'")
         return v
 
     @field_validator("f0_method")
@@ -164,6 +172,10 @@ class TrainingRunConfig(BaseModel):
         if self.f0_method and not self.f0:
             raise ConfigurationError("f0 extraction settings contradict f0 model flag")
         root = get_paths().pretrained
+        if self.version == "v1":
+            v1_root = get_paths().assets / "pretrained"
+            if v1_root.is_dir():
+                root = v1_root
         if self.pretrained_g and self.pretrained_d:
             return Path(self.pretrained_g), Path(self.pretrained_d)
         if self.pretrained_g or self.pretrained_d:
@@ -188,6 +200,7 @@ class TrainingRunConfig(BaseModel):
             train["segment_size"] = self.segment
         if self.epochs:
             train["epochs"] = self.epochs
+        train["log_interval"] = 10
         # researched quality levers -> train hyper-parameters (0/False = exact upstream behaviour)
         train["ema_decay"] = self.ema_decay
         train["c_stft"] = self.c_stft
@@ -267,18 +280,11 @@ def load_template(sample_rate: str, version: str = "v2") -> dict:
         raise ConfigurationError(f"unknown sample rate template: {sample_rate}")
     if ver not in ("v1", "v2"):
         raise ConfigurationError(f"unknown template version: {version}")
-    if ver == "v2" and sr == "40k":
-        # official v2 ships configs only for 32k/48k (configs/v2/ has no
-        # 40k.json) — silently substituting the v1 generator shape would
-        # produce checkpoints incompatible with official v2 tooling.
-        raise ConfigurationError(
-            "40k is a v1-only sample rate officially (configs/v2 has 32k/48k "
-            "only); use v1 with 40k, or v2 with 32k/48k",
-        )
     candidates = [
+        get_paths().root / "configs" / "training" / f"v2_{sr}.json",
+        Path(__file__).resolve().parent / "templates" / f"v2_{sr}.json",
         get_paths().root / "configs" / "training" / f"{sr}.json",
         Path(__file__).resolve().parent / "templates" / f"{sr}.json",
-        Path(__file__).resolve().parent / "templates" / f"{ver}_{sr}.json",
     ]
     # v2 keeps the plain name for backwards compatibility with existing
     # project overrides; v1 resolves to its versioned template.

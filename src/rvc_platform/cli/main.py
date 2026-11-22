@@ -320,7 +320,8 @@ def prepare_audio_dataset(
 def preprocess(
     dataset: Path,
     experiment: str,
-    sr: str = typer.Option("40k", "--sr"),
+    sr: str = typer.Option("48k", "--sr"),
+    version: str = typer.Option("v2", "--version", "-v", help="model version: v2 (default) or v1"),
     denoise: bool = typer.Option(False, "--denoise/--no-denoise",
                                   help="best-effort spectral-gate denoise before slicing (noisereduce)"),
     loudness: bool = typer.Option(True, "--loudness/--no-loudness",
@@ -329,17 +330,23 @@ def preprocess(
     from rvc_platform.training.run_config import TrainingRunConfig
 
     cfg = TrainingRunConfig(experiment_name=experiment, dataset_path=dataset,
-                            sample_rate=sr, denoise=denoise, loudness=loudness)
+                            sample_rate=sr, version=version, denoise=denoise, loudness=loudness)
     DataPipelineRunner(cfg).stage("preprocess")
 
 
 @app.command("extract-features")
-def extract_features(experiment: str, method: str = typer.Option("rmvpe", "--f0-method", "--method")):
+def extract_features(
+    experiment: str,
+    method: str = typer.Option("rmvpe", "--f0-method", "--method"),
+    version: Optional[str] = typer.Option(None, "--version", "-v", help="model version: v2 (default) or v1"),
+):
     """Extract F0 (+HuBERT features) for an existing run with the chosen method."""
     from rvc_platform.training.run_config import TrainingRunConfig
 
     cfg = TrainingRunConfig.load(get_paths().runs / experiment)
     cfg.f0_method = method
+    if version:
+        cfg.version = version
     DataPipelineRunner(cfg).stage("features", "f0")
 
 
@@ -347,7 +354,8 @@ def extract_features(experiment: str, method: str = typer.Option("rmvpe", "--f0-
 def prepare_dataset(
     dataset: Path,
     experiment: str,
-    sr: str = typer.Option("40k", "--sr"),
+    sr: str = typer.Option("48k", "--sr"),
+    version: str = typer.Option("v2", "--version", "-v", help="model version: v2 (default, 768-dim) or v1 (256-dim)"),
     method: str = typer.Option("rmvpe", "--f0-method", "--method"),
     denoise: bool = typer.Option(False, "--denoise/--no-denoise",
                                   help="best-effort spectral-gate denoise before slicing (noisereduce)"),
@@ -363,7 +371,7 @@ def prepare_dataset(
     from rvc_platform.training.run_config import TrainingRunConfig
 
     cfg = TrainingRunConfig(experiment_name=experiment, dataset_path=dataset,
-                            sample_rate=sr, f0_method=method,
+                            sample_rate=sr, version=version, f0_method=method,
                             denoise=denoise, loudness=loudness,
                             speech_filter_ratio=max(0.0, min(1.0, speech_filter)))
     DataPipelineRunner(cfg).all()
@@ -421,6 +429,10 @@ def train_start(
         None, "--sr",
         help="sample rate for a NEW run; on a prepared run it must match the "
              "prepared value (locked — re-prepare to change)",
+    ),
+    version: Optional[str] = typer.Option(
+        None, "--version", "-v",
+        help="model version: v2 (default, 768-dim) or v1 (256-dim)",
     ),
     epochs: Optional[int] = typer.Option(
         None, "--epochs",
@@ -544,7 +556,7 @@ def train_start(
         else:
             cfg = TrainingRunConfig(
                 experiment_name=experiment, dataset_path=dataset,
-                sample_rate=sr or "40k",
+                sample_rate=sr or "48k", version=version or "v2",
                 epochs=epochs or 300, batch_size=batch_size or 8,
                 learning_rate=lr or 1e-4, save_every_epoch=save_every or 10,
                 gpu=gpu, f0_method=f0_method or "rmvpe",
@@ -559,6 +571,10 @@ def train_start(
         # v1.3.1: apply the training knobs onto an existing run WITHOUT
         # --dataset — the prepared pipeline (chunks/F0/features/filelist)
         # lives inside runs/<exp>/ and is never re-executed by train start.
+        if version is not None and version != cfg.version:
+            raise typer.BadParameter(
+                f"--version {version} does not match the prepared run ({cfg.version}); "
+                "re-run prepare-dataset (and expect a new run) to change it")
         if sr is not None and sr != cfg.sample_rate:
             raise typer.BadParameter(
                 f"--sr {sr} does not match the prepared run ({cfg.sample_rate}); "

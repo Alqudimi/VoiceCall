@@ -14,8 +14,8 @@ dependencies = [
     "scipy>=1.13.1,<2",
     "librosa>=0.10.2,<0.11",
     "soundfile>=0.12.1,<1",
-    "torch>=2.4.1,<2.8",
-    "torchaudio>=2.4.1,<2.8",
+    "torch==2.7.1",
+    "torchaudio==2.7.1",
     # ---- model runtime ----
     "transformers>=4.49.0,<4.50",       # HuBERT / ContentVec content encoder
     "faiss-cpu>=1.8.0,<2",              # retrieval index
@@ -73,13 +73,17 @@ packages = ["src/rvc_platform"]
 package = true
 
 [[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+
+[[tool.uv.index]]
 name = "pytorch-cpu"
 url = "https://download.pytorch.org/whl/cpu"
 explicit = true
 
 [tool.uv.sources]
-torch = [{ index = "pytorch-cpu" }]
-torchaudio = [{ index = "pytorch-cpu" }]
+torch = { index = "pytorch-cu128" }
+torchaudio = { index = "pytorch-cu128" }
 
 [dependency-groups]
 dev = [

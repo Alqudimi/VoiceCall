@@ -60,7 +60,7 @@ class SpeakerEmbedder:
         """wav16k: (B, T) float tensor at 16 kHz -> L2-normalised (B, D)."""
         if wav16k.dim() == 3:
             wav16k = wav16k.squeeze(1)
-        feats = self.model.encode_batch(wavs=wav16k.float().unsqueeze(1))
+        feats = self.model.encode_batch(wavs=wav16k.float())
         emb = feats.squeeze(1) if feats.dim() == 3 else feats
         emb = torch.nn.functional.normalize(emb.float(), p=2, dim=-1)
         return emb
