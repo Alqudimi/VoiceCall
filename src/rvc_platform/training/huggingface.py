@@ -44,6 +44,19 @@ RETRY_BACKOFF_SECONDS = 5.0          # 5s, 10s, 20s ...
 def _resolve_token(token: str | None = None) -> str:
     token = token or os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_HUB_TOKEN")
     if not token:
+        try:
+            from huggingface_hub import get_token
+            token = get_token()
+        except Exception:
+            token = None
+    if not token:
+        for p in [Path.home() / ".cache/huggingface/token", Path("/root/.cache/huggingface/token")]:
+            if p.is_file():
+                t = p.read_text().strip()
+                if t:
+                    token = t
+                    break
+    if not token:
         raise RuntimeError("Set HF_TOKEN (or HUGGINGFACE_HUB_TOKEN) on the training host")
     return token
 

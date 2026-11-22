@@ -1283,7 +1283,7 @@ wheels = [
 
 [[package]]
 name = "rvc-platform"
-version = "1.9.4"
+version = "1.9.5"
 source = { editable = "." }
 dependencies = [
     { name = "faiss-cpu" },
