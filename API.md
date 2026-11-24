@@ -389,7 +389,9 @@ curl -s -X POST $API/api/training/export -H "Authorization: Bearer $TOKEN" \
 
 - المصادقة: إن فُعّلت. الاستجابة: `available` (نموذج f0 محمّل؟), `block_ms`,
   `crossfade_ms`, `lookback_ms`, `silence_threshold_db`, `f0_method`, `loaded_model`,
-  `note` (وصف البروتوكول).
+  `default_model` (النموذج الذي تُرشّحه الواجهة للتحديد المسبق — نموذج HuggingFace
+  الافتراضي عند وجوده), `recommended` (الإعدادات الموصى بها للنموذج الافتراضي:
+  index_rate/f0_method/rms_mix_rate/pitch_shift), `note`.
 
 ```bash
 curl -s $API/api/realtime/info
@@ -421,7 +423,54 @@ uv run rvc-platform realtime-benchmark iraqi_voice --blocks 40 --block-ms 160
 
 ---
 
-## 7. النفق — `/api/tunnel*`
+## 7. نموذج HuggingFace الافتراضي — `/api/models/hf*`
+
+نموذج الصوت العراقي (`eng7mi/Iraqi-v3` افتراضيًا) — الرابط والتوكن يُجلبان من
+متغيرات البيئة (`RVC_HF_MODEL_URL`, `RVC_HF_TOKEN`, `RVC_HF_REPO` — انظر
+CONFIGURATION.md §10). التوكن نفسه لا يُعاد أبدًا في الاستجابات — فقط `token_configured`.
+
+### GET /api/models/hf/status — الحالة والتقدم
+
+```bash
+curl -s $API/api/models/hf/status
+```
+
+الاستجابة: `repo_id`, `local_name`, `model_url`, `index_url`, `token_configured`,
+`auto_download`, `auto_load`, `model {present, path, size_mb}`, `index {…}`،
+`download {state: idle|downloading|ready|error, error, files {model, index:
+{label, url, status, received_bytes, total_bytes, error}}}`،
+`recommended {index_rate, f0_method, rms_mix_rate, pitch_shift}`،
+`default_model`, `engine_loaded`, `is_engine_default`.
+
+### POST /api/models/hf/download — بدء التنزيل بالخلفية
+
+```bash
+curl -s -X POST $API/api/models/hf/download -H "Authorization: Bearer $TOKEN"
+# {"started": true, ...} — تابع التقدم عبر GET hf/status
+```
+
+- أخطاء: `202` إذا كان التنزيل يعمل بالفعل أو التوكن غير مضبوط (رسالة عربية
+  تشرح ضبط `RVC_HF_TOKEN`).
+- عند اكتمال التنزيل يُحمّل النموذج تلقائيًا في المحرك (إن كان `auto_load`).
+
+### POST /api/models/hf/load — تحميله في المحرك كافتراضي
+
+```bash
+curl -s -X POST $API/api/models/hf/load -H "Authorization: Bearer $TOKEN"
+```
+
+- أخطاء: `409` إذا لم يكن النموذج منزّلًا بعد.
+
+### GET /api/models/default — النموذج الذي تحدده الواجهة مسبقًا
+
+```bash
+curl -s $API/api/models/default
+# {"name": "iraqi_voice", "source": "huggingface", "recommended": {...}}
+```
+
+---
+
+## 8. النفق — `/api/tunnel*`
 
 ### POST /api/tunnel/start
 
@@ -459,7 +508,7 @@ curl -s "$API/api/tunnel/logs?lines=40"
 
 ---
 
-## 8. صفحة الويب والملفات الثابتة
+## 9. صفحة الويب والملفات الثابتة
 
 | المسار | الوظيفة |
 |---|---|
@@ -471,7 +520,7 @@ curl -s "$API/api/tunnel/logs?lines=40"
 
 ---
 
-## 9. سيناريو كامل بالـcurl (من الصفر إلى تحويل)
+## 10. سيناريو كامل بالـcurl (من الصفر إلى تحويل)
 
 ```bash
 export API=http://127.0.0.1:8320

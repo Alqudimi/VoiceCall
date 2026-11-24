@@ -16,6 +16,7 @@ from fastapi.staticfiles import StaticFiles
 from rvc_platform import __version__
 from rvc_platform.api.routes import conversion, models, realtime, system, training, tunnel
 from rvc_platform.application.conversion_service import ConversionService
+from rvc_platform.application.hf_model_service import HuggingFaceModelService
 from rvc_platform.application.model_service import ModelService
 from rvc_platform.application.realtime_service import RealtimeService
 from rvc_platform.application.system_service import SystemService
@@ -100,6 +101,9 @@ def create_app() -> FastAPI:
     repository = ModelRepository(paths.models)
     model_service = ModelService(repository, inference_engine,
                                  max_upload_mb=config.server.max_upload_mb)
+    # env-driven HuggingFace default voice model (eng7mi/Iraqi-v3 by default):
+    # downloads on first boot and becomes the engine's default loaded model.
+    hf_model_service = HuggingFaceModelService(model_service, repository)
     conversion_service = ConversionService(
         inference_engine, audio_engine, config.conversion,
         engine_cfg=config.engine,               # f0_method default knob
@@ -151,6 +155,7 @@ def create_app() -> FastAPI:
         "engine": inference_engine,
         "audio": audio_engine,
         "models": model_service,
+        "huggingface": hf_model_service,
         "conversion": conversion_service,
         "training": training_service,
         "realtime": realtime_service,
@@ -201,6 +206,15 @@ def create_app() -> FastAPI:
             # request on the same connection dies with "Response content
             # longer than Content-Length").
             return Response(status_code=204)
+
+    @app.on_event("startup")
+    async def on_startup() -> None:
+        # default voice model: download-if-missing + auto-load into the engine
+        # (all failures degrade to a status the UI renders — never crash boot)
+        try:
+            hf_model_service.ensure_default()
+        except Exception:
+            logger.exception("HuggingFace default-model bootstrap failed")
 
     @app.on_event("shutdown")
     async def on_shutdown() -> None:

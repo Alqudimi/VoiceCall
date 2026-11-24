@@ -60,6 +60,21 @@ downloads:
   chunk_mb: 8
   connect_timeout_s: 30
 
+# نموذج الصوت الافتراضي من HuggingFace — كل القيم قابلة للحقن من
+# متغيرات البيئة (RVC_HF_*‎) أو ملف .env، ولا يُخزن أي توكن داخل المستودع.
+huggingface:
+  repo_id: "eng7mi/Iraqi-v3"        # RVC_HF_REPO
+  token: ""                          # RVC_HF_TOKEN (أو HF_TOKEN)
+  model_url: ""                      # RVC_HF_MODEL_URL — يُبنى تلقائيًا إن تُرك فارغًا
+  model_file: "best/model.pth"       # RVC_HF_MODEL_FILE
+  index_file: "best/index.index"     # RVC_HF_INDEX_FILE
+  local_name: "iraqi_voice"          # RVC_HF_LOCAL_NAME — الاسم داخل models/
+  recommended_index_rate: 0.88       # إعداد النموذج الموصى به (بطاقة النموذج)
+  recommended_f0_method: rmvpe
+  recommended_rms_mix_rate: 0.25
+  auto_download: true                # RVC_HF_AUTO_DOWNLOAD — تنزيل عند الإقلاع إن كان مفقودًا
+  auto_load: true                    # RVC_HF_AUTO_LOAD — تحميله في المحرك كافتراضي
+
 logging:
   level: INFO
   max_bytes: 10485760

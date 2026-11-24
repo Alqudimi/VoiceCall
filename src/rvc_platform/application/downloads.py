@@ -21,13 +21,16 @@ ProgressFn = Callable[[str, float], None]
 
 
 def _download_one(url: str, dest: Path, chunk_mb: int, timeout: float,
-                  progress: ProgressFn | None = None) -> None:
+                  progress: ProgressFn | None = None,
+                  headers: dict[str, str] | None = None) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_suffix(dest.suffix + ".part")
     offset = tmp.stat().st_size if tmp.exists() else 0
-    headers = {"Range": f"bytes={offset}-"} if offset else {}
-    with httpx.Client(follow_redirects=True, timeout=timeout) as client:
-        with client.stream("GET", url, headers=headers) as resp:
+    headers = dict(headers or {})
+    if offset:
+        headers["Range"] = f"bytes={offset}-"
+    with httpx.Client(follow_redirects=True, timeout=timeout, headers=headers) as client:
+        with client.stream("GET", url) as resp:
             if offset and resp.status_code != 206:
                 offset = 0  # server ignored range -> restart
             total = int(resp.headers.get("content-length", 0)) + offset

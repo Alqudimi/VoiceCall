@@ -1,11 +1,19 @@
 /* ============================================================
    realtime.js — البث اللحظي: مايكروفون → AudioWorklet (16kHz int16)
    → WebSocket → خادم RVC → PCM → تشغيل مع مخزن امتصاص تذبذب،
-   مع قياسات زمن الاستجابة (الخادم + العميل) وواجهة تحكم حية.
+   مع قياسات زمن الاستجابة (الخادم + العميل).
+
+   هذه الصفحة تعمل كمكالمة صوتية حيّة: كل ما تقوله في الميكروفون
+   يُحوَّل فورًا بخامة الصوت العراقي ويُبَث عبر مكبر الصوت في نفس اللحظة.
+
+   لوحة "معاملات النبرة والصوت" تضم كل ما يُمرَّر للمحرك:
+   انزياح النغمة، نسبة الفهرس، مزج الشدة، بوابة الصمت، طريقة f0،
+   حجم الكتلة (block_ms)، حجم الخرج، وسماع الدخل — وكلها تُطبَّق
+   لحظيًا أثناء البث دون قطع الجلسة.
    ============================================================ */
 
 import {
-  get, openRealtimeWS, toast, el, clear, icon, clamp, fmtNum, fmtMs, f0MethodSelect,
+  get, post, openRealtimeWS, toast, el, clear, icon, clamp, fmtNum, fmtMs, f0MethodSelect,
 } from "../api.js";
 
 export default { mount };
@@ -15,6 +23,41 @@ const PREQUEUE_BLOCKS = 2;          // jitter absorption: 2 blocks preroll
 const RTT_KEEP = 100;                // keep last 100 client round-trips
 const STATS_EVERY_MS = 2000;
 const PING_EVERY_MS = 5000;
+const PUSH_MIN_MS = 60;              // throttle for live settings frames
+const HF_POLL_MS = 2000;             // HF model download progress poll
+const BLOCK_MS_CHOICES = [60, 80, 100, 128, 160, 200, 250, 320, 400, 500];
+
+/* كل معاملات النبرة القابلة للتعديل لحظيًا (تُرسل عبر إطار settings) */
+const TONE_PARAMS = [
+  {
+    key: "pitch_shift", id: "pitch",
+    label: "انزياح النغمة", latin: "Pitch · semitones",
+    min: -24, max: 24, step: 1, def: 0,
+    fmt: (v) => String(Math.round(v)),
+    hint: "رفع أو خفض طبقة الصوت بأنصاف النغمات. الموجب = صوت أعلى (أنثوي أكثر)، السالب = أعمق. جرّب ±12 لتبديل الانطباع الصوتي.",
+  },
+  {
+    key: "index_rate", id: "index",
+    label: "نسبة الفهرس", latin: "Index Rate",
+    min: 0, max: 1, step: 0.01, def: 0.88,
+    fmt: (v) => Number(v).toFixed(2),
+    hint: "قوة مزج سمات الصوت العراقي من فهرس الاسترجاع. 0.88 هو الموصى به لنموذج iraqi_voice؛ الخفض يجعل الصوت أقرب لصوتك الأصلي.",
+  },
+  {
+    key: "rms_mix_rate", id: "rms",
+    label: "مزج الشدة", latin: "RMS Mix Rate",
+    min: 0, max: 1, step: 0.01, def: 0.25,
+    fmt: (v) => Number(v).toFixed(2),
+    hint: "1 = الحفاظ على شدة صوتك الأصلية (نبرة إيقاعية كما تتكلم)، 0 = اتباع شدة النموذج المستهدفة.",
+  },
+  {
+    key: "silence_threshold_db", id: "gate",
+    label: "بوابة الصمت", latin: "Silence Gate · dB",
+    min: -70, max: -20, step: 1, def: -40,
+    fmt: (v) => `${Math.round(v)} dB`,
+    hint: "المقاطع الأهدأ من هذا المستوى تُتجاهل قبل التحويل — ارفعها لإسكات ضجيج الخلفية، وأنزلها إذا كان كلامك الخافت يُقتطع.",
+  },
+];
 
 /* ------------------------------ mount ------------------------------ */
 
@@ -23,20 +66,26 @@ async function mount(root) {
     phase: "idle", // idle | connecting | streaming | error
     models: [],
     info: null,
+    hf: null,
     blockMs: 160,
     modelSr: null,
     settings: {
       pitch_shift: 0,
-      index_rate: 0.0,
-      rms_mix_rate: 0.0,
+      index_rate: 0.88,
+      rms_mix_rate: 0.25,
       f0_method: "rmvpe",
       silence_threshold_db: -40,
     },
+    // client-side live controls
+    volume: 1.0,          // 0..2 output gain
+    monitor: false,       // hear the raw microphone alongside
     // live session objects
     ws: null,
     stream: null,
     inCtx: null,
     outCtx: null,
+    outGain: null,
+    monGain: null,
     workletNode: null,
     workletUrl: null,
     micSource: null,
@@ -48,15 +97,20 @@ async function mount(root) {
     serverStats: null,
     serverBlocks: 0,
     nextTime: 0,
+    nextTimeMon: 0,
     statsTimer: null,
     pingTimer: null,
+    hfTimer: null,
     lastError: null,
     sessionId: 0,
+    userTouched: false,   // don't override sliders the user already moved
   };
 
   root.replaceChildren(el("div", { class: "stack" }, [
     buildIntroCard(),
+    buildHfCard(),
     buildControlsCard(),
+    buildParamsCard(),
     buildStatusCard(),
     buildMetersCard(),
     buildLatencyCard(),
@@ -66,26 +120,20 @@ async function mount(root) {
     model: root.querySelector("#rt-model"),
     micSelect: root.querySelector("#rt-mic"),
     outSelect: root.querySelector("#rt-out"),
+    blockMs: root.querySelector("#rt-blockms"),
     btnStart: root.querySelector("#rt-start"),
     stateLine: root.querySelector("#rt-state"),
     statusBox: root.querySelector("#rt-status-box"),
     errorBox: root.querySelector("#rt-error"),
-    pitch: root.querySelector("#rt-pitch"),
-    pitchVal: root.querySelector("#rt-pitch-val"),
-    index: root.querySelector("#rt-index"),
-    indexVal: root.querySelector("#rt-index-val"),
-    rms: root.querySelector("#rt-rms"),
-    rmsVal: root.querySelector("#rt-rms-val"),
-    f0: root.querySelector("#rt-f0"),
     infoBox: root.querySelector("#rt-info-box"),
-    meterIn: root.querySelector("#rt-meter-in"),
-    meterOut: root.querySelector("#rt-meter-out"),
-    blocksSent: root.querySelector("#rt-blocks-sent"),
-    blocksRecv: root.querySelector("#rt-blocks-recv"),
-    srvBlocks: root.querySelector("#rt-srv-blocks"),
-    srvTile: root.querySelector("#rt-srv-tiles"),
-    cliTile: root.querySelector("#rt-cli-tiles"),
-    verdict: root.querySelector("#rt-verdict"),
+    hfCard: root.querySelector("#rt-hf-card"),
+    hfBox: root.querySelector("#rt-hf-box"),
+    applied: root.querySelector("#rt-applied"),
+    volume: root.querySelector("#rt-volume"),
+    volumeVal: root.querySelector("#rt-volume-val"),
+    monitor: root.querySelector("#rt-monitor"),
+    f0: root.querySelector("#rt-f0"),
+    pitch: {}, index: {}, rms: {}, gate: {},
   };
 
   wireLiveControls(ui, state);
@@ -95,11 +143,12 @@ async function mount(root) {
     else startSession(state, ui);
   });
 
-  await Promise.all([loadModels(state, ui), loadInfo(state, ui)]);
+  await Promise.all([loadModels(state, ui), loadInfo(state, ui), loadHf(state, ui)]);
 
   function cleanup() {
     if (offDeviceChange) offDeviceChange();
-    teardownSession(state, ui, false);
+    if (state.hfTimer) { clearInterval(state.hfTimer); state.hfTimer = null; }
+    teardownSession(state, ui);
   }
   return cleanup;
 }
@@ -110,17 +159,30 @@ function buildIntroCard() {
   return el("div", { class: "notice info" }, [
     el("span", { class: "n-icon" }, [icon("mic", 20)]),
     el("div", {}, [
-      el("p", { style: "font-weight:700;margin:0 0 4px" }, ["هذا تحويل لحظي بالبث المباشر (وليس تحويلًا دفعيًا للملفات)"]),
+      el("p", { style: "font-weight:700;margin:0 0 4px" }, ["مكالمة صوتية حيّة بخامة الصوت العراقي"]),
       el("p", { class: "small", style: "margin:0" }, [
-        "يُلتقط صوت الميكروفون على دفعات ",
-        el("span", { class: "latin" }, ["int16 @ 16 kHz"]),
-        " ويُحوَّل عبر WebSocket ثم يعاد بثه بمعدل عينة النموذج. الزمن اللحظي الممكن يعتمد فعليًا على قوة GPU وسرعة الشبكة — قد يزيد على الميزانية المتوقعة للأجهزة البطيئة.",
+        "اضغط «بدء البث اللحظي» وتكلم في الميكروفون — كل كلمة تُسمع تُحوَّل فورًا بنموذج الاستنساخ وتُبث عبر مكبر الصوت في نفس اللحظة، تمامًا كأنك في مكالمة. عدّل أي معامل من لوحة المعاملات أدناه أثناء الكلام وسيُطبَّق فورًا دون قطع الصوت. ",
+        el("span", { class: "dim" }, ["نصيحة: استخدم سماعات رأس لتجنب ارتداد الصوت المحوّل إلى الميكروفون."]),
       ]),
     ]),
   ]);
 }
 
+/* بطاقة نموذج HuggingFace: حالة/تنزيل/تقدم — تُرسم ديناميكيًا */
+function buildHfCard() {
+  return el("div", { class: "card hidden", id: "rt-hf-card" }, [
+    el("h2", { class: "card-title" }, [
+      "نموذج الصوت العراقي — HuggingFace",
+      el("span", { class: "sub latin" }, ["eng7mi/Iraqi-v3"]),
+    ]),
+    el("div", { id: "rt-hf-box" }, []),
+  ]);
+}
+
 function buildControlsCard() {
+  const blockOpts = BLOCK_MS_CHOICES.map((v) =>
+    el("option", { value: String(v), ...(v === 160 ? { selected: true } : {}) }, [`${v} ms`])
+  );
   return el("div", { class: "card" }, [
     el("h2", { class: "card-title" }, ["التحكم بالجلسة", el("span", { class: "sub latin" }, ["Controls"])]),
     el("div", { class: "rt-state", id: "rt-state" }, [
@@ -147,39 +209,69 @@ function buildControlsCard() {
         ]),
       ]),
       el("div", { class: "field" }, [
+        el("label", { for: "rt-blockms" }, ["حجم الكتلة — ", el("span", { class: "opt-latin" }, ["block ms"])]),
+        el("select", { id: "rt-blockms" }, blockOpts),
+        el("span", { class: "hint" }, ["أقل = استجابة أسرع (يتطلب GPU أقوى). يُطبَّق عند بدء الجلسة."]),
+      ]),
+      el("div", { class: "field" }, [
         el("label", {}, ["حالة الخادم اللحظي"]),
         el("div", { class: "small dim", id: "rt-info-box" }, ["…"]),
       ]),
-    ]),
-    el("div", { class: "slider-row mt" }, [
-      el("div", { class: "slider-head" }, [
-        el("label", { for: "rt-pitch" }, ["انزياح النغمة (Pitch)", el("span", { class: "opt-latin" }, ["semitones"])]),
-        el("span", { class: "slider-val", id: "rt-pitch-val" }, ["0"]),
-      ]),
-      el("input", { type: "range", id: "rt-pitch", min: "-24", max: "24", step: "1", value: "0" }),
-    ]),
-    el("div", { class: "slider-row" }, [
-      el("div", { class: "slider-head" }, [
-        el("label", { for: "rt-index" }, ["نسبة الفهرس", el("span", { class: "opt-latin" }, ["Index Rate"])]),
-        el("span", { class: "slider-val", id: "rt-index-val" }, ["0.00"]),
-      ]),
-      el("input", { type: "range", id: "rt-index", min: "0", max: "1", step: "0.01", value: "0" }),
-    ]),
-    el("div", { class: "slider-row" }, [
-      el("div", { class: "slider-head" }, [
-        el("label", { for: "rt-rms" }, ["مزج الشدة", el("span", { class: "opt-latin" }, ["RMS Mix"])]),
-        el("span", { class: "slider-val", id: "rt-rms-val" }, ["0.00"]),
-      ]),
-      el("input", { type: "range", id: "rt-rms", min: "0", max: "1", step: "0.01", value: "0" }),
-    ]),
-    el("div", { class: "field mt" }, [
-      el("label", { for: "rt-f0" }, ["طريقة استخراج الطبقة — ", el("span", { class: "latin" }, ["f0 method"])]),
-      f0MethodSelect("rmvpe", "rt-f0"),
     ]),
     el("button", { class: "btn primary block mt", type: "button", id: "rt-start" }, [
       icon("play", 16), " بدء البث اللحظي",
     ]),
     el("div", { id: "rt-error", class: "mt hidden" }, []),
+  ]);
+}
+
+/* لوحة معاملات النبرة والصوت — كل ما يُمرَّر للمحرك مع تطبيق لحظي */
+function buildParamsCard() {
+  const rows = TONE_PARAMS.map((p) => el("div", { class: "slider-row" }, [
+    el("div", { class: "slider-head" }, [
+      el("label", { for: `rt-${p.id}` }, [p.label, el("span", { class: "opt-latin" }, [` ${p.latin}`])]),
+      el("span", { class: "slider-val", id: `rt-${p.id}-val` }, [p.fmt(p.def)]),
+      el("input", {
+        type: "number", class: "num-mini", id: `rt-${p.id}-num`,
+        min: String(p.min), max: String(p.max), step: String(p.step), value: String(p.def),
+      }),
+    ]),
+    el("input", { type: "range", id: `rt-${p.id}`, min: String(p.min), max: String(p.max), step: String(p.step), value: String(p.def) }),
+    el("div", { class: "param-hint" }, [p.hint]),
+  ]));
+
+  return el("div", { class: "card" }, [
+    el("h2", { class: "card-title" }, [
+      "معاملات النبرة والصوت",
+      el("span", { class: "sub latin" }, ["Voice Parameters · live"]),
+    ]),
+    el("div", { class: "row" }, [
+      el("span", { class: "small dim" }, ["كل تعديل هنا يُطبَّق على البث فورًا — تابع الكلام وجرّب بحرية."]),
+      el("span", { class: "applied-flash", id: "rt-applied" }, ["طُبِّقت الإعدادات على البث"]),
+    ]),
+    el("div", { class: "preset-row" }, [
+      el("button", { class: "btn sm", type: "button", id: "rt-preset-best" }, ["الإعداد الموصى به للعراقي"]),
+      el("button", { class: "btn sm ghost", type: "button", id: "rt-preset-neutral" }, ["محايد"]),
+    ]),
+    ...rows,
+    el("div", { class: "field mt" }, [
+      el("label", { for: "rt-f0" }, ["طريقة استخراج الطبقة — ", el("span", { class: "latin" }, ["f0 method"])]),
+      f0MethodSelect("rmvpe", "rt-f0"),
+      el("span", { class: "hint" }, ["rmvpe الأدق للعربية، fcpe أخف وأسرع، pm للمعالجات الضعيفة. تُطبَّق فورًا على الكتلة التالية."]),
+    ]),
+    el("div", { class: "slider-row mt" }, [
+      el("div", { class: "slider-head" }, [
+        el("label", { for: "rt-volume" }, ["حجم الخرج", el("span", { class: "opt-latin" }, ["Output Gain"])]),
+        el("span", { class: "slider-val", id: "rt-volume-val" }, ["100%"]),
+      ]),
+      el("input", { type: "range", id: "rt-volume", min: "0", max: "2", step: "0.05", value: "1" }),
+      el("div", { class: "param-hint" }, ["مستوى صوت مكبر الصوت للصوت المحوّل — يُطبَّق لحظيًا داخل المتصفح دون أي تأخير إضافي."]),
+    ]),
+    el("label", { class: "check" }, [
+      el("input", { type: "checkbox", id: "rt-monitor" }),
+      " سماع صوتي الأصلي مع المحوّل ",
+      el("span", { class: "opt-latin" }, ["Monitor Input"]),
+    ]),
   ]);
 }
 
@@ -253,14 +345,18 @@ async function loadModels(state, ui) {
     state.models = (Array.isArray(models) ? models : []).filter((m) => m.f0);
     clear(ui.model);
     if (!state.models.length) {
-      ui.model.append(el("option", { value: "" }, ["لا توجد نماذج f0 — تدريب أو رفع نموذج أولًا"]));
+      ui.model.append(el("option", { value: "" }, ["لا توجد نماذج f0 — نزّل نموذج HuggingFace أعلاه أو ارفع نموذجًا"]));
       ui.model.disabled = true;
       ui.btnStart.disabled = true;
       return;
     }
     for (const m of state.models) ui.model.append(el("option", { value: m.name }, [m.name]));
-    if (state.info?.loaded_model?.name && state.models.some((m) => m.name === state.info.loaded_model.name)) {
-      ui.model.value = state.info.loaded_model.name;
+    const preferred =
+      (state.hf && state.hf.default_model) ||
+      state.info?.default_model ||
+      state.info?.loaded_model?.name;
+    if (preferred && state.models.some((m) => m.name === preferred)) {
+      ui.model.value = preferred;
     } else {
       ui.model.value = state.models[0].name;
     }
@@ -280,6 +376,10 @@ async function loadInfo(state, ui) {
       state.settings.f0_method = state.info.f0_method;
       ui.f0.value = state.info.f0_method;
     }
+    if (state.info.recommended && !state.userTouched) {
+      applyRecommended(state, ui, state.info.recommended, { quiet: true });
+    }
+    if (ui.blockMs) ui.blockMs.value = String(state.blockMs);
     ui.infoBox.replaceChildren();
     ui.infoBox.append(el("span", { class: "latin" }, [
       `block ${state.info.block_ms} ms · crossfade ${state.info.crossfade_ms} ms · lookback ${state.info.lookback_ms} ms · f0 ${state.info.f0_method}`,
@@ -297,33 +397,253 @@ async function loadInfo(state, ui) {
   }
 }
 
+/* حالة نموذج HuggingFace + تقدم التنزيل */
+async function loadHf(state, ui) {
+  try {
+    state.hf = await get("/models/hf/status");
+  } catch {
+    state.hf = null; // integration absent — hide the card entirely
+  }
+  renderHf(state, ui);
+  scheduleHfPoll(state, ui);
+  if (state.hf && state.hf.default_model && !ui.model.value) {
+    await loadModels(state, ui);
+  } else if (state.hf && state.hf.default_model && state.models.length && ui.model.value !== state.hf.default_model
+             && state.models.some((m) => m.name === state.hf.default_model) && !state.userTouched) {
+    ui.model.value = state.hf.default_model;
+  }
+}
+
+function scheduleHfPoll(state, ui) {
+  if (state.hfTimer) { clearInterval(state.hfTimer); state.hfTimer = null; }
+  const active = state.hf && state.hf.download.state === "downloading";
+  if (!active) return;
+  state.hfTimer = setInterval(async () => {
+    try {
+      state.hf = await get("/models/hf/status");
+      renderHf(state, ui);
+      if (state.hf.download.state !== "downloading") {
+        clearInterval(state.hfTimer);
+        state.hfTimer = null;
+        if (state.hf.download.state === "ready" || state.hf.model.present) {
+          toast("اكتمل تنزيل نموذج الصوت العراقي وأصبح جاهزًا.", "success");
+          await loadModels(state, ui);
+          if (state.hf.default_model) ui.model.value = state.hf.default_model;
+          ui.btnStart.disabled = state.models.length === 0;
+        } else if (state.hf.download.state === "error") {
+          toast(`فشل تنزيل النموذج: ${state.hf.download.error || "خطأ غير معروف"}`, "error", 10000);
+        }
+      }
+    } catch { /* transient poll failure — keep trying */ }
+  }, HF_POLL_MS);
+}
+
+function renderHf(state, ui) {
+  const card = ui.hfCard;
+  const box = ui.hfBox;
+  if (!card || !box) return;
+  if (!state.hf) { card.classList.add("hidden"); return; }
+  card.classList.remove("hidden");
+  clear(box);
+  const hf = state.hf;
+
+  // جاهز؟ بطاقة مختصرة
+  if (hf.model.present && hf.download.state !== "downloading") {
+    box.append(el("div", { class: "row" }, [
+      el("span", { class: `badge ${hf.model.present ? "ok" : "warn"} dot` }, [
+        hf.model.present ? `النموذج الافتراضي «${hf.local_name}» جاهز` : "النموذج غير منزّل",
+      ]),
+      hf.index.present ? el("span", { class: "badge ok" }, ["الفهرس مرفق"]) : null,
+      hf.is_engine_default ? el("span", { class: "badge info" }, ["محمّل في المحرك"]) : null,
+    ]));
+    return;
+  }
+
+  // قيد التنزيل — أشرطة تقدم لكل ملف
+  if (hf.download.state === "downloading") {
+    box.append(el("div", { class: "row" }, [
+      el("span", { class: "badge loading dot" }, ["جارٍ تنزيل النموذج من HuggingFace…"]),
+    ]));
+    for (const meta of Object.values(hf.download.files || {})) {
+      const total = meta.total_bytes || 0;
+      const done = meta.received_bytes || 0;
+      const pct = total ? Math.min(100, (done / total) * 100) : 0;
+      const statusLabel = {
+        pending: "بانتظار", downloading: "ينزّل", done: "اكتمل",
+        skipped: "موجود مسبقًا", failed: "فشل",
+      }[meta.status] || meta.status;
+      box.append(el("div", { class: "mt" }, [
+        el("div", { class: "hf-file-row" }, [
+          el("span", {}, [meta.label]),
+          el("span", { class: "latin dim" }, [
+            `${statusLabel} · ${fmtNum(done / (1024 * 1024), 1)} / ${fmtNum(total / (1024 * 1024), 1)} MB (${fmtNum(pct, 0)}%)`,
+          ]),
+        ]),
+        el("div", { class: "progress" }, [el("div", { class: "bar", style: `width:${pct.toFixed(1)}%` })]),
+      ]));
+    }
+    return;
+  }
+
+  // مفقود — زر تنزيل أو تحذير التوكن
+  if (!hf.token_configured) {
+    box.append(el("div", { class: "notice warn" }, [
+      el("span", { class: "n-icon" }, [icon("alert", 18)]),
+      el("div", {}, [
+        el("p", { style: "margin:0 0 6px" }, [
+          "النموذج الافتراضي (",
+          el("span", { class: "latin" }, [hf.repo_id]),
+          ") مستودع خاص — أضف توكن الوصول كمتغير بيئة ",
+          el("span", { class: "latin" }, ["RVC_HF_TOKEN"]),
+          " في ملف ",
+          el("span", { class: "latin" }, [".env"]),
+          " ثم أعد تشغيل الخادم.",
+        ]),
+        el("p", { class: "small dim", style: "margin:0" }, [
+          "انسخ القالب: ",
+          el("span", { class: "latin" }, ["cp .env.example .env"]),
+        ]),
+      ]),
+    ]));
+    return;
+  }
+  if (hf.download.state === "error") {
+    box.append(el("div", { class: "notice danger" }, [
+      el("span", { class: "n-icon" }, [icon("alert", 18)]),
+      el("p", { style: "margin:0" }, [`فشل التنزيل: ${hf.download.error || "خطأ غير معروف"}`]),
+    ]));
+  }
+  const btn = el("button", { class: "btn primary", type: "button" }, [
+    icon("download", 15), " تنزيل نموذج الصوت العراقي الآن",
+  ]);
+  btn.addEventListener("click", async () => {
+    btn.disabled = true;
+    btn.textContent = "جارٍ البدء…";
+    try {
+      const res = await post("/models/hf/download");
+      if (res && res.started) {
+        toast("بدأ التنزيل في الخلفية — سيعمل شريط التقدم هنا تلقائيًا.", "success");
+        state.hf = await get("/models/hf/status");
+        renderHf(state, ui);
+        scheduleHfPoll(state, ui);
+      } else {
+        toast(res?.message || "التنزيل قيد التنفيذ بالفعل.", "warn");
+      }
+    } catch (err) {
+      toast(err.message, "error");
+      btn.disabled = false;
+      btn.replaceChildren(icon("download", 15), document.createTextNode(" تنزيل نموذج الصوت العراقي الآن"));
+    }
+  });
+  box.append(el("div", { class: "row mt" }, [btn]));
+  box.append(el("p", { class: "small dim mt", style: "margin-bottom:0" }, [
+    "المصدر: ",
+    el("span", { class: "latin hf-url-box" }, [hf.model_url]),
+  ]));
+}
+
 /* ------------------------------ live controls ------------------------------ */
 
 function wireLiveControls(ui, state) {
-  ui.pitch.addEventListener("input", () => {
-    ui.pitchVal.textContent = ui.pitch.value;
-    state.settings.pitch_shift = Number(ui.pitch.value);
-    pushSettings(state);
-  });
-  ui.index.addEventListener("input", () => {
-    ui.indexVal.textContent = Number(ui.index.value).toFixed(2);
-    state.settings.index_rate = Number(ui.index.value);
-    pushSettings(state);
-  });
-  ui.rms.addEventListener("input", () => {
-    ui.rmsVal.textContent = Number(ui.rms.value).toFixed(2);
-    state.settings.rms_mix_rate = Number(ui.rms.value);
-    pushSettings(state);
-  });
+  for (const p of TONE_PARAMS) {
+    const slider = document.getElementById(`rt-${p.id}`);
+    const num = document.getElementById(`rt-${p.id}-num`);
+    const val = document.getElementById(`rt-${p.id}-val`);
+    if (!slider || !num) continue;
+    ui[p.id] = { slider, num, val };
+    const apply = (raw, from) => {
+      state.userTouched = true;
+      let v = clamp(Number(raw), p.min, p.max);
+      if (Number.isNaN(v)) v = p.def;
+      v = Math.round(v / p.step) * p.step;
+      v = Number(v.toFixed(4));
+      state.settings[p.key] = v;
+      if (from !== "slider") slider.value = String(v);
+      if (from !== "num") num.value = String(v);
+      val.textContent = p.fmt(v);
+      pushSettings(state, ui);
+    };
+    slider.addEventListener("input", () => apply(slider.value, "slider"));
+    num.addEventListener("change", () => apply(num.value, "num"));
+  }
+
   ui.f0.addEventListener("change", () => {
+    state.userTouched = true;
     state.settings.f0_method = ui.f0.value;
-    pushSettings(state);
+    pushSettings(state, ui);
+  });
+
+  // حجم الخرج — يُطبَّق داخل المتصفح فورًا (بدون دورة خادم)
+  ui.volume.addEventListener("input", () => {
+    state.volume = Number(ui.volume.value);
+    ui.volumeVal.textContent = `${Math.round(state.volume * 100)}%`;
+    if (state.outGain) state.outGain.gain.value = state.volume;
+  });
+
+  // سماع الدخل — بوابة صوتية تنفتح لحظيًا
+  ui.monitor.addEventListener("change", () => {
+    state.monitor = ui.monitor.checked;
+    if (state.monGain) state.monGain.gain.value = state.monitor ? 1.0 : 0.0;
+    if (state.monitor) toast("سماع الدخل مفعّل — ستسمع صوتك الأصلي مع المحوّل. استخدم سماعات لتجنب الارتداد.", "info");
+  });
+
+  // حجم الكتلة — يُطبَّق عند بدء الجلسة القادمة
+  ui.blockMs.addEventListener("change", () => {
+    state.blockMs = Number(ui.blockMs.value) || 160;
+    if (state.phase === "streaming") {
+      toast(`حجم الكتلة الجديد (${state.blockMs} ms) سيُطبَّق عند إعادة بدء البث.`, "info", 6000);
+    }
+  });
+
+  // الإعدادات الجاهزة
+  document.getElementById("rt-preset-best").addEventListener("click", () => {
+    const rec = state.hf?.recommended || state.info?.recommended || {
+      pitch_shift: 0, index_rate: 0.88, rms_mix_rate: 0.25, f0_method: "rmvpe",
+    };
+    applyRecommended(state, ui, rec, { quiet: false });
+  });
+  document.getElementById("rt-preset-neutral").addEventListener("click", () => {
+    applyRecommended(state, ui, {
+      pitch_shift: 0, index_rate: 0, rms_mix_rate: 0,
+      f0_method: state.settings.f0_method,
+      silence_threshold_db: state.settings.silence_threshold_db,
+    }, { quiet: false });
   });
 }
 
-function pushSettings(state) {
+function applyRecommended(state, ui, rec, { quiet = false } = {}) {
+  if (!rec) return;
+  for (const p of TONE_PARAMS) {
+    if (rec[p.key] === undefined || rec[p.key] === null) continue;
+    const v = clamp(Number(rec[p.key]), p.min, p.max);
+    state.settings[p.key] = v;
+    const refs = ui[p.id];
+    if (refs) {
+      refs.slider.value = String(v);
+      refs.num.value = String(v);
+      refs.val.textContent = p.fmt(v);
+    }
+  }
+  if (rec.f0_method) {
+    state.settings.f0_method = rec.f0_method;
+    ui.f0.value = rec.f0_method;
+  }
+  pushSettings(state, ui);
+  if (!quiet) toast("طُبِّق الإعداد الموصى به لنموذج الصوت العراقي.", "success", 2500);
+}
+
+/* إرسال إطار settings مع خنق خفيف كي لا يُغرق الخادم أثناء السحب المتواصل */
+function pushSettings(state, ui) {
   if (state.phase === "streaming" && state.ws) {
-    state.ws.sendText({ type: "settings", settings: settingsPayload(state) });
+    state._pushQueued = true;
+    if (state._pushTimer) return;
+    state._pushTimer = setTimeout(() => {
+      state._pushTimer = null;
+      if (state._pushQueued && state.phase === "streaming" && state.ws) {
+        state._pushQueued = false;
+        state.ws.sendText({ type: "settings", settings: settingsPayload(state) });
+      }
+    }, PUSH_MIN_MS);
   }
 }
 
@@ -373,7 +693,6 @@ async function attachOutputSink(outCtx, ui) {
     if (typeof outCtx.setSinkId === "function") {
       await outCtx.setSinkId({ type: "audiooutput", deviceId });
     } else {
-      // older engines: constructing with sinkId (ignored where unsupported)
       return; // context already created; sink selection unavailable
     }
   } catch (err) {
@@ -387,7 +706,7 @@ async function startSession(state, ui) {
   if (state.phase === "connecting" || state.phase === "streaming") return;
   const modelName = ui.model.value;
   if (!modelName) {
-    toast("اختر نموذجًا يدعم f0 أولًا.", "warn");
+    toast("اختر نموذجًا يدعم f0 أولًا — أو نزّل النموذج الافتراضي من أعلى الصفحة.", "warn");
     return;
   }
   state.lastError = null;
@@ -432,8 +751,16 @@ async function startSession(state, ui) {
   await attachOutputSink(state.outCtx, ui);
   if (!alive()) { teardownSession(state, ui); return; }
   state.nextTime = 0;
+  state.nextTimeMon = 0;
+  // خرج بقابلية ضبط لحظي + بوابة سماع الدخل
+  state.outGain = state.outCtx.createGain();
+  state.outGain.gain.value = state.volume;
+  state.outGain.connect(state.outCtx.destination);
+  state.monGain = state.outCtx.createGain();
+  state.monGain.gain.value = state.monitor ? 1.0 : 0.0;
+  state.monGain.connect(state.outCtx.destination);
 
-  // 4) worklet
+  // 4) worklet — بحجم الكتلة المختار (block_ms)
   try {
     state.workletUrl = URL.createObjectURL(new Blob([WORKLET_CODE], { type: "application/javascript" }));
     await state.inCtx.audioWorklet.addModule(state.workletUrl);
@@ -461,6 +788,26 @@ async function startSession(state, ui) {
     if (!(block instanceof Float32Array)) return;
     const rms = rmsOf(block);
     updateMeter(state, ui, "in", rms);
+
+    // سماع الدخل: بث الصوت الأصلي عبر مكبر الصوت في نفس اللحظة
+    if (state.monitor && state.outCtx && state.monGain) {
+      const outRate = state.outCtx.sampleRate;
+      let mon = block;
+      if (inRate !== outRate) mon = resampleLinear(block, inRate, outRate);
+      const ctx = state.outCtx;
+      const buf = ctx.createBuffer(1, mon.length, outRate);
+      buf.copyToChannel(mon, 0);
+      const src = ctx.createBufferSource();
+      src.buffer = buf;
+      src.connect(state.monGain);
+      const blockSec = buf.duration;
+      if (state.nextTimeMon === 0 || state.nextTimeMon < ctx.currentTime + 0.004) {
+        state.nextTimeMon = ctx.currentTime + PREQUEUE_BLOCKS * blockSec;
+      }
+      src.start(state.nextTimeMon);
+      state.nextTimeMon += blockSec;
+    }
+
     let pcm = block;
     if (inRate !== INPUT_RATE) pcm = resampleLinear(block, inRate, INPUT_RATE);
     const int16 = floatToInt16(pcm);
@@ -473,12 +820,17 @@ async function startSession(state, ui) {
     }
   };
 
-  // 5) websocket
+  // 5) websocket — مع تمرير حجم الكتلة المختار
   const ws = openRealtimeWS();
   state.ws = ws;
 
   ws.onopen = () => {
-    ws.sendText({ type: "start", model: modelName, settings: settingsPayload(state) });
+    ws.sendText({
+      type: "start",
+      model: modelName,
+      settings: settingsPayload(state),
+      block_ms: state.blockMs,
+    });
   };
 
   ws.ontext = (msg) => {
@@ -486,14 +838,18 @@ async function startSession(state, ui) {
     if (msg.type === "started") {
       if (!alive()) return;
       state.modelSr = msg.sample_rate;
+      if (msg.block_ms) {
+        state.blockMs = msg.block_ms;
+        if (ui.blockMs) ui.blockMs.value = String(msg.block_ms);
+      }
       setPhase(state, ui, "streaming", `بث نشط — ${msg.model || modelName} · خرج ${fmtNum((msg.sample_rate || 0) / 1000, 1)} kHz · ميزانية ${msg.latency_budget_ms || state.blockMs} ms`);
-      toast("بدأ البث اللحظي.", "success");
+      toast("بدأ البث اللحظي — تكلم في الميكروفون وستسمع صوتك بالخامة العراقية فورًا.", "success");
       ui.model.disabled = true;
       state.statsTimer = setInterval(() => ws.sendText({ type: "stats" }), STATS_EVERY_MS);
       state.pingTimer = setInterval(() => ws.sendText({ type: "ping" }), PING_EVERY_MS);
       ws.sendText({ type: "stats" });
     } else if (msg.type === "settings_applied") {
-      toast("طُبِّقت الإعدادات الجديدة على البث.", "success", 2500);
+      flashApplied(ui);
     } else if (msg.type === "stats") {
       state.serverStats = msg;
       renderServerStats(state, ui, msg);
@@ -522,7 +878,7 @@ async function startSession(state, ui) {
     audioBuffer.copyToChannel(floats, 0);
     const src = ctx.createBufferSource();
     src.buffer = audioBuffer;
-    src.connect(ctx.destination);
+    src.connect(state.outGain);
     const blockSec = audioBuffer.duration;
     if (state.nextTime === 0) {
       state.nextTime = ctx.currentTime + (PREQUEUE_BLOCKS * blockSec);
@@ -561,6 +917,15 @@ async function startSession(state, ui) {
   };
 }
 
+/** وميض هادئ بدل التوست المتكرر عند كل تطبيق إعدادات أثناء السحب */
+function flashApplied(ui) {
+  const node = ui.applied;
+  if (!node) return;
+  node.classList.add("on");
+  clearTimeout(node._t);
+  node._t = setTimeout(() => node.classList.remove("on"), 900);
+}
+
 /** clean stop (user action or cleanup) — no error UI. */
 function stopSession(state, ui) {
   teardownSession(state, ui, false);
@@ -578,6 +943,8 @@ function fail(state, ui, message) {
 /** closes everything without touching the phase UI. */
 function teardownSession(state, ui) {
   state.sessionId = (state.sessionId || 0) + 1; // invalidate in-flight start()
+  if (state._pushTimer) { clearTimeout(state._pushTimer); state._pushTimer = null; }
+  state._pushQueued = false;
   if (state.statsTimer) { clearInterval(state.statsTimer); state.statsTimer = null; }
   if (state.pingTimer) { clearInterval(state.pingTimer); state.pingTimer = null; }
   if (state.ws) {
@@ -591,9 +958,12 @@ function teardownSession(state, ui) {
   if (state.stream) { for (const t of state.stream.getAudioTracks()) t.stop(); state.stream = null; }
   if (state.inCtx) { try { state.inCtx.close(); } catch { /* ignore */ } state.inCtx = null; }
   if (state.outCtx) { try { state.outCtx.close(); } catch { /* ignore */ } state.outCtx = null; }
+  state.outGain = null;
+  state.monGain = null;
   if (state.workletUrl) { URL.revokeObjectURL(state.workletUrl); state.workletUrl = null; }
   state.pendingTs = [];
   state.nextTime = 0;
+  state.nextTimeMon = 0;
   state.modelSr = null;
   ui.model.disabled = state.models.length === 0;
   resetMeters(ui);
@@ -656,6 +1026,10 @@ function renderStatusBox(state, ui) {
       el("dd", { class: "latin" }, [`${state.blockMs} ms`]),
       el("dt", {}, ["طريقة f0"]),
       el("dd", { class: "latin" }, [state.settings.f0_method]),
+      el("dt", {}, ["نسبة الفهرس"]),
+      el("dd", { class: "latin" }, [Number(state.settings.index_rate).toFixed(2)]),
+      el("dt", {}, ["حجم الخرج"]),
+      el("dd", { class: "latin" }, [`${Math.round(state.volume * 100)}%`]),
       el("dt", {}, ["حالة محرك الجلسة"]),
       el("dd", { class: "latin" }, [state.serverStats?.engine_status || "—"]),
     ]));

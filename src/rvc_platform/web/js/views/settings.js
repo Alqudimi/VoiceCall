@@ -13,6 +13,7 @@ export default { mount };
 async function mount(root) {
   root.replaceChildren(el("div", { class: "grid" }, [
     buildTokenCard(),
+    buildHfCard(),
     buildTunnelCard(),
     buildDetectCard(),
     el("div", { class: "card span-2" }, [buildLogsCard()]),
@@ -45,6 +46,7 @@ async function mount(root) {
     loadDetect(ui),
     loadLogs(ui),
     loadAbout(ui),
+    loadHfCard(),
   ]);
 
   function cleanup() { /* no intervals — all polling stopped with the view */ }
@@ -114,6 +116,67 @@ function renderTokenState(ui) {
     el("span", { class: `badge ${has ? "ok" : "warn"}` }, [has ? "رمز محفوظ" : "لا يوجد رمز"]),
     document.createTextNode(has ? " — يُستخدم للطلبات وWebSocket." : " — أضفه إن كان الخادم يطلب المصادقة."),
   );
+}
+
+/* ------------------------------ HuggingFace integration ------------------------------ */
+
+function buildHfCard() {
+  return el("div", { class: "card", id: "st-hf-card" }, [
+    el("h2", { class: "card-title" }, [
+      "تكامل HuggingFace",
+      el("span", { class: "sub latin" }, ["Default Voice Model"]),
+    ]),
+    el("div", { id: "st-hf-box" }, [
+      el("div", { class: "loading-line" }, [el("span", { class: "spin" }), "…"]),
+    ]),
+  ]);
+}
+
+async function loadHfCard() {
+  const box = document.getElementById("st-hf-box");
+  if (!box) return;
+  let hf = null;
+  try {
+    hf = await get("/models/hf/status");
+  } catch {
+    hf = null;
+  }
+  clear(box);
+  if (!hf) {
+    box.append(el("p", { class: "muted small" }, ["التكامل غير مفعل على هذا الخادم."]));
+    return;
+  }
+  const kvRow = (key, value, latin = true) => [
+    el("dt", {}, [key]),
+    el("dd", { class: latin ? "latin" : "" }, [value]),
+  ];
+  box.append(el("dl", { class: "kv" }, [
+    ...kvRow("المستودع", hf.repo_id),
+    ...kvRow("رابط النموذج", ""),
+    el("dd", { class: "latin hf-url-box", style: "margin:0 0 8px" }, [hf.model_url]),
+    ...kvRow("التوكن", ""),
+    el("dd", { style: "margin:0 0 8px" }, [
+      el("span", { class: `badge ${hf.token_configured ? "ok" : "warn"}` }, [
+        hf.token_configured ? "مضبوط من متغيرات البيئة (RVC_HF_TOKEN)" : "غير مضبوط — أضفه في .env",
+      ]),
+    ]),
+    ...kvRow("الاسم المحلي", hf.local_name),
+    ...kvRow("الحالة", ""),
+    el("dd", { style: "margin:0 0 8px" }, [
+      el("span", { class: `badge ${hf.model.present ? "ok" : "warn"}` }, [
+        hf.model.present
+          ? `منزّل (${fmtMB(hf.model.size_mb)})${hf.index.present ? " + فهرس" : ""}`
+          : "غير منزّل بعد",
+      ]),
+    ]),
+    ...kvRow("تنزيل تلقائي عند الإقلاع", hf.auto_download ? "مفعل" : "معطل", false),
+    ...kvRow("تحميل تلقائي كافتراضي", hf.auto_load ? "مفعل" : "معطل", false),
+  ]));
+  box.append(el("p", { class: "small muted mt", style: "margin-bottom:0" }, [
+    "كل القيم أعلاه تُجلب من متغيرات البيئة أو ملف ",
+    el("span", { class: "latin" }, [".env"]),
+    " — لا يُخزن أي توكن داخل المستودع. لإدارة التنزيل والتحميل راجع بطاقة النموذج في لوحة التحكم.",
+  ]));
 }
 
 /* ------------------------------ tunnel ------------------------------ */

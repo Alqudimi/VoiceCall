@@ -680,3 +680,22 @@ canvas.chart {
   background: linear-gradient(90deg, var(--emerald, #34d399), var(--amber, #f5b23c));
   transition: width 80ms linear;
 }
+
+/* ---------------- realtime: full parameter panel ---------------- */
+.slider-head .num-mini {
+  width: 78px;
+  min-width: 78px;
+  padding: 3px 7px;
+  font-size: 0.78rem;
+  text-align: center;
+  direction: ltr;
+  font-family: var(--mono);
+}
+.param-hint { font-size: 0.72rem; color: var(--muted); padding: 0 2px 2px; line-height: 1.5; }
+.preset-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 10px; }
+.blockms-note { font-size: 0.74rem; color: var(--amber-2); margin-top: 4px; }
+.applied-flash { font-size: 0.74rem; color: var(--emerald); opacity: 0; transition: opacity 0.25s; }
+.applied-flash.on { opacity: 1; }
+.hf-file-row { display: flex; justify-content: space-between; gap: 10px; font-size: 0.78rem; margin-top: 10px; }
+.hf-file-row .latin { direction: ltr; }
+.hf-url-box { font-size: 0.72rem; direction: ltr; text-align: left; word-break: break-all; }

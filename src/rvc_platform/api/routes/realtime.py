@@ -8,6 +8,8 @@ import secrets
 
 from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
 
+from rvc_platform.core.errors import RealtimeError
+
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +25,15 @@ def info(request: Request):
     svc = _svc(request)
     loaded = svc["models"].loaded()
     cfg = svc["config"].realtime
+    # the model the UI should preselect: the env-driven HuggingFace default
+    # (e.g. eng7mi/Iraqi-v3) when present, otherwise the engine-loaded model.
+    default_model = None
+    recommended = None
+    hf = svc.get("huggingface")
+    if hf is not None:
+        hf_status = hf.status()
+        default_model = hf_status["default_model"]
+        recommended = hf_status["recommended"]
     return {
         "available": loaded is not None and loaded.f0,
         "block_ms": cfg.block_ms,
@@ -31,6 +42,8 @@ def info(request: Request):
         "silence_threshold_db": cfg.silence_threshold_db,
         "f0_method": cfg.f0_method,
         "loaded_model": loaded.to_dict() if loaded else None,
+        "default_model": default_model,
+        "recommended": recommended,
         "note": "protocol: TEXT control frames + BINARY int16 mono 16kHz in / tgt-sr out",
     }
 
@@ -73,7 +86,16 @@ async def realtime_ws(ws: WebSocket) -> None:
                 if kind == "start":
                     if session is not None:
                         svc["realtime"].close(session)
-                    session = svc["realtime"].new_session()
+                    # optional per-session block size (60..500 ms) — lets the
+                    # client trade latency against GPU headroom without a
+                    # server restart; validated inside new_session().
+                    requested_block_ms = control.get("block_ms")
+                    try:
+                        session = svc["realtime"].new_session(requested_block_ms)
+                    except RealtimeError as exc:
+                        session = None
+                        await ws.send_json({"type": "error", "message": str(exc)})
+                        continue
                     try:
                         hello = session.load(control.get("model"), control.get("settings") or {})
                         await ws.send_json({"type": "started", **hello})

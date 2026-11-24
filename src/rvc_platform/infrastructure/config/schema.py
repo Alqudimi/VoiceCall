@@ -132,6 +132,53 @@ class LoggingConfig(BaseModel):
     backups: int = 5
 
 
+class HuggingFaceConfig(BaseModel):
+    """Default voice-model integration with a (possibly private) HF repo.
+
+    Every value can be injected through environment variables, so nothing
+    secret ever needs to live inside the repository:
+
+    * ``RVC_HF_TOKEN`` (or ``HF_TOKEN``) — the access token for private repos
+    * ``RVC_HF_REPO`` — repository id, e.g. ``eng7mi/Iraqi-v3``
+    * ``RVC_HF_MODEL_URL`` — full resolve-base override
+    """
+
+    repo_id: str = "eng7mi/Iraqi-v3"
+    token: str = ""
+    # optional explicit override, e.g. pointing at a mirror; when empty the
+    # canonical https://huggingface.co/<repo_id>/resolve/main is used.
+    model_url: str = ""
+    # remote layout of the voice model inside the repo
+    model_file: str = "best/model.pth"
+    index_file: str = "best/index.index"
+    # name the model is registered under locally (models/<local_name>.pth)
+    local_name: str = "iraqi_voice"
+    # optimal settings published by the model card — surfaced to the realtime
+    # UI so the sliders start from the recommended tone instead of neutral.
+    recommended_index_rate: float = Field(default=0.88, ge=0.0, le=1.0)
+    recommended_f0_method: Literal["rmvpe", "fcpe", "pm"] = "rmvpe"
+    recommended_rms_mix_rate: float = Field(default=0.25, ge=0.0, le=1.0)
+    # startup behaviour: pull the model in the background and make it the
+    # engine's default loaded model (the dashboard then boots "ready").
+    auto_download: bool = True
+    auto_load: bool = True
+
+    def resolve_url(self, remote_file: str) -> str:
+        """Build the download URL for a file inside the repo."""
+        if self.model_url:
+            return f"{self.model_url.rstrip('/')}/{remote_file.lstrip('/')}"
+        return (
+            f"https://huggingface.co/{self.repo_id.strip().strip('/')}"
+            f"/resolve/main/{remote_file.lstrip('/')}"
+        )
+
+    def token_from_env(self) -> str:
+        """Explicit token, falling back to the conventional ``HF_TOKEN``."""
+        if self.token:
+            return self.token
+        return os.environ.get("HF_TOKEN", "")
+
+
 class PlatformConfig(BaseModel):
     server: ServerConfig = Field(default_factory=ServerConfig)
     engine: EngineConfig = Field(default_factory=EngineConfig)
@@ -140,6 +187,7 @@ class PlatformConfig(BaseModel):
     training: TrainingDefaults = Field(default_factory=TrainingDefaults)
     tunnel: TunnelConfig = Field(default_factory=TunnelConfig)
     downloads: DownloadsConfig = Field(default_factory=DownloadsConfig)
+    huggingface: HuggingFaceConfig = Field(default_factory=HuggingFaceConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
 
 
@@ -154,4 +202,13 @@ ENV_OVERRIDES = {
     "RVC_TRAIN_SR": ("training", "sample_rate"),
     "RVC_TUNNEL_ENABLED": ("tunnel", "enabled"),
     "RVC_LOG_LEVEL": ("logging", "level"),
+    # ---- HuggingFace default voice model (env-injected, never in git) ----
+    "RVC_HF_REPO": ("huggingface", "repo_id"),
+    "RVC_HF_TOKEN": ("huggingface", "token"),
+    "RVC_HF_MODEL_URL": ("huggingface", "model_url"),
+    "RVC_HF_MODEL_FILE": ("huggingface", "model_file"),
+    "RVC_HF_INDEX_FILE": ("huggingface", "index_file"),
+    "RVC_HF_LOCAL_NAME": ("huggingface", "local_name"),
+    "RVC_HF_AUTO_DOWNLOAD": ("huggingface", "auto_download"),
+    "RVC_HF_AUTO_LOAD": ("huggingface", "auto_load"),
 }

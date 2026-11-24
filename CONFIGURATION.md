@@ -146,6 +146,14 @@ rmvpe.pt/onnx، وpretrained_v2 لكل المعدلات.)
 | `RVC_TRAIN_SR` | `training.sample_rate` | `48k` |
 | `RVC_TUNNEL_ENABLED` | `tunnel.enabled` | `true` |
 | `RVC_LOG_LEVEL` | `logging.level` | `DEBUG` |
+| `RVC_HF_REPO` | `huggingface.repo_id` | `eng7mi/Iraqi-v3` |
+| `RVC_HF_TOKEN` | `huggingface.token` | `hf_xxx…` |
+| `RVC_HF_MODEL_URL` | `huggingface.model_url` | `https://…/resolve/main` |
+| `RVC_HF_MODEL_FILE` | `huggingface.model_file` | `best/model.pth` |
+| `RVC_HF_INDEX_FILE` | `huggingface.index_file` | `best/index.index` |
+| `RVC_HF_LOCAL_NAME` | `huggingface.local_name` | `iraqi_voice` |
+| `RVC_HF_AUTO_DOWNLOAD` | `huggingface.auto_download` | `false` |
+| `RVC_HF_AUTO_LOAD` | `huggingface.auto_load` | `false` |
 
 مثال (Colab/سيرفر عام):
 
@@ -155,6 +163,31 @@ RVC_SERVER_HOST=0.0.0.0 RVC_AUTH_ENABLED=true RVC_BLOCK_MS=200 \
 ```
 
 القيم تُحوَّل تلقائيًا: `true/false` → bool، والأرقام → int/float.
+
+### 10.1 ملف `.env` (موصى به للتشغيل المحلي)
+
+يقرأ الخادم ملف `.env` في جذر المشروع عند الإقلاع ويضخ قيمه في البيئة
+**فقط إذا لم تكن مضبوطة أصلًا** — متغيرات النظام الحقيقية تتغلب دائمًا:
+
+```bash
+cp .env.example .env   # ثم حرّر .env وضع RVC_HF_TOKEN=hf_...
+```
+
+ملف `.env` مستثنى من git (انظر `.gitignore`) — لا يُرفع التوكن أبدًا.
+
+### 10.2 نموذج HuggingFace الافتراضي (الصوت العراقي)
+
+عند توفر `RVC_HF_TOKEN` يقوم الخادم عند الإقلاع (أو يدويًا من لوحة التحكم) بـ:
+
+1. تنزيل أوزان النموذج + فهرس الاسترجاع من `RVC_HF_REPO` (افتراضيًا
+   `eng7mi/Iraqi-v3` — مستودع خاص يتطلب التوكن) إلى `models/`.
+2. تسجيله محليًا باسم `RVC_HF_LOCAL_NAME` (افتراضيًا `iraqi_voice`).
+3. تحميله في المحرك كالنموذج الافتراضي المعروض في لوحة التحكم.
+
+رابط التنزيل يُبنى من `RVC_HF_MODEL_URL` إن حُدد، وإلا تلقائيًا من `RVC_HF_REPO`.
+التحكم اليدوي من الواجهة: بطاقة «نموذج HuggingFace الافتراضي» في لوحة التحكم
+(تنزيل/تحميل/تقدم لحظي)، وبطاقة «تكامل HuggingFace» في الإعدادات (عرض التكوين).
+عطّل السلوك التلقائي بـ `RVC_HF_AUTO_DOWNLOAD=false` أو `RVC_HF_AUTO_LOAD=false`.
 
 ---
 

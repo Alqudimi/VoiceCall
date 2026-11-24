@@ -18,6 +18,40 @@ from rvc_platform.infrastructure.paths import get_paths
 logger = logging.getLogger(__name__)
 
 
+def load_dotenv(path: Path | None = None) -> dict[str, str]:
+    """Load a ``.env`` file into ``os.environ`` (without clobbering).
+
+    Values already present in the environment always win, so a ``.env`` file
+    is a convenience for local runs and never overrides CI/deploy overrides.
+    Returns the mapping of *newly applied* variables (handy for logging).
+    """
+    target = path or (get_paths().root / ".env")
+    if not target.is_file():
+        return {}
+    applied: dict[str, str] = {}
+    try:
+        for raw_line in target.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.lower().startswith("export "):
+                line = line[7:].strip()
+            if "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            key = key.strip()
+            value = value.strip().strip("'\"")
+            if not key:
+                continue
+            if key not in os.environ:
+                os.environ[key] = value
+                applied[key] = value
+    except OSError as exc:  # unreadable .env must never kill the app
+        logger.warning("could not read %s: %s", target, exc)
+        return {}
+    return applied
+
+
 def _deep_merge(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
     result = copy.deepcopy(base)
     for key, value in overlay.items():
@@ -79,6 +113,7 @@ class ConfigLoader:
             raise ConfigurationError(f"invalid YAML in {path}: {exc}") from exc
 
     def load(self) -> PlatformConfig:
+        load_dotenv()  # .env convenience layer (never overrides real env vars)
         merged: dict[str, Any] = {}
         if self._default_yaml.is_file():
             merged = _deep_merge(merged, self._read_yaml(self._default_yaml))

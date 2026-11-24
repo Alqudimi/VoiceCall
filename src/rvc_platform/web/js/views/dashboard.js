@@ -11,6 +11,8 @@ import {
 
 export default { mount };
 
+let hfTimer = null;   // polling handle for the HF model download progress
+
 async function mount(root) {
   const offSystem = bus.on("system", (system) => update(system));
 
@@ -21,6 +23,7 @@ async function mount(root) {
         buildSystemCard(),
         buildComputeCard(),
         buildEngineCard(),
+        buildHfModelCard(),
         buildTrainingCard(),
         buildRealtimeCard(),
         buildTunnelCard(),
@@ -48,7 +51,7 @@ async function mount(root) {
   statsTimer = setInterval(pollStats, 5000);
   pollStats();
 
-  await Promise.allSettled([refreshSystemOnce(), loadAssets()]);
+  await Promise.allSettled([refreshSystemOnce(), loadAssets(), loadHfModel()]);
   refreshTunnelOnce();
 
   async function refreshSystemOnce() {
@@ -75,6 +78,7 @@ async function mount(root) {
     offSystem();
     if (statsTimer) clearInterval(statsTimer);
     if (assetsTimer) clearInterval(assetsTimer);
+    if (hfTimer) { clearInterval(hfTimer); hfTimer = null; }
     if (assetsPoller) { clearInterval(assetsPoller); assetsPoller = null; }
   };
 }
@@ -245,6 +249,184 @@ function renderEngine(system) {
     box.append(el("a", { class: "btn sm primary mt", href: "#models" }, ["فتح تبويب النماذج"]));
   }
 }
+
+/* ------------------------------ HuggingFace default model card ------------------------------ */
+
+function buildHfModelCard() {
+  return el("div", { class: "card", id: "dash-hf" }, [
+    el("h2", { class: "card-title" }, [
+      "نموذج HuggingFace الافتراضي",
+      el("span", { class: "sub latin" }, ["Iraqi-v3"]),
+    ]),
+    el("div", { id: "dash-hf-box" }, [
+      el("div", { class: "loading-line" }, [el("span", { class: "spin" }), "…"]),
+    ]),
+  ]);
+}
+
+async function loadHfModel() {
+  let hf = null;
+  try {
+    hf = await get("/models/hf/status");
+  } catch {
+    hf = null; // integration not configured on this server
+  }
+  renderHfModel(hf);
+  scheduleHfPolling(hf);
+}
+
+function scheduleHfPolling(hf) {
+  const existing = document.getElementById("dash-hf-box");
+  if (hfTimer) { clearInterval(hfTimer); hfTimer = null; }
+  if (!hf || hf.download.state !== "downloading") return;
+  hfTimer = setInterval(async () => {
+    const box = document.getElementById("dash-hf-box");
+    if (!box) { clearInterval(hfTimer); hfTimer = null; return; }
+    try {
+      const fresh = await get("/models/hf/status");
+      renderHfModel(fresh);
+      if (fresh.download.state !== "downloading") {
+        clearInterval(hfTimer);
+        hfTimer = null;
+        if (fresh.download.state === "ready" || fresh.model.present) {
+          toast("نموذج الصوت العراقي جاهز — أصبح النموذج الافتراضي للمنصة.", "success");
+        } else if (fresh.download.state === "error") {
+          toast(`فشل تنزيل النموذج: ${fresh.download.error || "خطأ غير معروف"}`, "error", 10000);
+        }
+      }
+    } catch { /* transient poll failure — keep trying */ }
+  }, 2500);
+}
+
+function renderHfModel(hf) {
+  const card = document.getElementById("dash-hf");
+  const box = document.getElementById("dash-hf-box");
+  if (!card || !box) return;
+  clear(card);
+  clear(box);
+  card.append(el("h2", { class: "card-title" }, [
+    "نموذج HuggingFace الافتراضي",
+    el("span", { class: "sub latin" }, [hf ? hf.repo_id : "غير مهيأ"]),
+  ]));
+
+  if (!hf) {
+    box.append(el("p", { class: "muted small" }, [
+      "تكامل HuggingFace غير مفعل على هذا الخادم.",
+    ]));
+    return;
+  }
+
+  const dl = hf.download;
+  if (dl.state === "downloading") {
+    box.append(el("div", { class: "row" }, [
+      el("span", { class: "badge loading dot" }, ["جارٍ التنزيل من HuggingFace…"]),
+    ]));
+    for (const meta of Object.values(dl.files || {})) {
+      const total = meta.total_bytes || 0;
+      const done = meta.received_bytes || 0;
+      const pct = total ? Math.min(100, (done / total) * 100) : 0;
+      box.append(el("div", { class: "mt" }, [
+        el("div", { class: "progress-label" }, [
+          meta.label,
+          el("span", { class: "latin" }, [
+            `${fmtNum(done / (1024 * 1024), 1)} / ${fmtNum(total / (1024 * 1024), 1)} MB (${fmtPct(pct / 100)})`,
+          ]),
+        ]),
+        el("div", { class: "progress" }, [el("div", { class: "bar", style: `width:${pct.toFixed(1)}%` })]),
+      ]));
+    }
+    return;
+  }
+
+  if (hf.model.present) {
+    box.append(el("div", { class: "row" }, [
+      el("span", { class: "badge ok dot" }, ["منزّل وجاهز"]),
+      hf.index.present ? el("span", { class: "badge ok" }, ["الفهرس مرفق"]) : null,
+      hf.is_engine_default
+        ? el("span", { class: "badge info dot" }, ["النموذج الافتراضي في المحرك"])
+        : el("span", { class: "badge warn" }, ["غير محمّل في المحرك"]),
+    ]));
+    box.append(el("dl", { class: "kv mt" }, [
+      el("dt", {}, ["الاسم المحلي"]),
+      el("dd", { class: "latin" }, [hf.local_name]),
+      el("dt", {}, ["حجم النموذج"]),
+      el("dd", { class: "latin" }, [fmtMB(hf.model.size_mb)]),
+      el("dt", {}, ["حجم الفهرس"]),
+      el("dd", { class: "latin" }, [fmtMB(hf.index.size_mb)]),
+      el("dt", {}, ["الإعداد الموصى به"]),
+      el("dd", { class: "latin" }, [
+        `index ${fmtNum(hf.recommended.index_rate, 2)} · ${hf.recommended.f0_method}`,
+      ]),
+    ]));
+    const actions = el("div", { class: "row mt" }, []);
+    if (!hf.is_engine_default) {
+      const btnLoad = el("button", { class: "btn sm primary", type: "button" }, [
+        icon("cpu", 14), " تحميله في المحرك كافتراضي",
+      ]);
+      btnLoad.addEventListener("click", async () => {
+        setBusy(btnLoad, true, "جارٍ التحميل…");
+        try {
+          await post("/models/hf/load");
+          toast("تم تحميل النموذج في المحرك.", "success");
+          await loadHfModel();
+        } catch (err) { toast(err.message, "error"); }
+        finally { setBusy(btnLoad, false); }
+      });
+      actions.append(btnLoad);
+    }
+    actions.append(el("a", { class: "btn sm", href: "#realtime" }, ["فتح البث اللحظي"]));
+    box.append(actions);
+    return;
+  }
+
+  // model missing
+  if (!hf.token_configured) {
+    box.append(el("div", { class: "notice warn" }, [
+      el("span", { class: "n-icon" }, [icon("alert", 16)]),
+      el("p", { style: "margin:0" }, [
+        "النموذج الافتراضي مستودع خاص — أضف ",
+        el("span", { class: "latin" }, ["RVC_HF_TOKEN"]),
+        " في ملف ",
+        el("span", { class: "latin" }, [".env"]),
+        " (انسخ من ",
+        el("span", { class: "latin" }, [".env.example"]),
+        ") ثم أعد تشغيل الخادم.",
+      ]),
+    ]));
+    return;
+  }
+  if (dl.state === "error") {
+    box.append(el("div", { class: "notice danger" }, [
+      el("span", { class: "n-icon" }, [icon("alert", 16)]),
+      el("p", { style: "margin:0" }, [`فشل التنزيل: ${dl.error || "خطأ غير معروف"}`]),
+    ]));
+  }
+  const btn = el("button", { class: "btn primary", type: "button" }, [
+    icon("download", 15), " تنزيل النموذج الافتراضي الآن",
+  ]);
+  btn.addEventListener("click", async () => {
+    setBusy(btn, true, "جارٍ بدء التنزيل…");
+    try {
+      const res = await post("/models/hf/download");
+      if (res && res.started) {
+        toast("بدأ التنزيل في الخلفية — تابع التقدم هنا.", "success");
+        await loadHfModel();
+      } else {
+        toast(res?.message || "التنزيل قيد التنفيذ بالفعل.", "warn");
+        scheduleHfPolling(await get("/models/hf/status").catch(() => null));
+      }
+    } catch (err) {
+      toast(err.message, "error");
+    } finally {
+      setBusy(btn, false);
+    }
+  });
+  box.append(el("div", { class: "row mt" }, [btn]));
+  box.append(el("p", { class: "small dim mt", style: "margin-bottom:0" }, [
+    "بعد اكتمال التنزيل يُحمّل النموذج تلقائيًا في المحرك ويصبح الافتراضي في كل صفحات المنصة.",
+  ]));
+}
+
 
 /* ------------------------------ training card ------------------------------ */
 

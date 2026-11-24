@@ -1,5 +1,7 @@
 # --- environment / build ---
 .venv/
+.env
+.env.local
 __pycache__/
 *.pyc
 *.egg-info/

@@ -134,8 +134,14 @@ class RealtimeService:
         self._lock = threading.Lock()
         self._reaper_started = False
 
-    def new_session(self) -> RealtimeSession:
+    def new_session(self, block_ms: int | None = None) -> RealtimeSession:
         # VRAM guard: every session holds its own engine + model copy — cap them
+        realtime_cfg = self.cfg
+        if block_ms is not None:
+            if not (60 <= int(block_ms) <= 500):
+                raise RealtimeError("block_ms must be between 60 and 500")
+            # per-session geometry override (client picks latency vs. headroom)
+            realtime_cfg = self.cfg.model_copy(update={"block_ms": int(block_ms)})
         with self._lock:
             self._drop_idle_locked()
             live = sum(1 for s in self.sessions.values())
@@ -145,7 +151,7 @@ class RealtimeService:
                     "close one before opening another"
                 )
         session = RealtimeSession(
-            f"rt_{uuid.uuid4().hex[:8]}", self.profile, self.cfg, self.repo
+            f"rt_{uuid.uuid4().hex[:8]}", self.profile, realtime_cfg, self.repo
         )
         with self._lock:
             self.sessions[session.id] = session
