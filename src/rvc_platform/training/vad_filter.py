@@ -64,6 +64,10 @@ def filter_filelist(filelist: Path, out_filelist: Path,
         gt_rel = line.split("|", 1)[0]
         gt_path = gt_wavs_dir / gt_rel if not Path(gt_rel).is_absolute() \
             else Path(gt_rel)
+        # Preserve official mute-silence training lines (silence-in -> silence-out).
+        if gt_path.stem.lower().startswith("mute"):
+            kept_lines.append(line)
+            continue
         try:
             wav, file_sr = _load_wav(gt_path)
         except Exception:

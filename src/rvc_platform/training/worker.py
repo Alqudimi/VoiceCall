@@ -139,6 +139,12 @@ def main(argv: list[str] | None = None) -> int:
         config.save()
     layout = config.ensure_layout()
     hps = config.to_hparams()
+    f0_stats_path = config.run_dir / "f0_stats.json"
+    if f0_stats_path.is_file():
+        try:
+            hps.f0_stats = json.loads(f0_stats_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            pass
     hps.pretrainG, hps.pretrainD = ("", "")
     if config.preload_base_models:
         g, d = config.resolve_pretrained()

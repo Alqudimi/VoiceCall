@@ -94,6 +94,8 @@ class ConversionSettings:
     output_sample_rate: int | None = None       # None -> model native rate
     denoise: bool = False                      # spectral-gate pre-pass
     normalize: bool = True                     # peak-normalize the result
+    auto_pitch: bool = False                   # auto-align median F0 to target speaker
+    formant_shift: float = 0.0                 # semitones (-12..12) vocal-tract shift
 
     def validate(self) -> None:
         if not -24 <= self.pitch_shift <= 24:
@@ -106,6 +108,8 @@ class ConversionSettings:
             raise ValueError("rms_mix_rate must be within [0, 1]")
         if not 0.0 <= self.protect <= 0.5:
             raise ValueError("protect must be within [0, 0.5]")
+        if not -12.0 <= self.formant_shift <= 12.0:
+            raise ValueError("formant_shift must be within [-12, 12] semitones")
 
 
 @dataclass

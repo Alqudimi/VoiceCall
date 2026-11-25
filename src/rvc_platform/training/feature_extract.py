@@ -87,12 +87,20 @@ def extract_f0(run_dir: Path, method: str, device: str, is_half: bool,
     f0_mel_min = 1127 * np.log(1 + f0_min / 700)
     f0_mel_max = 1127 * np.log(1 + f0_max / 700)
 
+    voiced_samples: list[np.ndarray] = []
     success = skipped = failed = 0
     started = time.time()
     for idx, wav_path in enumerate(files):
         out1 = f0_dir / f"{wav_path.name}.npy"
         out2 = f0nsf_dir / f"{wav_path.name}.npy"
         if _valid_npy(out1) and _valid_npy(out2):
+            try:
+                cached_f0 = np.load(out2, mmap_mode="r")
+                v = cached_f0[cached_f0 > 0]
+                if v.size > 0:
+                    voiced_samples.append(np.asarray(v, dtype=np.float32))
+            except Exception:
+                pass
             skipped += 1
             continue
         try:
@@ -105,10 +113,15 @@ def extract_f0(run_dir: Path, method: str, device: str, is_half: bool,
             if f0.shape[0] < p_len:
                 f0 = np.pad(f0, (0, p_len - f0.shape[0]))
             f0 = f0[:p_len]
-            f0 = f0_mod.interp_unvoiced(f0)
+            # Fix isolated 1-2 frame octave spikes while PRESERVING unvoiced 0.0 frames
+            # so SineGen U/V excitation and inference `protect` match RVC pretrains.
+            f0 = f0_mod.clean_f0_octaves(f0)
             if np.all(f0 == 0):
                 failed += 1
                 continue  # fully unvoiced chunk is meaningless to RVC training
+            v = f0[f0 > 0]
+            if v.size > 0:
+                voiced_samples.append(v.astype(np.float32))
             _atomic_save_npy(out2, f0.astype(np.float32))
             f0_mel = 1127 * np.log(1 + f0 / 700)
             f0_mel[f0_mel > 0] = (f0_mel[f0_mel > 0] - f0_mel_min) * (f0_bin - 2) / (
@@ -125,8 +138,26 @@ def extract_f0(run_dir: Path, method: str, device: str, is_half: bool,
             logger.exception("f0 failed: %s", wav_path.name)
         if progress:
             progress((idx + 1) / len(files), wav_path.name)
+    f0_stats: dict | None = None
+    if voiced_samples:
+        import json
+        all_v = np.concatenate(voiced_samples)
+        f0_stats = {
+            "median_hz": round(float(np.median(all_v)), 2),
+            "mean_hz": round(float(np.mean(all_v)), 2),
+            "p10_hz": round(float(np.percentile(all_v, 10)), 2),
+            "p90_hz": round(float(np.percentile(all_v, 90)), 2),
+            "voiced_frames": int(all_v.size),
+        }
+        try:
+            (run_dir / "f0_stats.json").write_text(
+                json.dumps(f0_stats, indent=2), encoding="utf-8"
+            )
+        except OSError:
+            pass
     report = {"files": len(files), "success": success, "skipped": skipped,
-              "failed": failed, "method": method, "seconds": round(time.time() - started, 1)}
+              "failed": failed, "method": method, "f0_stats": f0_stats,
+              "seconds": round(time.time() - started, 1)}
     logger.info("f0 extraction: %s", report)
     return report
 

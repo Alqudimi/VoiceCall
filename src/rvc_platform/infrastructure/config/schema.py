@@ -59,6 +59,8 @@ class ConversionDefaults(BaseModel):
     denoise: bool = False
     normalize: bool = True
     output_sample_rate: int | None = None
+    auto_pitch: bool = False
+    formant_shift: float = Field(default=0.0, ge=-12.0, le=12.0)
 
 
 class RealtimeConfig(BaseModel):

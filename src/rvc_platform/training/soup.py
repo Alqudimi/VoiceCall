@@ -180,3 +180,78 @@ def build_soup(run_dir: str | Path, k: int = 5, weighted: bool = False,
     }
     logger.info("checkpoint soup written: %s", summary)
     return summary
+
+
+def build_best_export_soup(
+    run_dir: str | Path,
+    k: int = 5,
+    mode: str = "min",
+) -> dict:
+    """Average the Top-K best inference exports tracked in checkpoints/best_history.json.
+
+    Unlike ``build_soup`` (which averages the K newest full checkpoints and may
+    mix post-overfit epochs), this targets the actual highest-scoring exports
+    using metric-weighted averaging (MWA). Returns an inference-ready checkpoint
+    summary or {"ok": False, "reason": ...}.
+    """
+    import json
+
+    run_dir = Path(run_dir)
+    hist_path = run_dir / "checkpoints" / "best_history.json"
+    exports_dir = run_dir / "exports"
+    if not hist_path.is_file() or not exports_dir.is_dir():
+        return {"ok": False, "reason": "best_history.json or exports/ missing", "run_dir": str(run_dir)}
+    try:
+        history = json.loads(hist_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return {"ok": False, "reason": f"unreadable best_history.json: {exc}", "run_dir": str(run_dir)}
+
+    entries = []
+    seen_names: set[str] = set()
+    for item in history if isinstance(history, list) else []:
+        name = item.get("export")
+        score = item.get("score")
+        if not name or name in seen_names or not isinstance(score, (int, float)):
+            continue
+        path = exports_dir / name
+        if path.is_file():
+            seen_names.add(name)
+            entries.append((path, float(score), int(item.get("epoch", 0))))
+    if len(entries) < 2:
+        return {"ok": False, "reason": f"need >=2 best exports, found {len(entries)}", "run_dir": str(run_dir)}
+
+    entries = entries[:max(2, int(k))]
+    payloads = []
+    scores = []
+    names = []
+    for path, sc, _ep in entries:
+        try:
+            pl = torch.load(path, map_location="cpu", weights_only=False)
+            if isinstance(pl, dict) and "weight" in pl:
+                payloads.append(pl)
+                scores.append(sc)
+                names.append(path.name)
+        except Exception:
+            logger.warning("skipping unreadable best export %s", path, exc_info=True)
+    if len(payloads) < 2:
+        return {"ok": False, "reason": "fewer than 2 readable best exports", "run_dir": str(run_dir)}
+
+    weights = _softmax_mwa(scores, mode) if len(set(scores)) > 1 else [1.0 / len(payloads)] * len(payloads)
+    merged = average_state_dicts([pl["weight"] for pl in payloads], weights)
+    out_payload = dict(payloads[0])
+    out_payload["weight"] = merged
+    out_payload["info"] = f"{entries[0][2]}epoch-soup{len(payloads)}"
+
+    out_path = exports_dir / f"{run_dir.name}_best_soup.pth"
+    tmp = out_path.with_suffix(".pth.part")
+    torch.save(out_payload, tmp)
+    tmp.replace(out_path)
+    return {
+        "ok": True,
+        "run_dir": str(run_dir),
+        "exports": names,
+        "scores": [round(s, 6) for s in scores],
+        "weights": [round(w, 4) for w in weights],
+        "output": str(out_path),
+        "best_epoch": entries[0][2],
+    }

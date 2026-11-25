@@ -511,6 +511,27 @@ def train_start(
         None, "--clip-grad-norm",
         help="clip generator gradient global norm (BigVGAN §3.4 anti-collapse; e.g. 500; 0 = off = upstream)",
     ),
+    # ---- Stage-3 SOTA voice-cloning fidelity levers --------------------------
+    ms_mel_weight: Optional[float] = typer.Option(
+        None, "--ms-mel-weight",
+        help="multi-scale mel reconstruction loss weight (default 10.0; 0 disables)",
+    ),
+    no_mrd: bool = typer.Option(
+        False, "--no-mrd",
+        help="disable Multi-Resolution STFT Discriminator (UnivNet / BigVGAN D3)",
+    ),
+    prior_mel_weight: Optional[float] = typer.Option(
+        None, "--prior-mel-weight",
+        help="end-to-end prior inference-path mel consistency weight (default 8.0; 0 disables)",
+    ),
+    spk_loss_weight: Optional[float] = typer.Option(
+        None, "--spk-loss-weight",
+        help="differentiable ECAPA speaker cosine loss weight (default 2.0; 0 disables)",
+    ),
+    feat_noise: Optional[float] = typer.Option(
+        None, "--feat-noise",
+        help="HuBERT feature regularisation noise std (default 0.015; 0 disables)",
+    ),
 ):
     """Start (or continue) a training run. Follows live progress on stdout."""
     from rvc_platform.training.run_config import TrainingRunConfig
@@ -533,6 +554,12 @@ def train_start(
         **({"cosine_frac": cosine} if cosine is not None else {}),
         **({"d_lr_scale": d_lr_scale} if d_lr_scale is not None else {}),
         **({"clip_grad_norm": clip_grad_norm} if clip_grad_norm is not None else {}),
+        # Stage-3 levers
+        **({"c_ms_mel": ms_mel_weight} if ms_mel_weight is not None else {}),
+        **({"use_mrd": False} if no_mrd else {}),
+        **({"c_prior_mel": prior_mel_weight} if prior_mel_weight is not None else {}),
+        **({"c_spk_loss": spk_loss_weight} if spk_loss_weight is not None else {}),
+        **({"feat_noise_std": feat_noise} if feat_noise is not None else {}),
     }
     if dataset is not None:
         if existing_cfg is not None:
@@ -921,6 +948,8 @@ def inference(
     protect: float = typer.Option(0.33, "--protect"),
     output_sr: Optional[int] = typer.Option(None, "--output-sr"),
     denoise: bool = typer.Option(False, "--denoise"),
+    auto_pitch: bool = typer.Option(False, "--auto-pitch/--no-auto-pitch", help="auto-align pitch to target speaker's natural median F0"),
+    formant_shift: float = typer.Option(0.0, "--formant-shift", help="vocal-tract formant shift in semitones (-12..12)"),
     index: Optional[Path] = typer.Option(None, "--index", "-i", help="path to retrieval .index file"),
 ):
     """Convert one audio file to the target voice (Audio-to-Audio)."""
@@ -951,6 +980,7 @@ def inference(
         pitch_shift=pitch, f0_method=f0_method, index_rate=index_rate,
         filter_radius=filter_radius, rms_mix_rate=rms_mix_rate, protect=protect,
         output_sample_rate=output_sr, denoise=denoise,
+        auto_pitch=auto_pitch, formant_shift=formant_shift,
     )
     out = output or get_paths().data / "conversions" / f"{Path(input).stem}_{model_p.stem}.wav"
     result = engine.convert_file(Path(input), Path(out), settings)

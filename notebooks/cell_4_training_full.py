@@ -10,7 +10,7 @@ BASEPATH = "/content/drive/MyDrive/"  # @param ["/content/drive/MyDrive/", "/con
 
 # ═══════════════ الإعدادات الأساسية ═══════════════
 EPOCHS = 300  # @param {type:"integer"} (300 لبيانات ~40 دقيقة؛ FAQ: 50-200 نظيفة، 200-500 متوسطة)
-BATCH = 12  # @param {type:"integer"} (T4: 8-12 @ 40k؛ خفّض إن ظهرت CUDA OOM)
+BATCH = 6  # @param {type:"integer"} (T4 FP32 @ 48k + MRD + Prior + ECAPA: 6 آمن ومستقر ~14 GB؛ خفّض إلى 4 إن ظهرت CUDA OOM)
 LR = 0.0001  # @param {type:"number"} (معدل التعلم — لا ترفعه مع القواعد المسبقة)
 SAVE_EVERY = 10  # @param {type:"integer"} (احفظ نقطة تحقق كل N حقبة)
 F0_METHOD = "rmvpe"  # @param ["rmvpe", "fcpe", "pm", "crepe"] (مقفول على ما جُهّز؛ rmvpe الأقوى)
@@ -30,7 +30,12 @@ SAVE_BEST = True  # @param {type:"boolean"} (تتبّع وتصدير أفضل ن
 # ملاحظة: save_latest / save_every_weights / f0_eval مفعّلة افتراضيًا في config
 # (تُعدّل فقط بتحرير runs/<exp>/run_config.json — ليست أعلام CLI).
 
-# ═══════════ المرحلة 2: رافعات البحث الجديدة (§2.8+) ═══════════
+# ═══════════ المرحلة 3: محسنات الاستنساخ الفائق (SOTA Voice Cloning) ═══════════
+USE_MRD = True  # @param {type:"boolean"} (مميز STFT متعدد الدقة UnivNet/BigVGAN لمنع الرنين المعدني)
+MS_MEL_WEIGHT = 10.0  # @param {type:"number"} (خسارة Multi-Scale Mel من 4 مقاييس — BigVGAN-v2)
+PRIOR_MEL_WEIGHT = 8.0  # @param {type:"number"} (مطابقة مسار الاستدلال enc_p -> flow -> dec أثناء التدريب)
+SPK_LOSS_WEIGHT = 2.0  # @param {type:"number"} (خسارة هوية المتحدث ECAPA-TDNN القابلة للتفاضل)
+FEAT_NOISE = 0.015  # @param {type:"number"} (تنظيم ضوضاء HuBERT لمنع تحفظ المحتوى وحذف الشوائب)
 AUGMENT = True  # @param {type:"boolean"} (تعزيز لحظي: ضجيج/جهارة/حذف — مهم للبيانات الصغيرة/الصاخبة)
 WARMUP = 1  # @param {type:"integer"} (حقب إحماء خطي لمعدل التعلم؛ 0 = تعطيل)
 COSINE = 0.1  # @param {type:"number"} (ذيل جيب التمام؛ 0 = تعطيل، 0.1 موصى به)
@@ -58,12 +63,13 @@ _run_cfg = f"/content/iraqi-voice-platform/runs/{EXPERIMENT}/run_config.json"
 if os.path.isfile(_run_cfg) and not CLEAN_START:
     _saved = json.load(open(_run_cfg))
     F0_METHOD = _saved.get("f0_method", F0_METHOD)
-    SR = _saved.get("sample_rate", "40k")
+    SR = _saved.get("sample_rate", "48k")
     print(f">>> جلسة موجودة: نثبت SR={SR} وF0={F0_METHOD} كما جُهّزت (لا تغيّرهما إلا بإعادة التجهيز)")
 else:
-    SR = "40k"  # @param ["32k", "40k", "48k"]
+    SR = "48k"  # @param ["32k", "40k", "48k"]
     print(f">>> جلسة جديدة: SR={SR} (تجهيز جديد)")
 
+os.environ["UV_NO_SYNC"] = "1"
 os.environ["RVC_TORCH_COMPILE"] = TORCH_COMPILE
 os.environ["RVC_NUM_WORKERS"] = str(NUM_WORKERS)
 os.environ["RVC_PERSISTENT_WORKERS"] = "1" if PERSISTENT_WORKERS else "0"
@@ -89,6 +95,12 @@ flags = [
     "--augment" if AUGMENT else "--no-augment",
     f"--warmup {WARMUP}", f"--cosine {COSINE}", f"--d-lr-scale {D_LR_SCALE}",
     f"--clip-grad-norm {CLIP_GRAD_NORM}",
+    # المرحلة 3 (SOTA)
+    "" if USE_MRD else "--no-mrd",
+    f"--ms-mel-weight {MS_MEL_WEIGHT}",
+    f"--prior-mel-weight {PRIOR_MEL_WEIGHT}",
+    f"--spk-loss-weight {SPK_LOSS_WEIGHT}",
+    f"--feat-noise {FEAT_NOISE}",
     # متنوعة
     f"--gpu {GPU_INDEX.strip()}" if GPU_INDEX.strip() else "",
     "--clean-start" if CLEAN_START else "",

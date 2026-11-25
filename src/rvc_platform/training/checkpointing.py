@@ -88,11 +88,15 @@ def write_checkpoint_files(
     mirror: bool,
     payload_d2: dict | None = None,
     d2_path: Path | None = None,
+    payload_d3: dict | None = None,
+    d3_path: Path | None = None,
 ) -> None:
     """Write a G/D checkpoint pair (+ optional always-latest mirrors + state).
 
     ``payload_d2`` / ``d2_path`` (optional): the multi-scale discriminator
-    (D2) rides in its own D2_<step>.pth with its own always-latest mirror —
+    (D2) rides in its own D2_<step>.pth with its own always-latest mirror.
+    ``payload_d3`` / ``d3_path`` (optional): the multi-resolution spectrogram
+    discriminator (MRD / D3) rides in its own D3_<step>.pth.
     G/D file formats stay byte-compatible with upstream tooling.
 
     Meant to run on the background I/O writer: atomic per file, and ordered —
@@ -104,18 +108,19 @@ def write_checkpoint_files(
     _torch_save(payload_d, d_path)
     if mirror:
         write_latest_mirrors(g_path.parent, g_path, d_path)
-    if payload_d2 is not None and d2_path is not None:
-        d2_path = Path(d2_path)
-        _torch_save(payload_d2, d2_path)
-        if mirror:
-            d2_mirror = d2_path.parent / f"D2_{LATEST_TAG}.pth"
-            tmp = d2_mirror.with_suffix(".pth.tmp")
-            try:
-                shutil.copyfile(d2_path, tmp)
-                tmp.replace(d2_mirror)
-            except OSError:
-                logger.warning("could not refresh D2 mirror", d2_mirror,
-                               exc_info=True)
+    for tag, pld, dst_p in (("D2", payload_d2, d2_path), ("D3", payload_d3, d3_path)):
+        if pld is not None and dst_p is not None:
+            dst_p = Path(dst_p)
+            _torch_save(pld, dst_p)
+            if mirror:
+                d_mirror = dst_p.parent / f"{tag}_{LATEST_TAG}.pth"
+                tmp = d_mirror.with_suffix(".pth.tmp")
+                try:
+                    shutil.copyfile(dst_p, tmp)
+                    tmp.replace(d_mirror)
+                except OSError:
+                    logger.warning("could not refresh %s mirror %s", tag, d_mirror,
+                                   exc_info=True)
     if state is not None:
         write_state(state, state_path)
 

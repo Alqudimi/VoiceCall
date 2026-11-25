@@ -58,6 +58,40 @@ def interp_unvoiced(f0: np.ndarray) -> np.ndarray:
     return f0
 
 
+def clean_f0_octaves(f0: np.ndarray, max_jump_semitones: float = 8.0) -> np.ndarray:
+    """Fix isolated 1-2 frame octave glitches while preserving unvoiced (0 Hz) frames.
+
+    Unlike ``interp_unvoiced``, unvoiced frames stay 0.0 so SineGen's U/V noise
+    excitation and inference voiceless-consonant protection (``protect``) remain
+    intact. Only isolated 1-2 frame spikes whose voiced neighbours agree within
+    3 semitones and jump by >= ``max_jump_semitones`` are interpolated.
+    """
+    out = np.asarray(f0, dtype=np.float32).copy()
+    n = out.shape[0]
+    if n < 4:
+        return out
+    ratio_thresh = 2.0 ** (max_jump_semitones / 12.0)
+    agree_thresh = 2.0 ** (3.0 / 12.0)
+    # 1-frame spikes
+    for i in range(1, n - 1):
+        a, b, c = out[i - 1], out[i], out[i + 1]
+        if a > 0.0 and b > 0.0 and c > 0.0:
+            if max(a / c, c / a) <= agree_thresh:
+                ref = 0.5 * (a + c)
+                if max(b / ref, ref / b) >= ratio_thresh:
+                    out[i] = ref
+    # 2-frame spikes
+    for i in range(1, n - 2):
+        a, b1, b2, c = out[i - 1], out[i], out[i + 1], out[i + 2]
+        if a > 0.0 and b1 > 0.0 and b2 > 0.0 and c > 0.0:
+            if max(a / c, c / a) <= agree_thresh:
+                if (max(b1 / a, a / b1) >= ratio_thresh
+                        and max(b2 / c, c / b2) >= ratio_thresh):
+                    out[i] = a + (c - a) / 3.0
+                    out[i + 1] = a + 2.0 * (c - a) / 3.0
+    return out
+
+
 def median_filter_f0(f0: np.ndarray, radius: int) -> np.ndarray:
     """RVC's legacy 'filter radius' knob — OFFICIAL semantics.
 

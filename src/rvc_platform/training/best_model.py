@@ -57,10 +57,11 @@ from rvc_platform.training.dataset import (
 logger = logging.getLogger(__name__)
 
 BEST_STATE_NAME = "best.json"
+BEST_HISTORY_NAME = "best_history.json"
 SPLIT_META_NAME = "validation_split.json"
 TRAIN_LIST_NAME = "filelist_train.txt"
 VAL_LIST_NAME = "filelist_val.txt"
-BEST_EXPORT_KEEP = 3          # how many best-model exports to keep on disk
+BEST_EXPORT_KEEP = 5          # how many best-model exports to keep on disk (used for Top-K soup)
 DEFAULT_SPLIT_SEED = 1234
 
 
@@ -256,7 +257,8 @@ class ValidationEvaluator:
     """
 
     def __init__(self, hps, device: str, is_half: bool, val_filelist: Path,
-                 max_batches: int | None = None) -> None:
+                 max_batches: int | None = None,
+                 speaker_embedder=None) -> None:
         import os
 
         if max_batches is None:
@@ -271,7 +273,7 @@ class ValidationEvaluator:
         else:
             dataset = TextAudioLoader(str(val_filelist), hps.data)
             collate = TextAudioCollate()
-        batch_size = max(1, min(int(hps.train.get("batch_size", 1) or 1), 8))
+        batch_size = max(1, min(int(hps.train.get("batch_size", 1) or 1), 4))
         self.loader = DataLoader(
             dataset, batch_size=batch_size, shuffle=False,
             num_workers=0, collate_fn=collate,
@@ -281,15 +283,15 @@ class ValidationEvaluator:
         from rvc_platform.training import eval_metrics
 
         self._metrics = eval_metrics
-        self.speaker = None
-        if int(hps.train.get("spk_weight", 1.0) or 0.0) > 0:
+        self.spk_weight = float(hps.train.get("spk_weight", 1.0) or 0.0)
+        self.speaker = speaker_embedder
+        if self.speaker is None and self.spk_weight > 0.0:
             try:
                 self.speaker = eval_metrics.try_build_speaker_embedder(device)
             except Exception:
                 self.speaker = None
-        self.spk_weight = float(hps.train.get("spk_weight", 1.0) or 0.0)
         self.f0_fn = None
-        if int(hps.train.get("f0_eval", 1) or 0) and int(hps.if_f0) == 1:
+        if float(hps.train.get("f0_eval", 1) or 0) > 0 and int(hps.if_f0) == 1:
             try:
                 self.f0_fn = eval_metrics.try_build_f0_helper(device, is_half)
             except Exception:
@@ -303,11 +305,16 @@ class ValidationEvaluator:
         hps = self.hps
         was_training = net_g.training
         net_g.eval()
-        sums = {"val_mel": 0.0, "val_kl": 0.0, "val_spk": 0.0, "val_f0_rmse": 0.0}
+        sums = {
+            "val_mel": 0.0, "val_infer_mel": 0.0,
+            "val_kl": 0.0, "val_spk": 0.0, "val_f0_rmse": 0.0,
+        }
         items = 0
+        infer_items = 0
         spk_items = 0
         f0_items = 0
         batches = 0
+        has_infer = hasattr(net_g, "infer") and callable(getattr(net_g, "infer"))
         try:
             with torch.no_grad():
                 for batch_idx, info in enumerate(self.loader):
@@ -327,6 +334,7 @@ class ValidationEvaluator:
                         sid = sid.cuda(non_blocking=True)
                         spec = spec.cuda(non_blocking=True)
                         spec_lengths = spec_lengths.cuda(non_blocking=True)
+                        wave = wave.cuda(non_blocking=True)
                     with torch.autocast("cuda" if self.is_half else "cpu",
                                         enabled=self.is_half):
                         if int(hps.if_f0) == 1:
@@ -361,17 +369,56 @@ class ValidationEvaluator:
                                 y_hat_mel = y_hat_mel.half()
                             mel_l1 = torch.nn.functional.l1_loss(y_mel, y_hat_mel)
                             kl = L.kl_loss(z_p, logs_q, m_p, logs_p, z_mask)
-                            # ---- optional objective metrics (guarded) ----
                             n_batch = int(y_hat.shape[0])
+
+                            # ---- TRUE inference-path evaluation (enc_p -> flow_reverse -> dec) ----
+                            # Measures actual voice conversion fidelity, unlike posterior enc_q!
+                            y_eval_pred = None
+                            y_eval_true = None
+                            if has_infer:
+                                try:
+                                    if int(hps.if_f0) == 1:
+                                        y_inf = net_g.infer(
+                                            phone, phone_lengths, pitch, pitchf, sid,
+                                        )[0]
+                                    else:
+                                        y_inf = net_g.infer(
+                                            phone, phone_lengths, sid,
+                                        )[0]
+                                    inf_len = min(y_inf.shape[-1], wave.shape[-1])
+                                    if inf_len >= int(hps.data["filter_length"]):
+                                        y_inf_clip = y_inf[..., :inf_len].float()
+                                        w_clip = wave[..., :inf_len].float()
+                                        inf_mel = mel_processing.mel_spectrogram_torch(
+                                            y_inf_clip.squeeze(1), hps.data["filter_length"],
+                                            hps.data["n_mel_channels"], hps.data["sampling_rate"],
+                                            hps.data["hop_length"], hps.data["win_length"],
+                                            hps.data["mel_fmin"], hps.data["mel_fmax"],
+                                        )
+                                        m_frames = min(inf_mel.shape[-1], mel.shape[-1])
+                                        inf_mel_l1 = torch.nn.functional.l1_loss(
+                                            mel[..., :m_frames].float(),
+                                            inf_mel[..., :m_frames].float(),
+                                        )
+                                        sums["val_infer_mel"] += float(inf_mel_l1) * n_batch
+                                        infer_items += n_batch
+                                        y_eval_pred = y_inf_clip
+                                        y_eval_true = w_clip
+                                except Exception:
+                                    logger.debug("inference-path val skipped", exc_info=True)
+
                             wave_sliced = commons.slice_segments(
                                 wave, ids_slice * hps.data["hop_length"],
                                 hps.train["segment_size"],
                             )
+                            if y_eval_pred is None:
+                                y_eval_pred = y_hat.detach().float()
+                                y_eval_true = wave_sliced.detach().float()
+
                             if self.speaker is not None:
                                 try:
                                     sim = self._metrics.speaker_similarity(
-                                        self.speaker, y_hat.detach().float(),
-                                        wave_sliced.detach().float(),
+                                        self.speaker, y_eval_pred, y_eval_true,
                                         int(hps.data["sampling_rate"]),
                                     )
                                     sums["val_spk"] += sim * n_batch
@@ -383,7 +430,10 @@ class ValidationEvaluator:
                                     self.speaker = None
                             if self.f0_fn is not None:
                                 try:
-                                    rmse = self._batch_f0_rmse(y_hat, pitchf, ids_slice)
+                                    if has_infer and y_eval_pred.shape[-1] > y_hat.shape[-1]:
+                                        rmse = self._full_f0_rmse(y_eval_pred, pitchf)
+                                    else:
+                                        rmse = self._batch_f0_rmse(y_hat, pitchf, ids_slice)
                                     if rmse is not None:
                                         sums["val_f0_rmse"] += rmse * n_batch
                                         f0_items += n_batch
@@ -408,20 +458,40 @@ class ValidationEvaluator:
             "val_batches": batches,
             "val_items": items,
         }
+        if infer_items > 0:
+            out["val_infer_mel"] = sums["val_infer_mel"] / infer_items
+        mel_proxy = (
+            0.4 * out["val_mel"] + 0.6 * out["val_infer_mel"]
+            if "val_infer_mel" in out else out["val_mel"]
+        )
         if spk_items > 0:
             out["val_spk"] = sums["val_spk"] / spk_items
             out["composite"] = self._metrics.composite_score(
-                out["val_mel"], out["val_spk"], self.spk_weight)
+                mel_proxy, out["val_spk"], self.spk_weight)
         if f0_items > 0:
             out["val_f0_rmse"] = sums["val_f0_rmse"] / f0_items
-        # selection metric when speechbrain is unavailable: fold the voiced-
-        # F0 RMSE in so the best-model bar reflects pitch/prosody fidelity
-        # too, not just spectral smoothness (see composite_score_f0)
+            if "composite" in out:
+                # Slight F0 prosody penalty on top of timbre + mel composite
+                out["composite"] += 0.15 * (out["val_f0_rmse"] / 100.0)
         if spk_items == 0 and f0_items > 0:
             f0_weight = float(self.hps.train.get("f0_weight", 0.5) or 0.5)
             out["composite_f0"] = self._metrics.composite_score_f0(
-                out["val_mel"], out["val_f0_rmse"], f0_weight)
+                mel_proxy, out["val_f0_rmse"], f0_weight)
         return out
+
+    def _full_f0_rmse(self, y_pred, pitchf) -> float | None:
+        """Mean voiced F0 RMSE (Hz) across full-utterance inference outputs."""
+        sr = int(self.hps.data["sampling_rate"])
+        gt = pitchf.detach().cpu().numpy()
+        pred16 = self._metrics.resample_16k(
+            y_pred.detach().float().squeeze(1), sr,
+        ).cpu().numpy()
+        rmses = []
+        for b in range(gt.shape[0]):
+            value = self._metrics.f0_rmse(self.f0_fn, pred16[b], gt[b])
+            if value is not None:
+                rmses.append(value)
+        return float(sum(rmses) / len(rmses)) if rmses else None
 
     def _batch_f0_rmse(self, y_hat, pitchf, ids_slice) -> float | None:
         """Mean voiced F0 RMSE (Hz) across the batch's sliced segments.
@@ -476,6 +546,21 @@ def write_best_artifacts(
     tmp.write_text(json.dumps(metadata, ensure_ascii=False, indent=2),
                    encoding="utf-8")
     tmp.replace(best_json_path)
+    # Track top-K best models in best_history.json for metric-weighted soup
+    hist_path = best_json_path.with_name(BEST_HISTORY_NAME)
+    try:
+        history = json.loads(hist_path.read_text(encoding="utf-8")) if hist_path.is_file() else []
+        if not isinstance(history, list):
+            history = []
+    except (OSError, json.JSONDecodeError):
+        history = []
+    history.append(dict(metadata))
+    history.sort(key=lambda item: float(item.get("score", float("inf"))))
+    if keep > 0:
+        history = history[:keep]
+    htmp = hist_path.with_suffix(".json.tmp")
+    htmp.write_text(json.dumps(history, ensure_ascii=False, indent=2), encoding="utf-8")
+    htmp.replace(hist_path)
     experiment = metadata.get("experiment")
     if experiment:
         olds = sorted(

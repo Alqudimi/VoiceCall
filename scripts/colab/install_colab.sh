@@ -82,8 +82,8 @@ fi
 
 # ---------------------------------------------------------------- uv + env --
 command -v uv >/dev/null 2>&1 || { log "installing uv"; curl -LsSf https://astral.sh/uv/install.sh | sh; export PATH="$HOME/.local/bin:$PATH"; }
-log "uv $(uv --version | awk '{print $2}') — syncing environment (CPU wheels default; see below for GPU)"
-uv sync --all-groups
+log "uv $(uv --version | awk '{print $2}') — syncing environment + quality/training extras (CPU wheels default; see below for GPU)"
+uv sync --all-groups --extra quality --extra training
 
 # Colab GPU machines: install the matching CUDA variant (torch version kept).
 # Variant availability verified against download.pytorch.org for the locked

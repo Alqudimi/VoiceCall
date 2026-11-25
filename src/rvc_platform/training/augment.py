@@ -160,6 +160,28 @@ class WaveformAugmenter:
         result = out.to(wave.dtype)
         return result.unsqueeze(1) if squeeze_back else result
 
+    def diff_augment_pair(
+        self, real: torch.Tensor, fake: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Symmetric Differentiable Augmentation (DiffAugment, Zhao et al. NeurIPS 2020).
+
+        Applies identical differentiable transforms to BOTH ``real`` and ``fake``
+        before discriminator scoring so the Nash equilibrium stays at p_g = p_data
+        (unlike real-only noise/dropout which pushes G to generate noise/dropouts!).
+        """
+        if self.gain_p <= 0 or self.gain_db <= 0:
+            return real, fake
+        n = real.size(0)
+        device = real.device
+        with torch.no_grad():
+            coin = torch.rand((n,), device=device)
+            gains_db = (torch.rand((n,), device=device) * 2.0 - 1.0) * self.gain_db
+            apply = (coin < self.gain_p).float()
+            scale = torch.pow(10.0, (gains_db * apply) / 20.0)
+            while scale.dim() < real.dim():
+                scale = scale.unsqueeze(-1)
+        return real * scale.to(real.dtype), fake * scale.to(fake.dtype)
+
 
 def build_augmenter(hps, device: str) -> WaveformAugmenter | None:
     """Factory honouring the run-config flag; None means 'no augmentation'."""

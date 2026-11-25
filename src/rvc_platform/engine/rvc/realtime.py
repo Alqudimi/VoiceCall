@@ -243,7 +243,7 @@ class RealTimeRVC:
             semitones = self.pitch_shift
         extractor = f0_mod.SHARED_CACHE.get(method, self.device, self.is_half)
         f0 = extractor.extract(np.ascontiguousarray(x))
-        f0 = f0_mod.interp_unvoiced(f0)
+        f0 = f0_mod.clean_f0_octaves(f0)
         f0 = f0_mod.shift_f0(f0, semitones)
         coarse, fine = f0_mod.f0_to_coarse(f0)
         return (

@@ -103,14 +103,14 @@ class TestDLrScaleDefault:
         from rvc_platform.training.run_config import TrainingRunConfig
 
         cfg = TrainingRunConfig(experiment_name="x", dataset_path="/tmp/x",
-                                sample_rate="40k")
+                                sample_rate="48k")
         assert cfg.d_lr_scale == 1.0
 
     def test_lands_in_hparams(self):
         from rvc_platform.training.run_config import TrainingRunConfig
 
         cfg = TrainingRunConfig(experiment_name="x", dataset_path="/tmp/x",
-                                sample_rate="40k")
+                                sample_rate="48k")
         hps = cfg.to_hparams()
         assert hps.train["d_lr_scale"] == 1.0
 
@@ -118,11 +118,11 @@ class TestDLrScaleDefault:
         from rvc_platform.training.run_config import TrainingRunConfig
 
         cfg = TrainingRunConfig(experiment_name="x", dataset_path="/tmp/x",
-                                sample_rate="40k", clip_grad_norm=500.0)
+                                sample_rate="48k", clip_grad_norm=500.0)
         assert cfg.to_hparams().train["clip_grad_norm"] == 500.0
         # default off = exact upstream behaviour
         cfg0 = TrainingRunConfig(experiment_name="x", dataset_path="/tmp/x",
-                                 sample_rate="40k")
+                                 sample_rate="48k")
         assert cfg0.to_hparams().train["clip_grad_norm"] == 0.0
 
 

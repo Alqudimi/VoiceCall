@@ -40,6 +40,7 @@ from rvc_platform.training import best_model
 from rvc_platform.training import checkpointing
 from rvc_platform.training import losses as L
 from rvc_platform.training import mel_processing
+from rvc_platform.training import ms_mel_loss
 from rvc_platform.training import stft_loss
 from rvc_platform.training.augment import build_augmenter
 from rvc_platform.training.dataset import (
@@ -99,19 +100,20 @@ class Trainer:
         # GAN-health watcher state (see _after_epoch)
         self._val_kl_history: list[float] = []
         # researched quality levers (see UPGRADE_REPORT_AR.md):
-        # generator EMA shadow, multi-scale discriminator + its optimizer/
-        # scheduler (D2), early-stop bookkeeping
+        # generator EMA shadow, multi-scale discriminator (D2),
+        # multi-resolution spectrogram discriminator (D3 / MRD),
+        # differentiable speaker embedder, early-stop bookkeeping
         self._ema = None                     # ema.GeneratorEMA | None
         self._msd = None                     # msd.MultiScaleDiscriminator | None
         self._optim_d2: torch.optim.Optimizer | None = None
         self._sched_d2: torch.optim.lr_scheduler.LRScheduler | None = None
+        self._mrd = None                     # mrd.MultiResolutionDiscriminator | None
+        self._optim_d3: torch.optim.Optimizer | None = None
+        self._sched_d3: torch.optim.lr_scheduler.LRScheduler | None = None
+        self._spk_embedder = None            # shared frozen ECAPA for loss + val
         self._early_stopped = False
-        # Phase-2 researched quality levers: online augmentation + the
-        # warmup/cosine factor schedules layered on G/D
+        # Phase-2 researched quality levers: online DiffAugment
         self._augmenter = None               # augment.WaveformAugmenter | None
-        self._factor_g: torch.optim.lr_scheduler.LRScheduler | None = None
-        self._factor_d: torch.optim.lr_scheduler.LRScheduler | None = None
-        self._factor_d2: torch.optim.lr_scheduler.LRScheduler | None = None
 
     # ------------------------------------------------------------------ events
     def emit(self, topic: str, **payload) -> None:
@@ -205,6 +207,14 @@ class Trainer:
             self._optim_d2 = self._make_optimizer(self._msd, hps, lr=d_lr)
             logger.info("multi-scale discriminator enabled (scales=%s) as D2",
                         getattr(self._msd, "scales", (2, 4)))
+        # Multi-Resolution Spectrogram Discriminator (UnivNet / BigVGAN-v2)
+        if self._use_mrd():
+            from rvc_platform.training import mrd as mrd_mod
+
+            self._mrd = mrd_mod.MultiResolutionDiscriminator().to(self.device)
+            self._optim_d3 = self._make_optimizer(self._mrd, hps, lr=d_lr)
+            logger.info("multi-resolution STFT discriminator enabled (%s) as D3",
+                        getattr(self._mrd, "resolutions", ()))
         return dataset, loader, net_g, net_d, optim_g, optim_d
 
     def _use_msd(self) -> bool:
@@ -213,6 +223,13 @@ class Trainer:
         if env in ("0", "off", "false", "no"):
             return False
         return bool(int(self.hps.train.get("use_msd", 1)))
+
+    def _use_mrd(self) -> bool:
+        """use_mrd from run config, overridable per session with RVC_MRD=0."""
+        env = os.environ.get("RVC_MRD", "").strip().lower()
+        if env in ("0", "off", "false", "no"):
+            return False
+        return bool(int(self.hps.train.get("use_mrd", 1)))
 
     @staticmethod
     def _ema_decay(hps) -> float:
@@ -436,6 +453,7 @@ class Trainer:
             if d_path is not None and d_path.is_file():
                 checkpointing.load_full(d_path, net_d, optim_d, sched_d)
                 self._restore_d2(d_path.with_name(d_path.name.replace("D_", "D2_")))
+                self._restore_d3(d_path.with_name(d_path.name.replace("D_", "D3_")))
             self.epoch = max(meta["epoch"], 1)
             self.global_step = meta.get("global_step") or (self.epoch - 1) * self.steps_per_epoch
             extras["ema"] = meta.get("ema")
@@ -467,6 +485,7 @@ class Trainer:
             if d_path.is_file():
                 checkpointing.load_full(d_path, net_d, optim_d, sched_d)
                 self._restore_d2(d_path.with_name(d_path.name.replace("D_", "D2_")))
+                self._restore_d3(d_path.with_name(d_path.name.replace("D_", "D3_")))
             self.epoch = max(meta["epoch"], 1)
             self.global_step = meta.get("global_step") or (self.epoch - 1) * self.steps_per_epoch
             extras["ema"] = meta.get("ema")
@@ -517,11 +536,47 @@ class Trainer:
             logger.warning("D2 restore failed — continuing with fresh D2",
                            exc_info=True)
 
+    def _restore_d3(self, d3_path: Path | None) -> None:
+        """Restore the optional Multi-Resolution STFT Discriminator (D3 / MRD)."""
+        if self._mrd is None:
+            return
+        if d3_path is None or not Path(d3_path).is_file():
+            logger.info("D3 (multi-resolution STFT discriminator) warm-started fresh")
+            return
+        try:
+            payload = torch.load(Path(d3_path), map_location="cpu",
+                                 weights_only=False)
+            self._mrd.load_state_dict(payload["model"])
+            if self._optim_d3 is not None and payload.get("optimizer"):
+                self._optim_d3.load_state_dict(payload["optimizer"])
+            if (self._sched_d3 is not None and payload.get("scheduler")
+                    and isinstance(self._sched_d3,
+                                   torch.optim.lr_scheduler.LRScheduler)):
+                self._sched_d3.load_state_dict(payload["scheduler"])
+            logger.info("D3 (MRD) state restored from %s", d3_path)
+        except Exception:
+            logger.warning("D3 restore failed — continuing with fresh D3",
+                           exc_info=True)
+
     # ----------------------------------------------------------- best tracking
     def _setup_best_tracking(self) -> None:
         """Derive the validation split (pinned on disk), build the validator
         and restore the persisted best bar. Must run before _build() so the
         training loader sees filelist_train.txt."""
+        need_spk = (
+            float(self.hps.train.get("c_spk_loss", 0.0) or 0.0) > 0.0
+            or (
+                getattr(self.config, "save_best", True)
+                and float(self.hps.train.get("spk_weight", 1.0) or 0.0) > 0.0
+            )
+        )
+        if need_spk and os.environ.get("RVC_SPK_LOSS", "1") != "0":
+            try:
+                from rvc_platform.training import eval_metrics
+
+                self._spk_embedder = eval_metrics.try_build_speaker_embedder(self.device)
+            except Exception:
+                self._spk_embedder = None
         if not getattr(self.config, "save_best", True):
             return
         val_split = float(getattr(self.config, "val_split", 0.0) or 0.0)
@@ -536,6 +591,7 @@ class Trainer:
                 try:
                     validator = best_model.ValidationEvaluator(
                         self.hps, self.device, self.is_half, split.val_path,
+                        speaker_embedder=self._spk_embedder,
                     )
                 except Exception:
                     logger.exception("validation evaluator unavailable; "
@@ -740,35 +796,41 @@ class Trainer:
         (dataset, loader, net_g, net_d,
          optim_g, optim_d) = self._build()
         self.steps_per_epoch = len(loader)
-        sched_g = torch.optim.lr_scheduler.ExponentialLR(
-            optim_g, gamma=self.hps.train["lr_decay"]
-        )
-        sched_d = torch.optim.lr_scheduler.ExponentialLR(
-            optim_d, gamma=self.hps.train["lr_decay"]
-        )
-        if self._optim_d2 is not None:
-            self._sched_d2 = torch.optim.lr_scheduler.ExponentialLR(
-                self._optim_d2, gamma=self.hps.train["lr_decay"],
-            )
-        # Phase-2: warmup (+optional cosine tail) factor schedule layered on
-        # the exponential decay — the factor multiplies the base lr per step.
         warmup_epochs = self._warmup_epochs()
         cosine_frac = self._cosine_frac()
-        if warmup_epochs > 0 or cosine_frac > 0:
+        self._per_step_sched = bool(warmup_epochs > 0 or cosine_frac > 0)
+        if self._per_step_sched:
             from rvc_platform.training.schedules import WarmupCosineScheduler
 
             mk = lambda opt: WarmupCosineScheduler(  # noqa: E731
                 opt, steps_per_epoch=self.steps_per_epoch,
                 warmup_epochs=warmup_epochs, total_epochs=self.hps.total_epoch,
-                cosine_frac=cosine_frac,
+                cosine_frac=cosine_frac, epoch_gamma=self.hps.train["lr_decay"],
             )
-            self._factor_g = mk(optim_g)
-            self._factor_d = mk(optim_d)
+            sched_g = mk(optim_g)
+            sched_d = mk(optim_d)
             if self._optim_d2 is not None:
-                self._factor_d2 = mk(self._optim_d2)
-            logger.info("warmup/cosine factor schedule enabled: warmup=%s "
-                        "epochs, cosine_frac=%s", warmup_epochs, cosine_frac)
-        # Phase-2: online waveform augmentation (None when disabled)
+                self._sched_d2 = mk(self._optim_d2)
+            if self._optim_d3 is not None:
+                self._sched_d3 = mk(self._optim_d3)
+            logger.info("unified per-step warmup/cosine+exp schedule enabled: "
+                        "warmup=%s epochs, cosine_frac=%s", warmup_epochs, cosine_frac)
+        else:
+            sched_g = torch.optim.lr_scheduler.ExponentialLR(
+                optim_g, gamma=self.hps.train["lr_decay"]
+            )
+            sched_d = torch.optim.lr_scheduler.ExponentialLR(
+                optim_d, gamma=self.hps.train["lr_decay"]
+            )
+            if self._optim_d2 is not None:
+                self._sched_d2 = torch.optim.lr_scheduler.ExponentialLR(
+                    self._optim_d2, gamma=self.hps.train["lr_decay"],
+                )
+            if self._optim_d3 is not None:
+                self._sched_d3 = torch.optim.lr_scheduler.ExponentialLR(
+                    self._optim_d3, gamma=self.hps.train["lr_decay"],
+                )
+        # Phase-2: online symmetric DiffAugment (None when disabled)
         self._augmenter = build_augmenter(self.hps, self.device)
         scaler = torch.amp.GradScaler("cuda", enabled=self.is_half)
         self.state = JobState.RUNNING
@@ -776,8 +838,12 @@ class Trainer:
         self.emit("training.started", steps_per_epoch=self.steps_per_epoch,
                   device=self.device, precision=str(self.dtype))
 
-        _, extras = self._restore(net_g, net_d, optim_g, optim_d, sched_g, sched_d, scaler,
-                                  dataset_signature)
+        resumed, extras = self._restore(net_g, net_d, optim_g, optim_d, sched_g, sched_d, scaler,
+                                        dataset_signature)
+        if resumed and self._per_step_sched:
+            for sc in (sched_g, sched_d, self._sched_d2, self._sched_d3):
+                if sc is not None and hasattr(sc, "sync_to_step"):
+                    sc.sync_to_step(self.global_step)
         self._init_ema(net_g, extras.get("ema"))
         net_g, net_d = self._maybe_compile(net_g, net_d)
         start_epoch = self.epoch + 1
@@ -900,25 +966,26 @@ class Trainer:
                     spec_lengths = spec_lengths.cuda(non_blocking=True)
                     wave = wave.cuda(non_blocking=True)
 
-                # Phase-2: online augmentation of the REAL waveform the
-                # discriminators score (spec target untouched — the mel/STFT
-                # reconstruction losses always compare against the pristine
-                # ground truth, so the generator is never asked to reproduce
-                # noise; only D's "real" distribution is regularised).
-                if self._augmenter is not None:
-                    wave = self._augmenter.augment(wave)
+                # Keep pristine ground-truth waveform for all reconstruction/perceptual
+                # losses (mel, MRSTFT, MS-Mel, speaker-sim); never corrupt it!
+                wave_clean = wave
+                feat_noise_std = float(hps.train.get("feat_noise_std", 0.0) or 0.0)
+                if feat_noise_std > 0.0:
+                    phone_in = phone + torch.randn_like(phone) * feat_noise_std
+                else:
+                    phone_in = phone
 
                 with torch.autocast("cuda" if self.is_half else "cpu",
                                     enabled=self.is_half):
                     if hps.if_f0 == 1:
                         (y_hat, ids_slice, x_mask, z_mask,
                          (z, z_p, m_p, logs_p, m_q, logs_q)) = net_g(
-                            phone, phone_lengths, pitch, pitchf, spec, spec_lengths, sid
+                            phone_in, phone_lengths, pitch, pitchf, spec, spec_lengths, sid
                         )
                     else:
                         (y_hat, ids_slice, x_mask, z_mask,
                          (z, z_p, m_p, logs_p, m_q, logs_q)) = net_g(
-                            phone, phone_lengths, spec, spec_lengths, sid
+                            phone_in, phone_lengths, spec, spec_lengths, sid
                         )
                     mel = mel_processing.spec_to_mel_torch(
                         spec, hps.data["filter_length"], hps.data["n_mel_channels"],
@@ -938,16 +1005,25 @@ class Trainer:
                     if self.is_half:
                         y_hat_mel = y_hat_mel.half()
                     wave_sliced = commons.slice_segments(
-                        wave, ids_slice * hps.data["hop_length"],
+                        wave_clean, ids_slice * hps.data["hop_length"],
                         hps.train["segment_size"],
                     )
-                    y_d_hat_r, y_d_hat_g, _, _ = net_d(wave_sliced, y_hat.detach())
+                    # Symmetric DiffAugment for D (never asymmetric real-only noise)
+                    if self._augmenter is not None:
+                        wave_d_r, y_hat_d_g = self._augmenter.diff_augment_pair(
+                            wave_sliced, y_hat.detach()
+                        )
+                    else:
+                        wave_d_r, y_hat_d_g = wave_sliced, y_hat.detach()
+                    y_d_hat_r, y_d_hat_g, _, _ = net_d(wave_d_r, y_hat_d_g)
                     if self._msd is not None:
-                        # HiFi-GAN MSD scales 2/4 — same loss functions consume
-                        # the concatenated output lists (zip iteration)
-                        y2_r, y2_g, _, _ = self._msd(wave_sliced, y_hat.detach())
+                        y2_r, y2_g, _, _ = self._msd(wave_d_r, y_hat_d_g)
                         y_d_hat_r = y_d_hat_r + y2_r
                         y_d_hat_g = y_d_hat_g + y2_g
+                    if self._mrd is not None:
+                        y3_r, y3_g, _, _ = self._mrd(wave_d_r, y_hat_d_g)
+                        y_d_hat_r = y_d_hat_r + y3_r
+                        y_d_hat_g = y_d_hat_g + y3_g
                     with torch.autocast("cuda" if self.is_half else "cpu", enabled=False):
                         loss_disc, losses_disc_r, losses_disc_g = L.discriminator_loss(
                             y_d_hat_r, y_d_hat_g
@@ -955,56 +1031,147 @@ class Trainer:
                 optim_d.zero_grad(set_to_none=True)
                 if self._optim_d2 is not None:
                     self._optim_d2.zero_grad(set_to_none=True)
+                if self._optim_d3 is not None:
+                    self._optim_d3.zero_grad(set_to_none=True)
                 scaler.scale(loss_disc).backward()
                 scaler.unscale_(optim_d)
-                torch.nn.utils.clip_grad_norm_(net_d.parameters(), max_norm=10.0)
+                torch.nn.utils.clip_grad_norm_(net_d.parameters(), max_norm=100.0)
                 scaler.step(optim_d)
                 if self._optim_d2 is not None:
                     scaler.unscale_(self._optim_d2)
-                    torch.nn.utils.clip_grad_norm_(self._msd.parameters(), max_norm=10.0)
+                    torch.nn.utils.clip_grad_norm_(self._msd.parameters(), max_norm=100.0)
                     scaler.step(self._optim_d2)
+                if self._optim_d3 is not None:
+                    scaler.unscale_(self._optim_d3)
+                    torch.nn.utils.clip_grad_norm_(self._mrd.parameters(), max_norm=100.0)
+                    scaler.step(self._optim_d3)
+                loss_disc_val = float(loss_disc.detach())
+                del y_d_hat_r, y_d_hat_g, loss_disc, losses_disc_r, losses_disc_g
+                if self._msd is not None:
+                    del y2_r, y2_g
+                if self._mrd is not None:
+                    del y3_r, y3_g
 
-                with torch.autocast("cuda" if self.is_half else "cpu",
-                                    enabled=self.is_half):
-                    y_d_hat_r, y_d_hat_g, fmap_r, fmap_g = net_d(wave_sliced, y_hat)
-                    if self._msd is not None:
-                        y2_r, y2_g, f2_r, f2_g = self._msd(wave_sliced, y_hat)
-                        y_d_hat_r = y_d_hat_r + y2_r
-                        y_d_hat_g = y_d_hat_g + y2_g
-                        fmap_r = fmap_r + f2_r
-                        fmap_g = fmap_g + f2_g
-                    with torch.autocast("cuda" if self.is_half else "cpu", enabled=False):
-                        loss_mel = torch.nn.functional.l1_loss(y_mel, y_hat_mel) * hps.train["c_mel"]
-                        loss_kl = L.kl_loss(z_p, logs_q, m_p, logs_p, z_mask) * hps.train["c_kl"]
-                        loss_fm = L.feature_loss(fmap_r, fmap_g)
-                        loss_gen, losses_gen = L.generator_loss(y_d_hat_g)
-                        loss_gen_all = loss_gen + loss_fm + loss_mel + loss_kl
-                        # multi-resolution STFT auxiliary loss (UnivNet/BigVGAN
-                        # recipe; c_stft=0 reproduces the upstream objective)
-                        c_stft = float(hps.train.get("c_stft", 0.0) or 0.0)
-                        loss_stft = None
-                        if c_stft > 0.0:
-                            loss_stft = stft_loss.mr_stft_loss(
-                                wave_sliced, y_hat) * c_stft
-                            loss_gen_all = loss_gen_all + loss_stft
-                if self._tracker is not None and self._validator is None:
-                    # GPU-side accumulation for the train_mel fallback metric;
-                    # a single host sync happens at the end of the epoch
-                    detached = loss_mel.detach()
-                    self._epoch_mel_acc = (detached if self._epoch_mel_acc is None
-                                           else self._epoch_mel_acc + detached)
-                optim_g.zero_grad(set_to_none=True)
-                scale_before = scaler.get_scale()
-                scaler.scale(loss_gen_all).backward()
+                # Freeze discriminator weights during G pass so backward() skips all D
+                # parameter gradients and avoids retaining real-branch D activations.
+                disc_modules = [m for m in (net_d, self._msd, self._mrd) if m is not None]
+                for dm in disc_modules:
+                    for p in dm.parameters():
+                        p.requires_grad_(False)
+                try:
+                    with torch.autocast("cuda" if self.is_half else "cpu",
+                                        enabled=self.is_half):
+                        if self._augmenter is not None:
+                            wave_d_r2, y_hat_d_g2 = self._augmenter.diff_augment_pair(
+                                wave_sliced, y_hat
+                            )
+                        else:
+                            wave_d_r2, y_hat_d_g2 = wave_sliced, y_hat
+                        y_d_hat_r, y_d_hat_g, fmap_r, fmap_g = net_d(wave_d_r2, y_hat_d_g2)
+                        if self._msd is not None:
+                            y2_r, y2_g, f2_r, f2_g = self._msd(wave_d_r2, y_hat_d_g2)
+                            y_d_hat_r = y_d_hat_r + y2_r
+                            y_d_hat_g = y_d_hat_g + y2_g
+                            fmap_r = fmap_r + f2_r
+                            fmap_g = fmap_g + f2_g
+                        if self._mrd is not None:
+                            y3_r, y3_g, f3_r, f3_g = self._mrd(wave_d_r2, y_hat_d_g2)
+                            y_d_hat_r = y_d_hat_r + y3_r
+                            y_d_hat_g = y_d_hat_g + y3_g
+                            fmap_r = fmap_r + f3_r
+                            fmap_g = fmap_g + f3_g
+                        with torch.autocast("cuda" if self.is_half else "cpu", enabled=False):
+                            loss_mel = torch.nn.functional.l1_loss(y_mel, y_hat_mel) * hps.train["c_mel"]
+                            loss_kl = L.kl_loss(z_p, logs_q, m_p, logs_p, z_mask) * hps.train["c_kl"]
+                            loss_fm = L.feature_loss(fmap_r, fmap_g)
+                            loss_gen, losses_gen = L.generator_loss(y_d_hat_g)
+                            loss_gen_all = loss_gen + loss_fm + loss_mel + loss_kl
+                            # multi-resolution STFT auxiliary loss (always vs pristine wave_sliced!)
+                            c_stft = float(hps.train.get("c_stft", 0.0) or 0.0)
+                            loss_stft = None
+                            if c_stft > 0.0:
+                                loss_stft = stft_loss.mr_stft_loss(
+                                    wave_sliced, y_hat) * c_stft
+                                loss_gen_all = loss_gen_all + loss_stft
+                            # Multi-scale mel reconstruction loss (BigVGAN-v2 / DAC)
+                            c_ms_mel = float(hps.train.get("c_ms_mel", 0.0) or 0.0)
+                            loss_ms_mel = None
+                            if c_ms_mel > 0.0:
+                                loss_ms_mel = ms_mel_loss.multi_scale_mel_loss(
+                                    wave_sliced, y_hat,
+                                    sr=int(hps.data["sampling_rate"]),
+                                    fmin=float(hps.data.get("mel_fmin", 0.0) or 0.0),
+                                    fmax=hps.data.get("mel_fmax"),
+                                ) * c_ms_mel
+                                loss_gen_all = loss_gen_all + loss_ms_mel
+                            # End-to-end inference-path prior consistency (enc_p -> flow_reverse -> dec)
+                            c_prior_mel = float(hps.train.get("c_prior_mel", 0.0) or 0.0)
+                            loss_prior_mel = None
+                            net_g_raw = self._unwrap(net_g)
+                            if (c_prior_mel > 0.0 and epoch > max(1, self._warmup_epochs())
+                                    and hasattr(net_g_raw, "flow") and hasattr(net_g_raw, "dec")
+                                    and hasattr(net_g_raw, "emb_g")):
+                                k_p = min(2, int(y_hat.shape[0]))
+                                g_sub = net_g_raw.emb_g(sid[:k_p]).unsqueeze(-1)
+                                xm_sub = x_mask[:k_p]
+                                z_p_inf = (
+                                    m_p[:k_p]
+                                    + torch.randn_like(m_p[:k_p]) * torch.exp(logs_p[:k_p]) * 0.66666
+                                ) * xm_sub
+                                z_prior = net_g_raw.flow(z_p_inf, xm_sub, g=g_sub, reverse=True)
+                                z_prior_slice = commons.slice_segments(
+                                    z_prior, ids_slice[:k_p], net_g_raw.segment_size
+                                )
+                                if hps.if_f0 == 1:
+                                    pitchf_sub = commons.slice_segments2(
+                                        pitchf[:k_p], ids_slice[:k_p], net_g_raw.segment_size
+                                    )
+                                    y_prior = net_g_raw.dec(z_prior_slice, pitchf_sub, g=g_sub)
+                                else:
+                                    y_prior = net_g_raw.dec(z_prior_slice, g=g_sub)
+                                y_prior_mel = mel_processing.mel_spectrogram_torch(
+                                    y_prior.float().squeeze(1), hps.data["filter_length"],
+                                    hps.data["n_mel_channels"], hps.data["sampling_rate"],
+                                    hps.data["hop_length"], hps.data["win_length"],
+                                    hps.data["mel_fmin"], hps.data["mel_fmax"],
+                                )
+                                loss_prior_mel = torch.nn.functional.l1_loss(
+                                    y_mel[:k_p].float(), y_prior_mel.float()
+                                ) * c_prior_mel
+                                loss_gen_all = loss_gen_all + loss_prior_mel
+                            # Differentiable ECAPA speaker-identity cosine loss
+                            c_spk_loss = float(hps.train.get("c_spk_loss", 0.0) or 0.0)
+                            loss_spk = None
+                            min_spk_samples = int(int(hps.data["sampling_rate"]) * 0.2)
+                            if (c_spk_loss > 0.0 and self._spk_embedder is not None
+                                    and wave_sliced.shape[-1] >= min_spk_samples):
+                                from rvc_platform.training import eval_metrics
+
+                                k_spk = min(4, int(y_hat.shape[0]))
+                                loss_spk = eval_metrics.speaker_cosine_loss(
+                                    self._spk_embedder, y_hat[:k_spk], wave_sliced[:k_spk],
+                                    int(hps.data["sampling_rate"]),
+                                ) * c_spk_loss
+                                loss_gen_all = loss_gen_all + loss_spk
+                    if self._tracker is not None and self._validator is None:
+                        # GPU-side accumulation for the train_mel fallback metric;
+                        # a single host sync happens at the end of the epoch
+                        detached = loss_mel.detach()
+                        self._epoch_mel_acc = (detached if self._epoch_mel_acc is None
+                                               else self._epoch_mel_acc + detached)
+                    optim_g.zero_grad(set_to_none=True)
+                    scale_before = scaler.get_scale()
+                    scaler.scale(loss_gen_all).backward()
+                finally:
+                    for dm in disc_modules:
+                        for p in dm.parameters():
+                            p.requires_grad_(True)
                 scaler.unscale_(optim_g)
-                # optional global-norm gradient clipping on G (BigVGAN §3.4:
-                # "clipping the global norm of the gradient to 10^3 ...
-                # prevents the early training collapse of the generator";
-                # their v2 uses 500 and recommends ~100 for small-batch
-                # starts). 0.0 = disabled = exact upstream behaviour.
+                # Global-norm gradient clipping on G (BigVGAN §3.4: 500 prevents collapse;
+                # 0.0 = disabled = exact upstream behaviour, never clipped at 10.0).
                 clip_g = float(hps.train.get("clip_grad_norm", 0.0) or 0.0)
-                torch.nn.utils.clip_grad_norm_(
-                    net_g.parameters(), clip_g if clip_g > 0.0 else 10.0)
+                if clip_g > 0.0:
+                    torch.nn.utils.clip_grad_norm_(net_g.parameters(), clip_g)
                 scaler.step(optim_g)
                 scaler.update()
                 if self._ema is not None:
@@ -1015,31 +1182,34 @@ class Trainer:
                         self._ema.update(self._unwrap(net_g))
 
                 self.global_step += 1
-                # Phase-2: warmup/cosine factor schedule steps per training
-                # step (per-step granularity, unlike the per-epoch
-                # ExponentialLR). Stepped AFTER the optimizer so the first
-                # step of the run uses the warmup factor of step 0.
-                if self._factor_g is not None:
-                    self._factor_g.step()
-                if self._factor_d is not None:
-                    self._factor_d.step()
-                if self._factor_d2 is not None:
-                    self._factor_d2.step()
+                if self._per_step_sched:
+                    sched_g.step()
+                    sched_d.step()
+                    if self._sched_d2 is not None:
+                        self._sched_d2.step()
+                    if self._sched_d3 is not None:
+                        self._sched_d3.step()
                 if self.global_step % hps.train["log_interval"] == 0 or batch_idx == 0:
                     lr = optim_g.param_groups[0]["lr"]
                     self.last_losses = {
-                        "disc": round(float(loss_disc), 4),
+                        "disc": round(loss_disc_val, 4),
                         "gen": round(float(loss_gen_all), 4),
                         "mel": round(min(float(loss_mel), 75.0), 4),
                         "kl": round(min(float(loss_kl), 9.0), 4),
                         "fm": round(float(loss_fm), 4),
                         "lr": lr,
                     }
-                    if self._factor_g is not None:
+                    if self._per_step_sched and hasattr(sched_g, "_factor"):
                         self.last_losses["lr_factor"] = round(
-                            float(self._factor_g._factor(self._factor_g.last_epoch)), 6)
+                            float(sched_g._factor(sched_g.last_epoch)), 6)
                     if loss_stft is not None:
                         self.last_losses["stft"] = round(float(loss_stft), 4)
+                    if loss_ms_mel is not None:
+                        self.last_losses["ms_mel"] = round(float(loss_ms_mel), 4)
+                    if loss_prior_mel is not None:
+                        self.last_losses["prior_mel"] = round(float(loss_prior_mel), 4)
+                    if loss_spk is not None:
+                        self.last_losses["spk"] = round(float(loss_spk), 4)
                     if self._ema is not None:
                         self.last_losses["ema_decay"] = round(
                             self._ema._current_decay(), 6)
@@ -1048,10 +1218,13 @@ class Trainer:
                               epoch_seconds=round(time.time() - epoch_start, 1),
                               batch_idx=batch_idx)
 
-            sched_g.step()
-            sched_d.step()
-            if self._sched_d2 is not None:
-                self._sched_d2.step()
+            if not self._per_step_sched:
+                sched_g.step()
+                sched_d.step()
+                if self._sched_d2 is not None:
+                    self._sched_d2.step()
+                if self._sched_d3 is not None:
+                    self._sched_d3.step()
             # score the epoch (held-out validation or train-mel fallback) and
             # export/publish the best-so-far model when the bar is beaten
             self._after_epoch(net_g, epoch)
@@ -1119,6 +1292,14 @@ class Trainer:
                 self._msd, self._optim_d2, self._sched_d2, None, epoch,
                 self.global_step,
             )
+        payload_d3 = None
+        d3_path = None
+        if self._mrd is not None and self._optim_d3 is not None:
+            d3_path = self.checkpoint_dir / f"D3_{step_name}.pth"
+            payload_d3 = checkpointing.build_full_payload(
+                self._mrd, self._optim_d3, self._sched_d3, None, epoch,
+                self.global_step,
+            )
         state = {
             "epoch": epoch,
             "global_step": self.global_step,
@@ -1138,7 +1319,7 @@ class Trainer:
             checkpointing.write_checkpoint_files,
             payload_g, g_path, payload_d, d_path,
             state, self.checkpoint_dir / "state.json", mirror,
-            payload_d2, d2_path,
+            payload_d2, d2_path, payload_d3, d3_path,
         )
         if self.hps.save_every_weights == "1" or final:
             export_path = self.exports_dir / (
@@ -1163,7 +1344,8 @@ class Trainer:
 
     def _finalize(self, net_g, epoch: int, completed: bool) -> None:
         # the loop already queued a full checkpoint at stop/completion;
-        # here we only export the final inference model when completed.
+        # here we export the final inference model and optionally build a
+        # Top-K Metric-Weighted Soup over the best checkpoints.
         if completed:
             export_path = self.exports_dir / f"{self.config.experiment_name}.pth"
 
@@ -1177,6 +1359,19 @@ class Trainer:
                 export_path, self.hps.sample_rate, self.hps.if_f0,
                 on_done=_on_export,
             )
+
+            def _try_best_soup() -> None:
+                try:
+                    from rvc_platform.training import soup as soup_mod
+
+                    res = soup_mod.build_best_export_soup(self.config.run_dir, k=5)
+                    if res.get("ok"):
+                        logger.info("top-k best checkpoint soup exported: %s", res)
+                        self.emit("training.soup_exported", **res)
+                except Exception:
+                    logger.debug("best-export soup skipped", exc_info=True)
+
+            self._io.submit("best-export-soup", _try_best_soup)
 
     # ------------------------------------------------------------------ control
     def request_stop(self) -> None:

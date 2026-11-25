@@ -57,9 +57,13 @@ def change_rms(
     dst_audio: np.ndarray, dst_sr: int,
     rate: float,
 ) -> np.ndarray:
-    """Blend the output loudness envelope with the source one (upstream)."""
-    rms1 = librosa.feature.rms(y=src_audio, frame_length=src_sr // 2 * 2, hop_length=src_sr // 2)
-    rms2 = librosa.feature.rms(y=dst_audio, frame_length=dst_sr // 2 * 2, hop_length=dst_sr // 2)
+    """Blend the output loudness envelope with the source one (smooth 125 ms grid)."""
+    frame1 = max(2, (src_sr // 4) * 2)
+    hop1 = max(1, src_sr // 8)
+    frame2 = max(2, (dst_sr // 4) * 2)
+    hop2 = max(1, dst_sr // 8)
+    rms1 = librosa.feature.rms(y=src_audio, frame_length=frame1, hop_length=hop1)
+    rms2 = librosa.feature.rms(y=dst_audio, frame_length=frame2, hop_length=hop2)
     rms1 = torch.from_numpy(rms1)
     rms1 = F.interpolate(rms1.unsqueeze(0), size=dst_audio.shape[0], mode="linear").squeeze()
     rms2 = torch.from_numpy(rms2)
@@ -69,6 +73,29 @@ def change_rms(
         torch.pow(rms1, torch.tensor(1 - rate)) * torch.pow(rms2, torch.tensor(rate - 1))
     ).numpy()
     return dst_audio
+
+
+def _shift_formants_praat(audio_16k: np.ndarray, formant_shift_semitones: float) -> np.ndarray:
+    """Shift vocal-tract formants independently of F0 via Praat PSOLA (best-effort)."""
+    if abs(formant_shift_semitones) < 0.05 or audio_16k.size < 320:
+        return audio_16k
+    try:
+        import parselmouth
+
+        ratio = float(2.0 ** (formant_shift_semitones / 12.0))
+        snd = parselmouth.Sound(np.asarray(audio_16k, dtype=np.float64), sampling_frequency=_SR_HUBERT)
+        shifted = parselmouth.praat.call(
+            snd, "Change gender", 50.0, 1100.0, ratio, 0.0, 1.0, 1.0
+        )
+        out = shifted.values[0].astype(np.float32)
+        if out.shape[0] == audio_16k.shape[0]:
+            return out
+        if out.shape[0] > audio_16k.shape[0]:
+            return out[: audio_16k.shape[0]]
+        return np.pad(out, (0, audio_16k.shape[0] - out.shape[0])).astype(np.float32)
+    except Exception:
+        logger.debug("formant shift unavailable — continuing without it", exc_info=True)
+        return audio_16k
 
 
 class RVCInferenceEngine:
@@ -193,15 +220,22 @@ class RVCInferenceEngine:
             )
 
     # ------------------------------------------------------------------ F0
-    def get_f0(self, audio_16k: np.ndarray, p_len: int, semitones: int,
-               method: str, filter_radius: int):
+    def _extract_raw_f0(self, audio_16k: np.ndarray, p_len: int, method: str,
+                        filter_radius: int) -> np.ndarray:
         extractor = self._f0_cache.get(method, self.device, self.is_half)
         f0 = extractor.extract(np.ascontiguousarray(audio_16k))
         if f0.shape[0] < p_len:
             f0 = np.pad(f0, (0, p_len - f0.shape[0]))
         f0 = f0[:p_len]
-        f0 = f0_mod.interp_unvoiced(f0)
+        # Clean isolated 1-2 frame octave spikes while PRESERVING unvoiced 0.0
+        # frames so SineGen U/V excitation and voiceless `protect` both work!
+        f0 = f0_mod.clean_f0_octaves(f0)
         f0 = f0_mod.median_filter_f0(f0, filter_radius)
+        return f0
+
+    def get_f0(self, audio_16k: np.ndarray, p_len: int, semitones: int,
+               method: str, filter_radius: int):
+        f0 = self._extract_raw_f0(audio_16k, p_len, method, filter_radius)
         f0 = f0_mod.shift_f0(f0, semitones)
         coarse, fine = f0_mod.f0_to_coarse(f0)
         return coarse.astype(np.int64), fine.astype(np.float32)
@@ -300,6 +334,8 @@ class RVCInferenceEngine:
         audio16k = signal.filtfilt(bh, ah, audio16k)
         if settings.denoise:
             audio16k = self.audio.denoise(audio16k, _SR_HUBERT)
+        if abs(getattr(settings, "formant_shift", 0.0)) >= 0.05:
+            audio16k = _shift_formants_praat(audio16k, float(settings.formant_shift))
 
         sr = self.tgt_sr
         t_pad = self.x_pad * _SR_HUBERT
@@ -328,8 +364,25 @@ class RVCInferenceEngine:
 
         pitch = pitchf = None
         if self.if_f0 == 1:
+            effective_pitch = float(settings.pitch_shift)
+            if getattr(settings, "auto_pitch", False):
+                f0_stats = (self.cpt or {}).get("f0_stats") if isinstance(self.cpt, dict) else None
+                tgt_med = float((f0_stats or {}).get("median_hz") or 0.0)
+                if tgt_med > 20.0:
+                    raw_f0 = self._extract_raw_f0(
+                        audio_pad, p_len, settings.f0_method, settings.filter_radius
+                    )
+                    voiced = raw_f0[raw_f0 > 20.0]
+                    if voiced.size >= 5:
+                        src_med = float(np.median(voiced))
+                        auto_semi = float(np.clip(
+                            round(12.0 * np.log2(tgt_med / src_med)), -18.0, 18.0
+                        ))
+                        logger.info("auto-pitch: source median=%.1f Hz -> target=%.1f Hz => %+g st",
+                                    src_med, tgt_med, auto_semi)
+                        effective_pitch += auto_semi
             coarse, fine = self.get_f0(
-                audio_pad, p_len, settings.pitch_shift, settings.f0_method,
+                audio_pad, p_len, effective_pitch, settings.f0_method,
                 settings.filter_radius,
             )
             pitch = torch.tensor(coarse, device=self.device).unsqueeze(0).long()
@@ -355,17 +408,29 @@ class RVCInferenceEngine:
             if progress:
                 progress(len(chunks) / total_chunks)
 
-        audio_opt = np.concatenate(chunks) if chunks else np.zeros(0, dtype=np.float32)
+        if len(chunks) > 1:
+            # Tiny 1 ms seam smoothing across split boundaries without altering sample alignment
+            edge = min(48, min(len(c) for c in chunks) // 4)
+            if edge > 2:
+                fade_in = np.linspace(0.0, 1.0, edge, dtype=np.float32)
+                fade_out = 1.0 - fade_in
+                for idx in range(len(chunks) - 1):
+                    mid = 0.5 * (chunks[idx][-1] + chunks[idx + 1][0])
+                    chunks[idx][-edge:] = chunks[idx][-edge:] * fade_out + mid * fade_in
+                    chunks[idx + 1][:edge] = chunks[idx + 1][:edge] * fade_in + mid * fade_out
+            audio_opt = np.concatenate(chunks)
+        else:
+            audio_opt = chunks[0] if chunks else np.zeros(0, dtype=np.float32)
         if settings.rms_mix_rate != 1 and audio_opt.size:
             audio_opt = change_rms(audio16k, _SR_HUBERT, audio_opt, sr, settings.rms_mix_rate)
         if settings.output_sample_rate and settings.output_sample_rate >= 16_000 and settings.output_sample_rate != sr:
             audio_opt = librosa.resample(audio_opt, orig_sr=sr, target_sr=settings.output_sample_rate)
             sr = settings.output_sample_rate
         if settings.normalize:
-            audio_opt = self.audio.normalize(audio_opt, 0.99)
+            audio_opt = self.audio.normalize(audio_opt, 0.96)
         peak = float(np.max(np.abs(audio_opt))) if audio_opt.size else 0.0
-        if peak > 1.0:
-            audio_opt = audio_opt / peak * 0.99
+        if peak > 0.99:
+            audio_opt = audio_opt / peak * 0.96
 
         self.audio.write_wav(output_path, audio_opt.astype(np.float32), sr)
         processing = time.perf_counter() - started

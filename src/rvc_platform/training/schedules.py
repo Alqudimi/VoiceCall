@@ -37,20 +37,21 @@ import torch
 
 
 class WarmupCosineScheduler(torch.optim.lr_scheduler.LRScheduler):
-    """Factor schedule: warmup ramp -> 1.0 -> optional cosine tail.
+    """Factor schedule: warmup ramp -> 1.0 -> optional cosine tail (+ optional exp decay).
 
-    Multiplier applied ON TOP of the underlying optimizer lr (which keeps
-    its own ExponentialLR). With ``cosine_frac == 0`` and ``warmup_epochs
-    == 0`` the multiplier is identically 1.0 (pure upstream behaviour).
+    When ``epoch_gamma < 1.0`` (e.g. 0.999875), the per-epoch exponential decay
+    is composed analytically inside this single scheduler so two LRSchedulers
+    never fight over ``optimizer.param_groups[0]['lr']``.
     """
 
     def __init__(self, optimizer, steps_per_epoch: int, warmup_epochs: int = 1,
                  total_epochs: int = 0, cosine_frac: float = 0.0,
-                 last_epoch: int = -1) -> None:
+                 epoch_gamma: float = 1.0, last_epoch: int = -1) -> None:
         self.steps_per_epoch = max(1, int(steps_per_epoch))
         self.warmup_epochs = max(0, int(warmup_epochs))
         self.total_epochs = max(0, int(total_epochs))
         self.cosine_frac = float(cosine_frac)
+        self.epoch_gamma = float(epoch_gamma)
         super().__init__(optimizer, last_epoch)
 
     def _factor(self, step: int) -> float:
@@ -69,4 +70,16 @@ class WarmupCosineScheduler(torch.optim.lr_scheduler.LRScheduler):
     def get_lr(self) -> list[float]:
         step = self.last_epoch  # stepped once per .step() call == per train step
         factor = self._factor(step)
+        if 0.0 < self.epoch_gamma < 1.0:
+            completed_epochs = max(0, step) // self.steps_per_epoch
+            factor *= (self.epoch_gamma ** completed_epochs)
         return [base_lr * factor for base_lr in self.base_lrs]
+
+    def sync_to_step(self, global_step: int) -> None:
+        """Fast-forward scheduler state on checkpoint resume so warmup/cosine do not restart."""
+        target = max(0, int(global_step))
+        self.last_epoch = target
+        values = self.get_lr()
+        for param_group, lr in zip(self.optimizer.param_groups, values):
+            param_group["lr"] = lr
+        self._last_lr = [group["lr"] for group in self.optimizer.param_groups]

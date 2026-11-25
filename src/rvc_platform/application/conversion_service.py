@@ -45,6 +45,8 @@ class ConversionService:
             "denoise": self.defaults.denoise,
             "normalize": self.defaults.normalize,
             "output_sample_rate": self.defaults.output_sample_rate,
+            "auto_pitch": getattr(self.defaults, "auto_pitch", False),
+            "formant_shift": getattr(self.defaults, "formant_shift", 0.0),
         }
         merged["f0_method"] = (overrides or {}).get("f0_method") or self.default_f0_method
         for key, value in (overrides or {}).items():

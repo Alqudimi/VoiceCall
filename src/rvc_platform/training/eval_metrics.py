@@ -54,6 +54,12 @@ class SpeakerEmbedder:
 
     def __init__(self, model: Any) -> None:
         self.model = model
+        try:
+            for p in self.model.parameters():
+                p.requires_grad_(False)
+            self.model.eval()
+        except Exception:
+            pass
 
     @torch.no_grad()
     def embed(self, wav16k: torch.Tensor) -> torch.Tensor:
@@ -64,6 +70,23 @@ class SpeakerEmbedder:
         emb = feats.squeeze(1) if feats.dim() == 3 else feats
         emb = torch.nn.functional.normalize(emb.float(), p=2, dim=-1)
         return emb
+
+    def embed_differentiable(self, wav16k: torch.Tensor) -> torch.Tensor:
+        """Differentiable ECAPA embedding w.r.t. ``wav16k`` (model weights frozen)."""
+        if wav16k.dim() == 3:
+            wav16k = wav16k.squeeze(1)
+        x = wav16k.float()
+        mods = getattr(self.model, "mods", None)
+        if mods is not None and hasattr(mods, "compute_features") and hasattr(mods, "embedding_model"):
+            feats = mods.compute_features(x)
+            if hasattr(mods, "mean_var_norm"):
+                lens = torch.ones(x.shape[0], device=x.device, dtype=torch.float32)
+                feats = mods.mean_var_norm(feats, lens)
+            emb = mods.embedding_model(feats)
+            emb = emb.squeeze(1) if emb.dim() == 3 else emb
+            return torch.nn.functional.normalize(emb.float(), p=2, dim=-1)
+        # Fallback if a custom stub lacks .mods
+        return self.embed(x)
 
 
 def try_build_speaker_embedder(device: str) -> SpeakerEmbedder | None:
@@ -81,10 +104,19 @@ def try_build_speaker_embedder(device: str) -> SpeakerEmbedder | None:
                 "(install with: uv pip install speechbrain — requires torch>=2.7.1, "
                 "already satisfied by this project's torch 2.7.x pin)")
             return None
+    savedir = None
+    try:
+        from rvc_platform.infrastructure.paths import get_paths
+
+        cand = get_paths().assets / "ecapa_voxceleb"
+        cand.mkdir(parents=True, exist_ok=True)
+        savedir = str(cand)
+    except Exception:
+        savedir = None
     try:
         model = EncoderClassifier.from_hparams(
             source=_SPEAKER_MODEL_HF,
-            savedir=None,
+            savedir=savedir,
             run_opts={"device": device},
         )
         return SpeakerEmbedder(model)
@@ -127,6 +159,23 @@ def speaker_similarity(embedder: SpeakerEmbedder, wav_pred: torch.Tensor,
         e_true = embedder.embed(true16)
         sim = (e_pred * e_true).sum(dim=-1).clamp(-1.0, 1.0)
     return float(sim.mean().item())
+
+
+def speaker_cosine_loss(embedder: SpeakerEmbedder, wav_pred: torch.Tensor,
+                        wav_true: torch.Tensor, orig_sr: int) -> torch.Tensor:
+    """Differentiable speaker-identity cosine distance loss: mean(1 - cos_sim)."""
+    pred16 = resample_16k(wav_pred, orig_sr)
+    with torch.no_grad():
+        true16 = resample_16k(wav_true.detach(), orig_sr)
+        if pred16.shape[-1] != true16.shape[-1]:
+            n = min(pred16.shape[-1], true16.shape[-1])
+            true16 = true16[..., :n]
+        e_true = embedder.embed(true16)
+    if pred16.shape[-1] != true16.shape[-1]:
+        pred16 = pred16[..., : true16.shape[-1]]
+    e_pred = embedder.embed_differentiable(pred16)
+    sim = (e_pred * e_true).sum(dim=-1).clamp(-1.0, 1.0)
+    return (1.0 - sim).mean()
 
 
 def try_build_f0_helper(device: str, is_half: bool) -> Callable[[np.ndarray], np.ndarray] | None:

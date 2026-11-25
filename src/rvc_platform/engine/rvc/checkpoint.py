@@ -159,6 +159,9 @@ def export_inference_checkpoint(
     speaker_info = normalize_speaker_info(getattr(hps, "speaker_info", []))
     if speaker_info:
         opt["speaker_info"] = speaker_info
+    f0_stats = getattr(hps, "f0_stats", None)
+    if isinstance(f0_stats, dict) and f0_stats.get("median_hz"):
+        opt["f0_stats"] = dict(f0_stats)
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(opt, out_path)

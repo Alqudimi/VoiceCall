@@ -77,6 +77,12 @@ class TrainingRunConfig(BaseModel):
     # batches at the start). 0.0 = off = exact upstream behaviour.
     clip_grad_norm: float = Field(default=0.0, ge=0.0, le=1e5)
     speech_filter_ratio: float = Field(default=0.25, ge=0.0, le=1.0)  # min voiced ratio per chunk (0 = no filter)
+    # ---- Stage-3 SOTA voice-cloning fidelity levers --------------------------
+    c_ms_mel: float = Field(default=10.0, ge=0.0)       # multi-scale mel loss (BigVGAN-v2 / DAC)
+    use_mrd: bool = True                                # Multi-Resolution STFT Discriminator (UnivNet / BigVGAN, D3)
+    c_prior_mel: float = Field(default=8.0, ge=0.0)     # end-to-end prior inference-path mel consistency (0 = off)
+    c_spk_loss: float = Field(default=2.0, ge=0.0)      # differentiable ECAPA speaker cosine loss (0 = off; guarded)
+    feat_noise_std: float = Field(default=0.015, ge=0.0, le=0.2)  # HuBERT input regularisation noise (0 = off)
     # ---- dataset-quality preprocessing options (any dataset, Colab-safe) -----
     denoise: bool = False                        # pre-slicing spectral-gate denoise (noisereduce; guarded no-op)
     loudness: bool = True                        # per-chunk RMS loudness normalisation (common training targets)
@@ -222,6 +228,12 @@ class TrainingRunConfig(BaseModel):
         train["d_lr_scale"] = self.d_lr_scale
         train["clip_grad_norm"] = self.clip_grad_norm
         train["speech_filter_ratio"] = self.speech_filter_ratio
+        # Stage-3 SOTA voice-cloning fidelity levers
+        train["c_ms_mel"] = self.c_ms_mel
+        train["use_mrd"] = 1 if self.use_mrd else 0
+        train["c_prior_mel"] = self.c_prior_mel
+        train["c_spk_loss"] = self.c_spk_loss
+        train["feat_noise_std"] = self.feat_noise_std
         hps = HParams.from_template(
             {"train": train, "data": dict(template["data"]), "model": dict(template["model"])},
             version=self.version,

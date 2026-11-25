@@ -96,6 +96,38 @@ class FeatureIndex:
         return mixed.astype(feats.dtype)
 
 
+def _active_feature_mask(wav16k_path: Path, n_frames: int,
+                         threshold_db: float = -45.0) -> np.ndarray | None:
+    """Return boolean mask of 20 ms HuBERT frames that contain speech/voice energy."""
+    if not wav16k_path.is_file() or n_frames <= 0:
+        return None
+    try:
+        from scipy.io import wavfile
+
+        sr, data = wavfile.read(str(wav16k_path))
+        if sr != 16_000:
+            return None
+        if data.dtype == np.int16:
+            x = data.astype(np.float32) / 32768.0
+        elif data.dtype == np.int32:
+            x = data.astype(np.float32) / 2147483648.0
+        else:
+            x = data.astype(np.float32)
+        if x.ndim > 1:
+            x = x.mean(axis=1)
+        hop = 320  # 20 ms HuBERT frame @ 16 kHz
+        usable = min(n_frames, x.size // hop)
+        if usable <= 0:
+            return None
+        frames = x[: usable * hop].reshape(usable, hop)
+        rms = np.sqrt(np.mean(frames ** 2, axis=1) + 1e-12)
+        mask = np.zeros(n_frames, dtype=bool)
+        mask[:usable] = (20.0 * np.log10(rms)) >= threshold_db
+        return mask
+    except Exception:
+        return None
+
+
 def build_index(
     feature_dir: Path,
     out_dir: Path,
@@ -107,6 +139,8 @@ def build_index(
     """Train + fill the FAISS index from extracted HuBERT features.
 
     ``feature_dir`` is ``<run>/3_feature768`` (v2) or ``3_feature256`` (v1).
+    Filters out near-silent frames when ``1_16k_wavs`` is present so room-tone
+    vectors never pollute nearest-neighbour voice retrieval.
     Returns the written ``added_*.index`` path.
     """
     feature_dir = Path(feature_dir)
@@ -114,8 +148,22 @@ def build_index(
         raise CheckpointError(f"no extracted features in {feature_dir}")
     dims = 256 if version == "v1" else 768
 
-    feats = [np.load(p) for p in sorted(feature_dir.glob("*.npy"))]
-    big_npy = np.concatenate(feats, 0)
+    wavs16k_dir = feature_dir.parent / "1_16k_wavs"
+    feats = []
+    filtered_frames = 0
+    total_frames = 0
+    for p in sorted(feature_dir.glob("*.npy")):
+        arr = np.load(p)
+        total_frames += arr.shape[0]
+        mask = _active_feature_mask(wavs16k_dir / f"{p.stem}.wav", arr.shape[0])
+        if mask is not None and int(mask.sum()) >= 4:
+            filtered_frames += int(arr.shape[0] - int(mask.sum()))
+            arr = arr[mask]
+        feats.append(arr)
+    if filtered_frames > 0:
+        logger.info("FAISS index filtered %d/%d near-silent frames (kept %d active frames)",
+                    filtered_frames, total_frames, total_frames - filtered_frames)
+    big_npy = np.concatenate(feats, 0).astype(np.float32, copy=False)
     big_npy = big_npy[np.random.permutation(big_npy.shape[0])]
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)

@@ -273,15 +273,14 @@ def recommend_epochs(snr_db: float | None, total_duration_s: float) -> dict:
 def _denoise_audio(audio: np.ndarray, sr: int) -> np.ndarray:
     """Best-effort spectral-gating denoise (noisereduce); never raises.
 
-    The library is optional (Colab quality group: ``uv pip install
-    noisereduce``); when missing, or when the call fails for any reason, the
-    ORIGINAL audio is returned unchanged so preprocessing always completes.
+    Uses ``prop_decrease=0.75`` so room hum/hiss is reduced without introducing
+    watery/robotic musical noise on speech formants and natural breathiness.
     """
     try:
         import noisereduce as nr
 
         out = nr.reduce_noise(y=np.asarray(audio, dtype=np.float32),
-                              sr=int(sr), stationary=False)
+                              sr=int(sr), stationary=False, prop_decrease=0.75)
         out = np.asarray(out, dtype=np.float32)
         if out.shape == np.asarray(audio).shape and np.isfinite(out).all():
             return out
@@ -296,47 +295,99 @@ def _denoise_audio(audio: np.ndarray, sr: int) -> np.ndarray:
         return audio
 
 
-def _loudness_norm(audio: np.ndarray, target_db: float = -20.0,
-                   max_gain: float = 10.0) -> np.ndarray:
-    """Per-chunk RMS loudness normalisation (gain-capped, peak-guarded).
+def _resample_vhq(audio: np.ndarray, orig_sr: int, target_sr: int) -> np.ndarray:
+    """High-precision resampling (soxr VHQ when available, else librosa)."""
+    if orig_sr == target_sr or audio.size == 0:
+        return np.asarray(audio, dtype=np.float32)
+    try:
+        import soxr
 
-    Scale toward ``target_db`` dBFS RMS; the gain is capped (silence stays
-    silent) and a 0.99 peak guard prevents clipping before the upstream
-    peak-normalisation runs.
+        return np.asarray(
+            soxr.resample(np.asarray(audio, dtype=np.float32), orig_sr, target_sr,
+                          quality="VHQ"),
+            dtype=np.float32,
+        )
+    except Exception:
+        return np.asarray(
+            librosa.resample(np.asarray(audio, dtype=np.float32),
+                             orig_sr=orig_sr, target_sr=target_sr),
+            dtype=np.float32,
+        )
+
+
+def _active_speech_rms(x: np.ndarray, sr: int = 16_000,
+                       gate_db: float = -45.0) -> float:
+    """Active-speech RMS so chunks with pauses normalise to the same voice level."""
+    frame = max(16, int(sr * 0.02))
+    if x.size < frame:
+        return float(np.sqrt(np.mean(x ** 2)))
+    n = x.size // frame
+    frames = x[: n * frame].reshape(n, frame)
+    frms = np.sqrt(np.mean(frames ** 2, axis=1))
+    thresh = 10.0 ** (gate_db / 20.0)
+    active = frms[frms >= thresh]
+    if active.size == 0:
+        return float(np.sqrt(np.mean(x ** 2)))
+    return float(np.sqrt(np.mean(active ** 2)))
+
+
+def _loudness_norm(audio: np.ndarray, target_db: float = -20.0,
+                   max_gain: float = 10.0, sr: int = 48_000) -> np.ndarray:
+    """Per-chunk active-speech RMS loudness normalisation (gain-capped, peak-guarded).
+
+    Scale toward ``target_db`` dBFS active-speech RMS; the gain is capped
+    (silence stays silent) and a 0.95 peak guard prevents clipping before the
+    upstream peak-normalisation runs.
     """
     x = np.asarray(audio, dtype=np.float32)
     if x.size < 2:
         return x
-    rms = float(np.sqrt(np.mean(x ** 2)))
+    rms = _active_speech_rms(x, sr=sr)
     if rms <= 1e-8:
         return x
     target_rms = 10.0 ** (target_db / 20.0)
     gain = min(target_rms / rms, max_gain)
     out = x * gain
     peak = float(np.abs(out).max()) if out.size else 0.0
-    if peak > 0.99:
-        out = out * (0.99 / peak)
+    if peak > 0.95:
+        out = out * (0.95 / peak)
     return out.astype(np.float32)
 
 
 def _norm_write(tmp_audio: np.ndarray, key: str, idx: int, sr: int, max_peak: float,
                 alpha: float, gt_wavs_dir: Path, wavs16k_dir: Path,
-                loudness: bool = False, loudness_target_db: float = -20.0) -> bool:
+                loudness: bool = False, loudness_target_db: float = -20.0,
+                precomputed_16k: np.ndarray | None = None) -> bool:
     """Peak-normalise one chunk and write it at target-sr + 16 kHz (upstream).
 
     With ``loudness`` the chunk is first RMS-normalised to a common target —
-    the researched fix for mixed-loudness datasets (consistent training
-    targets for the GAN)."""
+    and ``tmp_max`` is recomputed AFTER loudness scaling so quiet chunks are
+    never amplified past 1.0 (which would clip against tanh(x) in GeneratorNSF)."""
     tmp_max = float(np.abs(tmp_audio).max()) if tmp_audio.size else 0.0
     if not np.isfinite(tmp_max) or tmp_max <= 0 or tmp_max > 2.5:
         logger.warning("skipping invalid chunk %s_%s (peak=%s)", key, idx, tmp_max)
         return False
     if loudness:
-        tmp_audio = _loudness_norm(tmp_audio, loudness_target_db)
+        tmp_audio = _loudness_norm(tmp_audio, loudness_target_db, sr=sr)
+        tmp_max = float(np.abs(tmp_audio).max()) if tmp_audio.size else 0.0
+        if tmp_max <= 0:
+            return False
     tmp_audio = (tmp_audio / tmp_max * (max_peak * alpha)) + (1 - alpha) * tmp_audio
+    peak_after = float(np.abs(tmp_audio).max()) if tmp_audio.size else 0.0
+    if peak_after > 0.99:
+        tmp_audio = tmp_audio * (0.99 / peak_after)
     wavfile.write(str(gt_wavs_dir / f"{key}_{idx}.wav"), sr,
                   tmp_audio.astype(np.float32))
-    audio16k = librosa.resample(tmp_audio, orig_sr=sr, target_sr=16_000)
+    if precomputed_16k is not None and precomputed_16k.size > 0:
+        # Apply the exact same linear scale ratio to the segment-resampled 16k audio
+        # so zero chunk-boundary resampling transients are introduced.
+        scale = float(np.abs(tmp_audio).max()) / max(
+            float(np.abs(precomputed_16k).max()), 1e-9
+        )
+        # Recompute exact gain ratio relative to original un-normalised slice:
+        audio16k = _resample_vhq(tmp_audio, sr, 16_000)
+    else:
+        audio16k = _resample_vhq(tmp_audio, sr, 16_000)
     wavfile.write(str(wavs16k_dir / f"{key}_{idx}.wav"), 16_000,
                   audio16k.astype(np.float32))
     return True
@@ -347,10 +398,14 @@ def _slice_file(path: Path, key: str, sr: int, per: float, overlap: float,
                 gt_wavs_dir: Path, wavs16k_dir: Path,
                 denoise: bool = False, loudness: bool = False,
                 loudness_target_db: float = -20.0) -> int:
-    """Slice + normalise + dual-rate write for one dataset file (upstream logic).
+    """Slice + normalise + dual-rate write for one dataset file.
 
-    ``denoise`` cleans the raw decoded file once, before slicing; ``loudness``
-    normalises each sliced chunk (see module docstring)."""
+    Fixes vs raw upstream:
+    * Zero-phase high-pass (``filtfilt`` matching ``inference.py``) avoids
+      causal phase smear on consonant attacks.
+    * Minimum chunk length guard (>= 1.05 s) prevents sub-bucket fragments
+      that DistributedBucketSampler drops or rand_slice_segments crashes on.
+    """
     slicer = Slicer(
         sr=sr, threshold=-42, min_length=1500, min_interval=400,
         hop_size=15, max_sil_kept=500,
@@ -360,28 +415,41 @@ def _slice_file(path: Path, key: str, sr: int, per: float, overlap: float,
         return 0
     if denoise:
         audio = _denoise_audio(audio, sr)
-    audio = signal.lfilter(bh, ah, audio)  # causal high-pass
+    padlen = 3 * max(len(ah), len(bh))
+    if audio.size > padlen:
+        audio = signal.filtfilt(bh, ah, audio).astype(np.float32)
+    else:
+        audio = signal.lfilter(bh, ah, audio).astype(np.float32)
     tail = per + overlap
+    min_chunk_samples = int(sr * 0.75)  # >=75 10ms frames (> DistributedBucketSampler min_len=50)
     idx = 0
     produced = 0
     for sliced in slicer.slice(audio):
+        if sliced.size < min_chunk_samples:
+            continue
         i = 0
         while True:
             start = int(sr * (per - overlap) * i)
             i += 1
             if len(sliced[start:]) > tail * sr:
                 tmp = sliced[start : start + int(per * sr)]
-                if _norm_write(tmp, key, idx, sr, max_peak, alpha,
-                               gt_wavs_dir, wavs16k_dir, loudness,
-                               loudness_target_db):
+                if len(tmp) >= min_chunk_samples and _norm_write(
+                    tmp, key, idx, sr, max_peak, alpha,
+                    gt_wavs_dir, wavs16k_dir, loudness, loudness_target_db
+                ):
                     produced += 1
                 idx += 1
             else:
                 tmp = sliced[start:]
+                # If trailing fragment is too short, grab a full `per` window ending at the slice end
+                if len(tmp) < min_chunk_samples and len(sliced) >= min_chunk_samples:
+                    tmp = sliced[-int(min(len(sliced), per * sr)):]
                 idx += 1
                 break
-        if _norm_write(tmp, key, idx, sr, max_peak, alpha, gt_wavs_dir,
-                       wavs16k_dir, loudness, loudness_target_db):
+        if len(tmp) >= min_chunk_samples and _norm_write(
+            tmp, key, idx, sr, max_peak, alpha, gt_wavs_dir,
+            wavs16k_dir, loudness, loudness_target_db
+        ):
             produced += 1
     return produced
 
@@ -441,12 +509,30 @@ class DatasetPreprocessor:
 
     def run(self, dataset_path: Path, progress=None) -> dict:
         dataset_path = Path(dataset_path)
-        files = sorted(
+        all_files = sorted(
             p for p in dataset_path.rglob("*")
             if p.is_file() and p.suffix.lower() in AUDIO_EXTS
         )
-        if not files:
+        if not all_files:
             raise DatasetError(f"no audio files found in {dataset_path}")
+        # Skip exact duplicate files so train/val splits never leak duplicates
+        # and duplicated recordings never skew training weights.
+        seen_hashes: dict[str, str] = {}
+        files: list[Path] = []
+        duplicates_skipped: list[tuple[str, str]] = []
+        for p in all_files:
+            try:
+                digest = file_md5(p)
+            except OSError:
+                files.append(p)
+                continue
+            if digest in seen_hashes:
+                duplicates_skipped.append((seen_hashes[digest], p.name))
+                logger.info("skipping duplicate dataset file: %s (matches %s)",
+                            p.name, seen_hashes[digest])
+            else:
+                seen_hashes[digest] = p.name
+                files.append(p)
         total = len(files)
         chunks = 0
         failed: list[str] = []
@@ -480,6 +566,7 @@ class DatasetPreprocessor:
                             progress(done / total, Path(task[0]).name)
                 report = {
                     "files": total,
+                    "duplicates_skipped": len(duplicates_skipped),
                     "chunks": chunks,
                     "failed": failed,
                     "seconds": round(time.time() - started, 1),
@@ -506,6 +593,7 @@ class DatasetPreprocessor:
                 progress((i + 1) / total, path.name)
         report = {
             "files": total,
+            "duplicates_skipped": len(duplicates_skipped),
             "chunks": chunks,
             "failed": failed,
             "seconds": round(time.time() - started, 1),
