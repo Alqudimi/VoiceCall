@@ -57,7 +57,7 @@ class DataPipeline:
     def extract_f0(self, progress: StageProgress | None = None) -> dict:
         profile = select_device(None)
         device = profile.device
-        is_half = False if device == "cpu" else profile.is_half
+        is_half = False
         def _cb(frac: float, name: str) -> None:
             if progress:
                 progress("f0", frac, name)
@@ -70,7 +70,7 @@ class DataPipeline:
     def extract_features(self, progress: StageProgress | None = None) -> dict:
         profile = select_device(None)
         device = profile.device
-        is_half = False if device == "cpu" else profile.is_half
+        is_half = False
         def _cb(frac: float, name: str) -> None:
             if progress:
                 progress("features", frac, name)

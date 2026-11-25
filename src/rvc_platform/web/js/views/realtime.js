@@ -26,6 +26,7 @@ const PING_EVERY_MS = 5000;
 const PUSH_MIN_MS = 60;              // throttle for live settings frames
 const HF_POLL_MS = 2000;             // HF model download progress poll
 const BLOCK_MS_CHOICES = [60, 80, 100, 128, 160, 200, 250, 320, 400, 500];
+const SPEAKER_PROFILE_KEY = "ivs_speaker_profile";
 
 /* كل معاملات النبرة القابلة للتعديل لحظيًا (تُرسل عبر إطار settings) */
 const TONE_PARAMS = [
@@ -52,10 +53,10 @@ const TONE_PARAMS = [
   },
   {
     key: "silence_threshold_db", id: "gate",
-    label: "بوابة الصمت", latin: "Silence Gate · dB",
-    min: -70, max: -20, step: 1, def: -40,
+    label: "بوابة الصمت (عزل البعيد)", latin: "Silence Gate · dB",
+    min: -70, max: -20, step: 1, def: -36,
     fmt: (v) => `${Math.round(v)} dB`,
-    hint: "المقاطع الأهدأ من هذا المستوى تُتجاهل قبل التحويل — ارفعها لإسكات ضجيج الخلفية، وأنزلها إذا كان كلامك الخافت يُقتطع.",
+    hint: "عزل ذكي مع ثبات واستمرار (220ms) لمنع تقطيع الحروف: الأصوات الأهدأ من هذا المستوى (كالضجيج والأصوات البعيدة) تُرفض قبل التحويل. ارفعه (-32..-28) لعزل أشد للمتحدث القريب فقط.",
   },
 ];
 
@@ -74,11 +75,16 @@ async function mount(root) {
       index_rate: 0.88,
       rms_mix_rate: 0.25,
       f0_method: "rmvpe",
-      silence_threshold_db: -40,
+      silence_threshold_db: -36,
+      strict_isolation: true,
+      speaker_profile: loadSavedProfile(),
     },
     // client-side live controls
     volume: 1.0,          // 0..2 output gain
     monitor: false,       // hear the raw microphone alongside
+    aec: true,            // browser echo cancellation + noise suppression (blocks speaker feedback & far noise)
+    speakerGuard: false,  // strict half-duplex: mute mic while speaker plays
+    enrolling: false,
     // live session objects
     ws: null,
     stream: null,
@@ -86,6 +92,8 @@ async function mount(root) {
     outCtx: null,
     outGain: null,
     monGain: null,
+    micFilter: null,
+    micLowpass: null,
     workletNode: null,
     workletUrl: null,
     micSource: null,
@@ -98,6 +106,7 @@ async function mount(root) {
     serverBlocks: 0,
     nextTime: 0,
     nextTimeMon: 0,
+    speakerBusyUntil: 0,
     statsTimer: null,
     pingTimer: null,
     hfTimer: null,
@@ -132,12 +141,26 @@ async function mount(root) {
     volume: root.querySelector("#rt-volume"),
     volumeVal: root.querySelector("#rt-volume-val"),
     monitor: root.querySelector("#rt-monitor"),
+    aec: root.querySelector("#rt-aec"),
+    speakerGuard: root.querySelector("#rt-speaker-guard"),
+    strictIsolation: root.querySelector("#rt-strict-isolation"),
+    btnEnroll: root.querySelector("#rt-enroll"),
+    btnEnrollClear: root.querySelector("#rt-enroll-clear"),
+    spkBadge: root.querySelector("#rt-spk-badge"),
     f0: root.querySelector("#rt-f0"),
+    blocksSent: root.querySelector("#rt-blocks-sent"),
+    blocksRecv: root.querySelector("#rt-blocks-recv"),
+    srvBlocks: root.querySelector("#rt-srv-blocks"),
+    verdict: root.querySelector("#rt-verdict"),
     pitch: {}, index: {}, rms: {}, gate: {},
   };
 
   wireLiveControls(ui, state);
+  renderSpeakerBadge(state, ui);
   const offDeviceChange = wireDeviceSelectors(ui);
+  ui.outSelect?.addEventListener("change", () => {
+    if (state.outCtx) attachOutputSink(state.outCtx, ui);
+  });
   ui.btnStart.addEventListener("click", () => {
     if (state.phase === "streaming" || state.phase === "connecting") stopSession(state, ui);
     else startSession(state, ui);
@@ -218,6 +241,15 @@ function buildControlsCard() {
         el("div", { class: "small dim", id: "rt-info-box" }, ["…"]),
       ]),
     ]),
+    el("div", { class: "row mt", style: "flex-wrap:wrap;gap:8px;align-items:center" }, [
+      el("span", { class: "badge info dot", id: "rt-spk-badge" }, ["قفل تلقائي على المتحدث"]),
+      el("button", { class: "btn sm", type: "button", id: "rt-enroll" }, [
+        icon("mic", 14), " تسجيل بصمة صوتي (3 ثوانٍ)",
+      ]),
+      el("button", { class: "btn sm ghost", type: "button", id: "rt-enroll-clear" }, [
+        "مسح البصمة",
+      ]),
+    ]),
     el("button", { class: "btn primary block mt", type: "button", id: "rt-start" }, [
       icon("play", 16), " بدء البث اللحظي",
     ]),
@@ -266,6 +298,21 @@ function buildParamsCard() {
       ]),
       el("input", { type: "range", id: "rt-volume", min: "0", max: "2", step: "0.05", value: "1" }),
       el("div", { class: "param-hint" }, ["مستوى صوت مكبر الصوت للصوت المحوّل — يُطبَّق لحظيًا داخل المتصفح دون أي تأخير إضافي."]),
+    ]),
+    el("label", { class: "check" }, [
+      el("input", { type: "checkbox", id: "rt-strict-isolation", checked: true }),
+      " تشديد عزل المتحدث فقط (يمنع استنساخ أي شخص آخر أو ضوضاء أو صدى تلقائيًا) ",
+      el("span", { class: "opt-latin" }, ["Speaker Lock + Speech VAD"]),
+    ]),
+    el("label", { class: "check" }, [
+      el("input", { type: "checkbox", id: "rt-aec", checked: true }),
+      " عزل الصدى والأصوات البعيدة (مستحسن عند استخدام مكبر الصوت) ",
+      el("span", { class: "opt-latin" }, ["AEC + Noise Suppression"]),
+    ]),
+    el("label", { class: "check" }, [
+      el("input", { type: "checkbox", id: "rt-speaker-guard" }),
+      " حماية قصوى ضد إعادة استنساخ صوت المكبر (يكتم الميكروفون أثناء نطق المكبر) ",
+      el("span", { class: "opt-latin" }, ["Anti-Feedback"]),
     ]),
     el("label", { class: "check" }, [
       el("input", { type: "checkbox", id: "rt-monitor" }),
@@ -372,6 +419,16 @@ async function loadInfo(state, ui) {
     state.info = await get("/realtime/info");
     state.blockMs = state.info.block_ms || 160;
     state.settings.silence_threshold_db = state.info.silence_threshold_db ?? -40;
+    if (ui.gate?.slider && !state.userTouched) {
+      const gateDef = TONE_PARAMS.find((p) => p.id === "gate");
+      if (gateDef) {
+        const v = clamp(Number(state.settings.silence_threshold_db), gateDef.min, gateDef.max);
+        state.settings.silence_threshold_db = v;
+        ui.gate.slider.value = String(v);
+        ui.gate.num.value = String(v);
+        ui.gate.val.textContent = gateDef.fmt(v);
+      }
+    }
     if (state.info.f0_method) {
       state.settings.f0_method = state.info.f0_method;
       ui.f0.value = state.info.f0_method;
@@ -587,6 +644,42 @@ function wireLiveControls(ui, state) {
     if (state.monitor) toast("سماع الدخل مفعّل — ستسمع صوتك الأصلي مع المحوّل. استخدم سماعات لتجنب الارتداد.", "info");
   });
 
+  if (ui.aec) {
+    ui.aec.addEventListener("change", () => {
+      state.aec = ui.aec.checked;
+      if (state.phase === "streaming") {
+        toast("يُطبَّق تغيير عزل الصدى عند إعادة بدء الجلسة.", "info", 5000);
+      }
+    });
+  }
+
+  if (ui.speakerGuard) {
+    ui.speakerGuard.addEventListener("change", () => {
+      state.speakerGuard = ui.speakerGuard.checked;
+    });
+  }
+
+  if (ui.strictIsolation) {
+    ui.strictIsolation.addEventListener("change", () => {
+      state.settings.strict_isolation = ui.strictIsolation.checked;
+      pushSettings(state, ui);
+      renderSpeakerBadge(state, ui);
+    });
+  }
+
+  if (ui.btnEnroll) {
+    ui.btnEnroll.addEventListener("click", () => enrollSpeakerVoice(state, ui));
+  }
+  if (ui.btnEnrollClear) {
+    ui.btnEnrollClear.addEventListener("click", () => {
+      saveSpeakerProfile(null);
+      state.settings.speaker_profile = null;
+      pushSettings(state, ui);
+      renderSpeakerBadge(state, ui);
+      toast("تم مسح بصمة الصوت — سيعمل القفل التلقائي على أول متحدث قريب.", "info", 4000);
+    });
+  }
+
   // حجم الكتلة — يُطبَّق عند بدء الجلسة القادمة
   ui.blockMs.addEventListener("change", () => {
     state.blockMs = Number(ui.blockMs.value) || 160;
@@ -654,6 +747,8 @@ function settingsPayload(state) {
     f0_method: state.settings.f0_method,
     rms_mix_rate: state.settings.rms_mix_rate,
     silence_threshold_db: state.settings.silence_threshold_db,
+    strict_isolation: state.settings.strict_isolation,
+    speaker_profile: state.settings.speaker_profile || null,
   };
 }
 
@@ -688,10 +783,9 @@ function fillSelect(select, devices, label) {
 
 async function attachOutputSink(outCtx, ui) {
   const deviceId = ui.outSelect ? ui.outSelect.value : "";
-  if (!deviceId) return; // system default
   try {
     if (typeof outCtx.setSinkId === "function") {
-      await outCtx.setSinkId({ type: "audiooutput", deviceId });
+      await outCtx.setSinkId(deviceId || "");
     } else {
       return; // context already created; sink selection unavailable
     }
@@ -710,29 +804,52 @@ async function startSession(state, ui) {
     return;
   }
   state.lastError = null;
+  state.blocksSent = 0;
+  state.blocksReceived = 0;
+  state.serverBlocks = 0;
+  state.rttHistory = [];
+  state.serverStats = null;
+  if (ui.blocksSent) ui.blocksSent.textContent = "0";
+  if (ui.blocksRecv) ui.blocksRecv.textContent = "0";
+  if (ui.srvBlocks) ui.srvBlocks.textContent = "0";
   const sessionId = ++state.sessionId;
   const alive = () => state.sessionId === sessionId && (state.phase === "connecting" || state.phase === "streaming");
   setPhase(state, ui, "connecting", `جارٍ الاتصال والتحميل — ${modelName}`);
 
-  // 1) microphone (selected device if any)
+  // Create playback context synchronously under the user click gesture so
+  // autoplay policies never keep it suspended after async permission awaits.
+  state.outCtx = new AudioContext();
+  if (state.outCtx.state === "suspended") {
+    state.outCtx.resume().catch(() => { /* retried on play */ });
+  }
+  state.nextTime = 0;
+  state.nextTimeMon = 0;
+  state.speakerBusyUntil = 0;
+  state.outGain = state.outCtx.createGain();
+  state.outGain.gain.value = state.volume;
+  state.outGain.connect(state.outCtx.destination);
+  state.monGain = state.outCtx.createGain();
+  state.monGain.gain.value = state.monitor ? 1.0 : 0.0;
+  state.monGain.connect(state.outCtx.destination);
+
+  // 1) microphone (selected device if any; AEC + NS block speaker feedback & room noise,
+  //    while autoGainControl stays off so distant voices are NOT amplified)
   let stream;
   const micId = ui.micSelect ? ui.micSelect.value : "";
+  const audioConstraints = {
+    echoCancellation: Boolean(state.aec),
+    noiseSuppression: Boolean(state.aec),
+    autoGainControl: false,
+    channelCount: 1,
+  };
+  if (micId) audioConstraints.deviceId = { exact: micId };
   try {
-    stream = await navigator.mediaDevices.getUserMedia({
-      audio: micId
-        ? { deviceId: { exact: micId }, echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 1 }
-        : {
-            echoCancellation: false,
-            noiseSuppression: false,
-            autoGainControl: false,
-            channelCount: 1,
-          },
-    });
+    stream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraints });
   } catch (err) {
     fail(state, ui, `تعذّر الوصول إلى الميكروفون: ${err.name === "NotAllowedError" ? "الإذن مرفوض من المتصفح" : err.message || err.name}`);
     return;
   }
-  if (!alive()) { for (const t of stream.getAudioTracks()) t.stop(); return; }
+  if (!alive()) { for (const t of stream.getAudioTracks()) t.stop(); teardownSession(state, ui); return; }
   state.stream = stream;
 
   // 2) input context @16k (fallback: native rate + resample)
@@ -745,20 +862,10 @@ async function startSession(state, ui) {
   if (!alive()) { teardownSession(state, ui); return; }
   const inRate = state.inCtx.sampleRate;
 
-  // 3) playback context (created under the click gesture, native rate)
-  state.outCtx = new AudioContext();
+  // 3) ensure playback context resumed & output sink attached
   if (state.outCtx.state === "suspended") { try { await state.outCtx.resume(); } catch { /* retried on play */ } }
   await attachOutputSink(state.outCtx, ui);
   if (!alive()) { teardownSession(state, ui); return; }
-  state.nextTime = 0;
-  state.nextTimeMon = 0;
-  // خرج بقابلية ضبط لحظي + بوابة سماع الدخل
-  state.outGain = state.outCtx.createGain();
-  state.outGain.gain.value = state.volume;
-  state.outGain.connect(state.outCtx.destination);
-  state.monGain = state.outCtx.createGain();
-  state.monGain.gain.value = state.monitor ? 1.0 : 0.0;
-  state.monGain.connect(state.outCtx.destination);
 
   // 4) worklet — بحجم الكتلة المختار (block_ms)
   try {
@@ -774,7 +881,25 @@ async function startSession(state, ui) {
     return;
   }
   state.micSource = state.inCtx.createMediaStreamSource(stream);
-  state.micSource.connect(state.workletNode);
+  if (typeof state.inCtx.createBiquadFilter === "function") {
+    const hpf = state.inCtx.createBiquadFilter();
+    hpf.type = "highpass";
+    hpf.frequency.value = 100;
+    hpf.Q.value = 0.707;
+    const lpf = state.inCtx.createBiquadFilter();
+    lpf.type = "lowpass";
+    lpf.frequency.value = 7200;
+    lpf.Q.value = 0.707;
+    state.micFilter = hpf;
+    state.micLowpass = lpf;
+    state.micSource.connect(hpf);
+    hpf.connect(lpf);
+    lpf.connect(state.workletNode);
+  } else {
+    state.micFilter = null;
+    state.micLowpass = null;
+    state.micSource.connect(state.workletNode);
+  }
 
   const track = stream.getAudioTracks()[0];
   if (track) track.addEventListener("ended", () => {
@@ -786,15 +911,23 @@ async function startSession(state, ui) {
   state.workletNode.port.onmessage = (ev) => {
     const block = ev.data; // Float32Array at input-ctx rate
     if (!(block instanceof Float32Array)) return;
-    const rms = rmsOf(block);
+
+    // Anti-feedback guard (when enabled): mute mic capture while speaker is playing
+    const speakerActive = Boolean(
+      state.speakerGuard && state.outCtx && state.outCtx.currentTime < state.speakerBusyUntil
+    );
+    const activeBlock = speakerActive ? new Float32Array(block.length) : block;
+
+    const rms = rmsOf(activeBlock);
     updateMeter(state, ui, "in", rms);
 
     // سماع الدخل: بث الصوت الأصلي عبر مكبر الصوت في نفس اللحظة
-    if (state.monitor && state.outCtx && state.monGain) {
-      const outRate = state.outCtx.sampleRate;
-      let mon = block;
-      if (inRate !== outRate) mon = resampleLinear(block, inRate, outRate);
+    if (state.monitor && state.outCtx && state.monGain && !speakerActive) {
       const ctx = state.outCtx;
+      if (ctx.state === "suspended") ctx.resume().catch(() => {});
+      const outRate = ctx.sampleRate;
+      let mon = activeBlock;
+      if (inRate !== outRate) mon = resampleLinear(activeBlock, inRate, outRate);
       const buf = ctx.createBuffer(1, mon.length, outRate);
       buf.copyToChannel(mon, 0);
       const src = ctx.createBufferSource();
@@ -808,14 +941,14 @@ async function startSession(state, ui) {
       state.nextTimeMon += blockSec;
     }
 
-    let pcm = block;
-    if (inRate !== INPUT_RATE) pcm = resampleLinear(block, inRate, INPUT_RATE);
+    let pcm = activeBlock;
+    if (inRate !== INPUT_RATE) pcm = resampleLinear(activeBlock, inRate, INPUT_RATE);
     const int16 = floatToInt16(pcm);
     if (state.ws && state.ws.readyState() === WebSocket.OPEN) {
       state.pendingTs.push(performance.now());
       if (state.pendingTs.length > 8) state.pendingTs.shift();
       state.blocksSent += 1;
-      ui.blocksSent.textContent = String(state.blocksSent);
+      if (ui.blocksSent) ui.blocksSent.textContent = String(state.blocksSent);
       state.ws.sendBinary(int16.buffer);
     }
   };
@@ -853,9 +986,11 @@ async function startSession(state, ui) {
     } else if (msg.type === "stats") {
       state.serverStats = msg;
       renderServerStats(state, ui, msg);
+      renderSpeakerBadge(state, ui, msg);
     } else if (msg.type === "pong") {
       state.serverBlocks = msg.blocks ?? 0;
-      ui.srvBlocks.textContent = String(state.serverBlocks);
+      if (ui.srvBlocks) ui.srvBlocks.textContent = String(state.serverBlocks);
+      renderSpeakerBadge(state, ui, msg);
     } else if (msg.type === "error") {
       fail(state, ui, `خطأ من الخادم: ${msg.message || "غير معروف"}`);
     }
@@ -866,27 +1001,49 @@ async function startSession(state, ui) {
     const int16 = new Int16Array(buffer);
     if (!int16.length) return;
     let floats = int16ToFloat(int16);
-    const outRate = state.outCtx.sampleRate;
+    const ctx = state.outCtx;
+    if (ctx.state === "suspended") ctx.resume().catch(() => {});
+    const outRate = ctx.sampleRate;
     if (state.modelSr && outRate !== state.modelSr) {
       floats = resampleLinear(floats, state.modelSr, outRate);
     }
     const rms = rmsOf(floats);
     updateMeter(state, ui, "out", rms);
 
-    const ctx = state.outCtx;
+    const blockSec = floats.length / outRate;
+    // Drop excess queued silent blocks when jitter buffer grows > 0.65s so latency self-heals
+    if (state.nextTime > 0 && state.nextTime - ctx.currentTime > Math.max(0.65, 4 * blockSec) && rms < 0.004) {
+      if (state.pendingTs.length) state.pendingTs.shift();
+      state.blocksReceived += 1;
+      if (ui.blocksRecv) ui.blocksRecv.textContent = String(state.blocksReceived);
+      return;
+    }
+
+    let needsFadeIn = false;
+    if (state.nextTime === 0) {
+      state.nextTime = ctx.currentTime + Math.max(0.18, PREQUEUE_BLOCKS * blockSec);
+      needsFadeIn = true;
+    } else if (state.nextTime < ctx.currentTime + 0.004) {
+      const gap = ctx.currentTime - state.nextTime;
+      state.nextTime = ctx.currentTime + (gap > 0.35
+        ? Math.max(0.18, PREQUEUE_BLOCKS * blockSec)
+        : Math.max(0.06, 0.75 * blockSec));
+      needsFadeIn = true;
+    }
+    if (needsFadeIn) {
+      const fadeSamples = Math.min(floats.length, Math.round(outRate * 0.004));
+      for (let i = 0; i < fadeSamples; i++) floats[i] *= i / fadeSamples;
+    }
+
     const audioBuffer = ctx.createBuffer(1, floats.length, outRate);
     audioBuffer.copyToChannel(floats, 0);
     const src = ctx.createBufferSource();
     src.buffer = audioBuffer;
     src.connect(state.outGain);
-    const blockSec = audioBuffer.duration;
-    if (state.nextTime === 0) {
-      state.nextTime = ctx.currentTime + (PREQUEUE_BLOCKS * blockSec);
-    } else if (state.nextTime < ctx.currentTime + 0.004) {
-      // underrun: rebuild the preroll cushion
-      state.nextTime = ctx.currentTime + (PREQUEUE_BLOCKS * blockSec);
-    }
     src.start(state.nextTime);
+    if (rms > 0.012 && state.volume > 0.02) {
+      state.speakerBusyUntil = Math.max(state.speakerBusyUntil, state.nextTime + blockSec + 0.14);
+    }
     state.nextTime += blockSec;
 
     // client round-trip: oldest pending send timestamp ↔ its scheduled playback
@@ -898,7 +1055,7 @@ async function startSession(state, ui) {
       renderClientStats(state, ui);
     }
     state.blocksReceived += 1;
-    ui.blocksRecv.textContent = String(state.blocksReceived);
+    if (ui.blocksRecv) ui.blocksRecv.textContent = String(state.blocksReceived);
   };
 
   ws.onclose = (code, reason) => {
@@ -954,6 +1111,8 @@ function teardownSession(state, ui) {
     state.ws = null;
   }
   if (state.micSource) { try { state.micSource.disconnect(); } catch { /* already gone */ } state.micSource = null; }
+  if (state.micFilter) { try { state.micFilter.disconnect(); } catch { /* already gone */ } state.micFilter = null; }
+  if (state.micLowpass) { try { state.micLowpass.disconnect(); } catch { /* already gone */ } state.micLowpass = null; }
   if (state.workletNode) { try { state.workletNode.disconnect(); } catch { /* already gone */ } state.workletNode = null; }
   if (state.stream) { for (const t of state.stream.getAudioTracks()) t.stop(); state.stream = null; }
   if (state.inCtx) { try { state.inCtx.close(); } catch { /* ignore */ } state.inCtx = null; }
@@ -1083,7 +1242,7 @@ function renderServerStats(state, ui, msg) {
   set("rt-srv-bridge", fmtMs(msg.bridge_overhead_ms));
   if (typeof msg.blocks === "number") {
     state.serverBlocks = msg.blocks;
-    ui.srvBlocks.textContent = String(msg.blocks);
+    if (ui.srvBlocks) ui.srvBlocks.textContent = String(msg.blocks);
   }
   if (state.phase === "streaming") renderStatusBox(state, ui);
   renderVerdict(state, ui, srv);
@@ -1173,6 +1332,153 @@ function resampleLinear(floats, fromRate, toRate) {
     out[i] = a + (b - a) * frac;
   }
   return out;
+}
+
+/* ------------------------------ speaker voiceprint enrollment ------------------------------ */
+
+function loadSavedProfile() {
+  try {
+    const raw = localStorage.getItem(SPEAKER_PROFILE_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
+function saveSpeakerProfile(profile) {
+  try {
+    if (profile) localStorage.setItem(SPEAKER_PROFILE_KEY, JSON.stringify(profile));
+    else localStorage.removeItem(SPEAKER_PROFILE_KEY);
+  } catch { /* ignore blocked storage */ }
+}
+
+const GUARD_LABELS = {
+  ok: ["يتحدث الآن — صوت المتحدث موثّق", "ok"],
+  silence: ["صمت / بانتظار المتحدث", "idle"],
+  noise: ["تم حجب ضوضاء غير كلامية", "warn"],
+  far_voice: ["تم حجب صوت بعيد/خافت", "warn"],
+  other_speaker: ["تم حجب صوت متحدث آخر", "error"],
+  self_echo: ["تم حجب ارتداد/صدى المكبر", "warn"],
+};
+
+function renderSpeakerBadge(state, ui, liveMsg = null) {
+  const badge = ui.spkBadge;
+  if (!badge) return;
+  if (state.enrolling) {
+    badge.className = "badge loading dot";
+    badge.textContent = "تكلّم بصوتك الطبيعي قرب الميكروفون (3 ثوانٍ)…";
+    return;
+  }
+  if (!state.settings.strict_isolation) {
+    badge.className = "badge warn dot";
+    badge.textContent = "العزل الصارم معطّل";
+    return;
+  }
+  if (state.phase === "streaming" && liveMsg && liveMsg.guard_status) {
+    const [txt, cls] = GUARD_LABELS[liveMsg.guard_status] || ["نشط", "info"];
+    badge.className = `badge ${cls} dot`;
+    badge.textContent = txt;
+    return;
+  }
+  if (state.settings.speaker_profile) {
+    const f0 = state.settings.speaker_profile.f0_hz ? ` · ${Math.round(state.settings.speaker_profile.f0_hz)} Hz` : "";
+    badge.className = "badge ok dot";
+    badge.textContent = `بصمة صوتك محفوظة${f0} — مقفول عليك فقط`;
+  } else {
+    badge.className = "badge info dot";
+    badge.textContent = "قفل تلقائي على أول متحدث قريب (أو سجّل بصمتك)";
+  }
+}
+
+function int16ToBase64(int16) {
+  const bytes = new Uint8Array(int16.buffer, int16.byteOffset, int16.byteLength);
+  let bin = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) {
+    bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  }
+  return btoa(bin);
+}
+
+async function enrollSpeakerVoice(state, ui) {
+  if (state.enrolling) return;
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    toast("المتصفح لا يدعم التقاط الميكروفون.", "error");
+    return;
+  }
+  state.enrolling = true;
+  if (ui.btnEnroll) ui.btnEnroll.disabled = true;
+  renderSpeakerBadge(state, ui);
+  let stream = null;
+  let ctx = null;
+  let worklet = null;
+  let workletUrl = null;
+  try {
+    const micId = ui.micSelect ? ui.micSelect.value : "";
+    const audioConstraints = {
+      echoCancellation: Boolean(state.aec),
+      noiseSuppression: Boolean(state.aec),
+      autoGainControl: false,
+      channelCount: 1,
+    };
+    if (micId) audioConstraints.deviceId = { exact: micId };
+    stream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraints });
+    try { ctx = new AudioContext({ sampleRate: INPUT_RATE }); } catch { ctx = new AudioContext(); }
+    if (ctx.state === "suspended") await ctx.resume();
+    workletUrl = URL.createObjectURL(new Blob([WORKLET_CODE], { type: "application/javascript" }));
+    await ctx.audioWorklet.addModule(workletUrl);
+    worklet = new AudioWorkletNode(ctx, "ivs-block", {
+      processorOptions: { blockMs: 160 },
+      numberOfInputs: 1, numberOfOutputs: 0, channelCount: 1,
+    });
+    const src = ctx.createMediaStreamSource(stream);
+    if (typeof ctx.createBiquadFilter === "function") {
+      const hpf = ctx.createBiquadFilter();
+      hpf.type = "highpass";
+      hpf.frequency.value = 100;
+      const lpf = ctx.createBiquadFilter();
+      lpf.type = "lowpass";
+      lpf.frequency.value = 7200;
+      src.connect(hpf);
+      hpf.connect(lpf);
+      lpf.connect(worklet);
+    } else {
+      src.connect(worklet);
+    }
+    const chunks = [];
+    const inRate = ctx.sampleRate;
+    await new Promise((resolve) => {
+      const timer = setTimeout(resolve, 3200);
+      worklet.port.onmessage = (ev) => {
+        if (!(ev.data instanceof Float32Array)) return;
+        let blk = ev.data;
+        if (inRate !== INPUT_RATE) blk = resampleLinear(blk, inRate, INPUT_RATE);
+        chunks.push(blk);
+        updateMeter(state, ui, "in", rmsOf(blk));
+        if (chunks.length >= 19) { clearTimeout(timer); resolve(); }
+      };
+    });
+    const total = chunks.reduce((a, b) => a + b.length, 0);
+    const merged = new Float32Array(total);
+    let off = 0;
+    for (const c of chunks) { merged.set(c, off); off += c.length; }
+    const int16 = floatToInt16(merged);
+    const res = await post("/realtime/enroll", { pcm_b64: int16ToBase64(int16) });
+    saveSpeakerProfile(res.profile);
+    state.settings.speaker_profile = res.profile;
+    pushSettings(state, ui);
+    toast(`تم حفظ بصمة صوتك بنجاح (${res.f0_hz ? `${res.f0_hz} Hz` : "جاهزة"}) — سيتم تجاهل أي صوت آخر.`, "success", 5000);
+  } catch (err) {
+    toast(err.message || "تعذّر تسجيل بصمة الصوت.", "error", 6000);
+  } finally {
+    state.enrolling = false;
+    if (ui.btnEnroll) ui.btnEnroll.disabled = false;
+    if (worklet) { try { worklet.disconnect(); } catch {} }
+    if (stream) { for (const t of stream.getAudioTracks()) t.stop(); }
+    if (ctx) { try { await ctx.close(); } catch {} }
+    if (workletUrl) URL.revokeObjectURL(workletUrl);
+    resetMeters(ui);
+    renderSpeakerBadge(state, ui);
+  }
 }
 
 /* ------------------------------ worklet source ------------------------------ */

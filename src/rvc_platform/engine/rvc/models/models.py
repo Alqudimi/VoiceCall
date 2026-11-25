@@ -379,7 +379,7 @@ class SourceModuleHnNSF(torch.nn.Module):
         sine_amp=0.1,
         add_noise_std=0.003,
         voiced_threshod=0,
-        is_half=True,
+        is_half=False,
     ):
         super().__init__()
 

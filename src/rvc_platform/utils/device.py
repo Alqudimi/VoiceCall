@@ -58,10 +58,9 @@ def select_device(index: int | None = None) -> DeviceProfile:
         return DeviceProfile("cpu", False, name, mem_gb, sm)
     if sm == 6.1 or is_16_series:
         return DeviceProfile(f"cuda:{idx}", False, name, mem_gb, sm)
-    return DeviceProfile(f"cuda:{idx}", True, name, mem_gb, sm)
+    return DeviceProfile(f"cuda:{idx}", False, name, mem_gb, sm)
 
 
 def training_dtype(device: str | None = None) -> torch.dtype:
-    """Shared training precision: fp16 only if the selected GPU is eligible."""
-    prof = select_device(int(device.split(":")[1]) if device and device.startswith("cuda") else None)
-    return torch.float16 if prof.device.startswith("cuda") and prof.is_half else torch.float32
+    """Shared training precision: full FP32 across all devices."""
+    return torch.float32

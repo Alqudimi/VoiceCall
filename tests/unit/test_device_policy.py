@@ -53,11 +53,12 @@ def test_select_device_16series_fp32(monkeypatch):
     assert profile.is_half is False, "GTX 16-series must use fp32"
 
 
-def test_select_device_modern_gpu_fp16(monkeypatch):
+def test_select_device_modern_gpu_fp32(monkeypatch):
     _fake_gpu(monkeypatch, "RTX 3060", (8, 6), 12.0)
     profile = select_device(None)
     assert profile.device.startswith("cuda")
-    assert profile.is_half is True
+    assert profile.is_half is False
+    assert training_dtype(profile.device) == torch.float32
 
 
 def test_split_params_budgets():

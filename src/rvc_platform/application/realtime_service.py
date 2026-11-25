@@ -69,8 +69,10 @@ class RealtimeSession:
         if f0_method:
             self.engine.f0_method = str(f0_method)
         self.engine.load_model(info.path, info.index_path)
+        self.engine.strict_isolation = True
         if settings:
             self.engine.update_settings(**self._filter_settings(settings))
+        self.engine.warmup()
         return {
             "sample_rate": self.engine.tgt_sr,
             "block_ms": self.cfg.block_ms,
@@ -78,13 +80,17 @@ class RealtimeSession:
             "format": "int16",
             "model": info.name,
             "latency_budget_ms": self.cfg.block_ms,
+            "speaker_locked": self.engine.speaker_guard.profile is not None,
         }
 
     @staticmethod
     def _filter_settings(settings: dict[str, Any]) -> dict[str, Any]:
         allowed = {"pitch_shift", "index_rate", "f0_method", "rms_mix_rate",
-                   "silence_threshold_db"}
-        return {k: v for k, v in settings.items() if k in allowed and v is not None}
+                   "silence_threshold_db", "strict_isolation"}
+        filtered = {k: v for k, v in settings.items() if k in allowed and v is not None}
+        if "speaker_profile" in settings:
+            filtered["speaker_profile"] = settings["speaker_profile"]
+        return filtered
 
     def update(self, settings: dict[str, Any]) -> None:
         self.engine.update_settings(**self._filter_settings(settings))
@@ -122,6 +128,8 @@ class RealtimeSession:
                 ] if self.client_reported_rtt_ms else None
             ),
             "engine_status": self.engine.status,
+            "guard_status": self.engine.speaker_guard.last_reason,
+            "speaker_locked": self.engine.speaker_guard.profile is not None,
         }
 
 

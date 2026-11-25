@@ -2,13 +2,17 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 import secrets
 
-from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
+import numpy as np
+from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect
+from pydantic import BaseModel
 
 from rvc_platform.core.errors import RealtimeError
+from rvc_platform.engine.rvc.speaker_guard import build_speaker_profile
 
 
 logger = logging.getLogger(__name__)
@@ -45,6 +49,28 @@ def info(request: Request):
         "default_model": default_model,
         "recommended": recommended,
         "note": "protocol: TEXT control frames + BINARY int16 mono 16kHz in / tgt-sr out",
+    }
+
+
+class EnrollRequest(BaseModel):
+    pcm_b64: str
+
+
+@router.post("/enroll")
+def enroll_speaker(req: EnrollRequest):
+    try:
+        raw = base64.b64decode(req.pcm_b64)
+        wav = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
+        profile = build_speaker_profile(wav)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"تعذّر تحليل بصمة الصوت: {exc}") from exc
+    return {
+        "ok": True,
+        "profile": profile.to_dict(),
+        "f0_hz": round(profile.f0_hz, 1),
+        "ref_db": round(profile.ref_db, 1),
     }
 
 
@@ -107,7 +133,12 @@ async def realtime_ws(ws: WebSocket) -> None:
                     session.update(control.get("settings") or {})
                     await ws.send_json({"type": "settings_applied"})
                 elif kind == "ping":
-                    await ws.send_json({"type": "pong", "blocks": session.blocks if session else 0})
+                    await ws.send_json({
+                        "type": "pong",
+                        "blocks": session.blocks if session else 0,
+                        "guard_status": session.engine.speaker_guard.last_reason if session else "silence",
+                        "speaker_locked": (session.engine.speaker_guard.profile is not None) if session else False,
+                    })
                 elif kind == "stats":
                     await ws.send_json({"type": "stats", **(session.stats() if session else {})})
                 else:

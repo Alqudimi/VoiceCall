@@ -550,3 +550,71 @@ class TestRealTimeRVC:
         f0 = _speech(seconds=0.5)
         pitch, pitchf = rt._get_f0(f0)
         assert pitch.shape[0] > 0 and pitchf.shape[0] > 0
+
+    def test_rms_mix_with_gate_cpu(self, rt):
+        rt.update_settings(rms_mix_rate=0.25, silence_threshold_db=-40.0)
+        t = np.arange(rt.block_frame_16k) / 16_000
+        wave = (0.25 * np.sin(2 * np.pi * 180 * t)).astype(np.float32)
+        out = rt.process_block(wave)
+        assert out.shape[0] == rt.block_units * (rt.tgt_sr // 100)
+        assert np.isfinite(out).all()
+
+    @pytest.mark.gpu
+    def test_rms_mix_cuda_no_device_mismatch(self, project_env, monkeypatch, synthetic_model):
+        if not torch.cuda.is_available():
+            pytest.skip("CUDA not available")
+        from rvc_platform.engine.rvc import realtime as rt_mod
+        from rvc_platform.engine.rvc.realtime import RealTimeRVC
+        from rvc_platform.utils.device import DeviceProfile
+
+        def fake_extract(model, source, version, padding_mask=None):
+            n = source.shape[-1]
+            t = max(1, n // 320)
+            feats = torch.zeros(1, t, 768, device=source.device, dtype=source.dtype)
+            feats[0, :, 0] = torch.linspace(0, 1, t, device=source.device, dtype=source.dtype)
+            return feats
+
+        monkeypatch.setattr(rt_mod, "extract_hubert_features", fake_extract)
+        profile = DeviceProfile(device="cuda:0", is_half=True, gpu_name="GPU",
+                                gpu_memory_gb=8.0, sm=8.0)
+        engine = RealTimeRVC(profile, block_ms=160, crossfade_ms=40,
+                             silence_threshold_db=-40.0, f0_method="pm")
+        engine.hubert = object()
+        engine.load_model(synthetic_model, None)
+        engine.update_settings(rms_mix_rate=0.25, silence_threshold_db=-40.0)
+        t = np.arange(engine.block_frame_16k) / 16_000
+        wave = (0.25 * np.sin(2 * np.pi * 180 * t)).astype(np.float32)
+        out = engine.process_block(wave)
+        assert out.shape[0] == engine.block_units * (engine.tgt_sr // 100)
+        assert np.isfinite(out).all()
+
+    def test_sola_buffers_match_target_sr_and_no_slide_drift(self, rt):
+        assert rt.sola_buffer.shape[0] == rt.sola_buffer_units * (rt.tgt_sr // 100)
+        rt.update_settings(silence_threshold_db=-36.0)
+        n = rt.block_frame_16k
+        # distinct loud blocks: input_wav[-n:] must match the latest block (no 20ms drift/duplication)
+        b1 = np.full(n, 0.25, dtype=np.float32)
+        b2 = np.full(n, -0.25, dtype=np.float32)
+        rt.process_block(b1)
+        rt.process_block(b2)
+        # last n samples of input_wav are purely b2 (-0.25), and preceding (n - 320) after 20ms attack are b1 (+0.25)
+        tail_b2 = rt.input_wav[-n:].cpu().numpy()
+        prev_b1 = rt.input_wav[-2 * n + 320:-n].cpu().numpy()
+        assert np.allclose(tail_b2, -0.25, atol=1e-4)
+        assert np.allclose(prev_b1, 0.25, atol=1e-4)
+
+    def test_gate_hangover_and_silence_skip(self, rt):
+        rt.update_settings(silence_threshold_db=-36.0, rms_mix_rate=0.25)
+        n = rt.block_frame_16k
+        t = np.arange(n) / 16_000
+        speech = (0.25 * np.sin(2 * np.pi * 180 * t)).astype(np.float32)
+        dip = (0.008 * np.sin(2 * np.pi * 180 * t)).astype(np.float32)  # -45 dB, within 8dB hysteresis / hangover
+        far_noise = np.full(n, 0.001, dtype=np.float32)  # -60 dB background noise
+
+        rt.process_block(speech)
+        # immediate brief dip between syllables must NOT be hard-zeroed
+        rt.process_block(dip)
+        assert float(rt.input_wav[-n:].abs().max()) > 0.001
+        # sustained quiet background noise must decay to clean zero output
+        outs = [rt.process_block(far_noise) for _ in range(6)]
+        assert float(np.max(np.abs(outs[-1]))) == 0.0

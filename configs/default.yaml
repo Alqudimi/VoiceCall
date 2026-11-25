@@ -13,7 +13,7 @@ server:
 engine:
   device: auto              # auto | cpu | cuda:0
   f0_method: rmvpe          # rmvpe (best) | fcpe (fast) | pm (CPU fallback)
-  precision: auto           # auto | fp16 | fp32
+  precision: fp32           # fp32 (default full precision) | auto | fp16
 
 conversion:
   pitch_shift: 0
@@ -27,9 +27,9 @@ conversion:
 
 realtime:
   block_ms: 160             # 60..500; 160ms ≈ official RVC default budget
-  lookback_ms: 200          # F0/history context fed each block
-  crossfade_ms: 8           # SOLA blend between consecutive blocks
-  silence_threshold_db: -40 # gate blocks below this level
+  lookback_ms: 800          # F0/history context fed each block (sweet spot for T4 GPU)
+  crossfade_ms: 50          # SOLA blend between consecutive blocks (upstream 0.05s)
+  silence_threshold_db: -36 # near-field speaker gate (with -8 dB hysteresis & 220 ms hold)
   keep_alive_s: 60
   f0_method: rmvpe
 

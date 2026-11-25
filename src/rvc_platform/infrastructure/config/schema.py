@@ -35,7 +35,7 @@ class ServerConfig(BaseModel):
 class EngineConfig(BaseModel):
     device: str = "auto"                      # "auto" | "cpu" | "cuda:0" ...
     f0_method: Literal["rmvpe", "fcpe", "pm"] = "rmvpe"
-    precision: Literal["auto", "fp16", "fp32"] = "auto"
+    precision: Literal["auto", "fp16", "fp32"] = "fp32"
     cuda_graph: bool = False                  # capture/replay fast path (CUDA only)
 
     @field_validator("device")

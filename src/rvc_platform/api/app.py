@@ -83,10 +83,9 @@ def create_app() -> FastAPI:
     if config.engine.device.startswith("cuda"):
         device_index = int(config.engine.device.split(":")[1])
     profile = select_device(device_index) if config.engine.device != "cpu" else select_device(None)
-    if config.engine.precision == "fp32":
-        profile_is_half = False
-    else:
-        profile_is_half = profile.is_half
+    profile_is_half = False
+    if config.engine.precision == "fp16" and profile.device.startswith("cuda"):
+        profile_is_half = True
     from rvc_platform.utils.device import DeviceProfile
 
     profile = DeviceProfile(
