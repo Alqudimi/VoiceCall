@@ -159,12 +159,14 @@ async function mount(root) {
   renderSpeakerBadge(state, ui);
   const offDeviceChange = wireDeviceSelectors(ui);
   ui.outSelect?.addEventListener("change", () => {
-    if (state.outCtx) attachOutputSink(state.outCtx, ui);
+    if (state.outCtx) attachOutputSink(state.outCtx, ui, state);
   });
   ui.btnStart.addEventListener("click", () => {
     if (state.phase === "streaming" || state.phase === "connecting") stopSession(state, ui);
     else startSession(state, ui);
   });
+  const btnTest = document.getElementById("rt-test-speaker");
+  if (btnTest) btnTest.addEventListener("click", () => testSpeaker(state, ui));
 
   await Promise.all([loadModels(state, ui), loadInfo(state, ui), loadHf(state, ui)]);
 
@@ -253,6 +255,12 @@ function buildControlsCard() {
     el("button", { class: "btn primary block mt", type: "button", id: "rt-start" }, [
       icon("play", 16), " بدء البث اللحظي",
     ]),
+    el("div", { class: "row mt", style: "gap:8px;flex-wrap:wrap" }, [
+      el("button", { class: "btn sm ghost", type: "button", id: "rt-test-speaker" }, [
+        icon("speaker", 14), " اختبار المكبر (نغمة قصيرة)",
+      ]),
+    ]),
+    el("div", { id: "rt-playback-alert", class: "mt hidden" }, []),
     el("div", { id: "rt-error", class: "mt hidden" }, []),
   ]);
 }
@@ -635,6 +643,14 @@ function wireLiveControls(ui, state) {
     state.volume = Number(ui.volume.value);
     ui.volumeVal.textContent = `${Math.round(state.volume * 100)}%`;
     if (state.outGain) state.outGain.gain.value = state.volume;
+    if (state.volume > 0.001 && state.zeroVolWarned) {
+      state.zeroVolWarned = false;          // volume restored — drop the alert
+      const box = document.getElementById("rt-playback-alert");
+      if (box && state.outCtx && state.outCtx.state === "running") {
+        clear(box);
+        box.classList.add("hidden");
+      }
+    }
   });
 
   // سماع الدخل — بوابة صوتية تنفتح لحظيًا
@@ -781,17 +797,111 @@ function fillSelect(select, devices, label) {
   select.value = options.some((o) => o.value === current) ? current : "";
 }
 
-async function attachOutputSink(outCtx, ui) {
+async function attachOutputSink(outCtx, ui, state = null) {
   const deviceId = ui.outSelect ? ui.outSelect.value : "";
   try {
     if (typeof outCtx.setSinkId === "function") {
       await outCtx.setSinkId(deviceId || "");
+      if (state) state.sinkFailed = false;
     } else {
       return; // context already created; sink selection unavailable
     }
   } catch (err) {
+    // The selected output device is gone/invalid — fall back to the system
+    // default so playback ALWAYS has a valid destination, and tell the user.
+    if (state) state.sinkFailed = true;
     toast(`تعذّر اختيار جهاز الإخراج (${err.message}) — سيستخدم الافتراضي.`, "warn");
+    try { await outCtx.setSinkId(""); } catch { /* default already active */ }
   }
+}
+
+/* ------------------------ playback health watchdog ------------------------ */
+
+/** Play a short audible tone through the exact playback graph (outGain →
+ *  destination). Diagnoses in one click: suspended context, wrong/missing
+ *  output device, zero volume, or OS-level mute. */
+async function testSpeaker(state, ui) {
+  const ok = await resumeOutCtx(state, ui);
+  const ctx = state.outCtx;
+  if (!ctx || !ok || ctx.state !== "running") {
+    state.outCtxSuspendedWarned = true;
+    renderPlaybackAlert(state, ui);
+    toast("فشل اختبار المكبر: سياق الصوت معلّق — اضغط زر «تفعيل الصوت» أو انقر بالصفحة أولًا.", "error", 9000);
+    return;
+  }
+  const sr = ctx.sampleRate;
+  const dur = 0.5;
+  const n = Math.round(sr * dur);
+  const buf = ctx.createBuffer(1, n, sr);
+  const data = buf.getChannelData(0);
+  for (let i = 0; i < n; i++) {
+    const t = i / sr;
+    const env = Math.min(1, t / 0.03) * Math.max(0, 1 - Math.max(0, t - (dur - 0.05)) / 0.05);
+    data[i] = 0.35 * Math.sin(2 * Math.PI * 440 * t) * env;
+  }
+  const src = ctx.createBufferSource();
+  src.buffer = buf;
+  src.connect(state.outGain);
+  src.start();
+  toast("نغمة الاختبار تعمل الآن عبر نفس مسار الصوت — إن لم تسمعها فالمشكلة في جهاز/مستوى الإخراج وليست في البث.", "info", 8000);
+}
+
+/** Resume the playback context; verify it actually left "suspended".
+ *  A silent resume() failure (autoplay policy lost after the permission
+ *  dialog) is the #1 cause of "mic meter moves but speaker silent". */
+async function resumeOutCtx(state, ui) {
+  const ctx = state.outCtx;
+  if (!ctx) return false;
+  if (ctx.state === "running") return true;
+  try { await ctx.resume(); } catch { /* gesture-bound */ }
+  await new Promise((r) => setTimeout(r, 60));
+  return ctx.state === "running";
+}
+
+/** One-time warning + retry when the playback context is stuck suspended. */
+async function checkPlaybackHealth(state, ui) {
+  const ctx = state.outCtx;
+  if (!ctx || state.phase !== "streaming") return;
+  if (ctx.state !== "suspended") return;
+  const ok = await resumeOutCtx(state, ui);
+  if (!ok && !state.outCtxSuspendedWarned) {
+    state.outCtxSuspendedWarned = true;
+    renderPlaybackAlert(state, ui);
+  }
+}
+
+/** Visible alert card for playback problems (suspended ctx / zero volume / bad sink). */
+function renderPlaybackAlert(state, ui) {
+  const box = document.getElementById("rt-playback-alert");
+  if (!box) return;
+  clear(box);
+  box.classList.remove("hidden");
+  const ctx = state.outCtx;
+  const issues = [];
+  if (ctx && ctx.state === "suspended") issues.push("سياق الصوت في المتصفح معلّق (autoplay) — اضغط زر «تفعيل الصوت»");
+  if (state.volume <= 0.001) issues.push("مستوى حجم الخرج = 0 — ارفعه من لوحة المعاملات");
+  if (state.sinkFailed) issues.push("جهاز الإخراج المختار غير صالح — عاد الصوت للجهاز الافتراضي");
+  if (!issues.length) { box.classList.add("hidden"); return; }
+  box.append(el("div", { class: "notice warn" }, [
+    el("span", { class: "n-icon" }, [icon("alert", 18)]),
+    el("div", {}, [
+      el("p", { style: "font-weight:700;margin:0 0 4px" }, ["⚠ الصوت المحوّل لا يُسمع الآن"]),
+      ...issues.map((t) => el("p", { class: "small", style: "margin:2px 0" }, [t])),
+      el("button", {
+        class: "btn primary sm mt", type: "button",
+        onclick: async () => {
+          const ok = await resumeOutCtx(state, ui);
+          if (ok) {
+            state.outCtxSuspendedWarned = false;
+            box.classList.add("hidden");
+            toast("تفعّل الصوت — أكمل الكلام وستسمع الخامة فورًا.", "success");
+          } else {
+            toast("ما زال السياق معلّقًا — انقر في أي مكان بالصفحة ثم أعد المحاولة، أو استخدم متصفحًا آخر.", "error", 9000);
+          }
+        },
+      }, ["تفعيل الصوت"]),
+    ]),
+  ]));
 }
 
 /* ------------------------------ session lifecycle ------------------------------ */
@@ -809,6 +919,10 @@ async function startSession(state, ui) {
   state.serverBlocks = 0;
   state.rttHistory = [];
   state.serverStats = null;
+  state.sinkFailed = false;
+  state.zeroVolWarned = false;
+  const pbAlert = document.getElementById("rt-playback-alert");
+  if (pbAlert) { clear(pbAlert); pbAlert.classList.add("hidden"); }
   if (ui.blocksSent) ui.blocksSent.textContent = "0";
   if (ui.blocksRecv) ui.blocksRecv.textContent = "0";
   if (ui.srvBlocks) ui.srvBlocks.textContent = "0";
@@ -819,8 +933,14 @@ async function startSession(state, ui) {
   // Create playback context synchronously under the user click gesture so
   // autoplay policies never keep it suspended after async permission awaits.
   state.outCtx = new AudioContext();
+  state.outCtxSuspendedWarned = false;   // one-time user warning when playback is blocked
+  state.outCtx.setSinkId?.("")?.catch?.(() => {});
+  // Aggressive initial resume + watchdog: some browsers drop the user-gesture
+  // status after the async mic-permission dialog, leaving the context
+  // suspended => mic meter moves but the speaker plays nothing.
+  resumeOutCtx(state, ui);
   if (state.outCtx.state === "suspended") {
-    state.outCtx.resume().catch(() => { /* retried on play */ });
+    state.outCtx.resume().then(() => checkPlaybackHealth(state, ui)).catch(() => {});
   }
   state.nextTime = 0;
   state.nextTimeMon = 0;
@@ -863,8 +983,8 @@ async function startSession(state, ui) {
   const inRate = state.inCtx.sampleRate;
 
   // 3) ensure playback context resumed & output sink attached
-  if (state.outCtx.state === "suspended") { try { await state.outCtx.resume(); } catch { /* retried on play */ } }
-  await attachOutputSink(state.outCtx, ui);
+  resumeOutCtx(state, ui);
+  await attachOutputSink(state.outCtx, ui, state);
   if (!alive()) { teardownSession(state, ui); return; }
 
   // 4) worklet — بحجم الكتلة المختار (block_ms)
@@ -1002,7 +1122,11 @@ async function startSession(state, ui) {
     if (!int16.length) return;
     let floats = int16ToFloat(int16);
     const ctx = state.outCtx;
-    if (ctx.state === "suspended") ctx.resume().catch(() => {});
+    if (ctx.state === "suspended") {
+      // a suspended context freezes currentTime: the block would be scheduled
+      // into a future that never arrives — resume first, then re-check health
+      ctx.resume().then(() => checkPlaybackHealth(state, ui)).catch(() => {});
+    }
     const outRate = ctx.sampleRate;
     if (state.modelSr && outRate !== state.modelSr) {
       floats = resampleLinear(floats, state.modelSr, outRate);
@@ -1045,6 +1169,12 @@ async function startSession(state, ui) {
       state.speakerBusyUntil = Math.max(state.speakerBusyUntil, state.nextTime + blockSec + 0.14);
     }
     state.nextTime += blockSec;
+    // if the context can never run, surface the problem instead of silence
+    if (ctx.state === "suspended") checkPlaybackHealth(state, ui);
+    if (state.volume <= 0.001 && !state.zeroVolWarned) {
+      state.zeroVolWarned = true;
+      renderPlaybackAlert(state, ui);
+    }
 
     // client round-trip: oldest pending send timestamp ↔ its scheduled playback
     if (state.pendingTs.length) {

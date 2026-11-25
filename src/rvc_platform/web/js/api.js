@@ -351,6 +351,7 @@ export function icon(name, size = 18) {
     info: "M12 21 a9 9 0 1 1 0-18 a9 9 0 0 1 0 18 Z M12 11 L12 16 M12 8 L12 8.5",
     refresh: "M20 12 a8 8 0 1 1 -3 -6.2 M20 4 L20 9 L15 9",
     cpu: "M8 8 h8 v8 h-8 Z M5 5 h14 v14 h-14 Z M12 2 V5 M12 19 V22 M2 12 H5 M19 12 H22",
+    speaker: "M4 9 L8 9 L13 4 L13 20 L8 15 L4 15 Z M16 9 a4 4 0 0 1 0 6 M18 6.5 a7.5 7.5 0 0 1 0 11",
   };
   const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
   svg.setAttribute("viewBox", "0 0 24 24");

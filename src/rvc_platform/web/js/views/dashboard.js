@@ -20,21 +20,21 @@ async function mount(root) {
     el("div", { class: "stack" }, [
       buildHero(),
       el("div", { class: "grid" }, [
-        buildSystemCard(),
-        buildComputeCard(),
         buildEngineCard(),
-        buildHfModelCard(),
+        buildComputeCard(),
         buildTrainingCard(),
         buildRealtimeCard(),
         buildTunnelCard(),
-        el("div", { class: "card span-2", id: "dash-assets" }, [
-          el("h2", { class: "card-title" }, [
-            "الأصول المسبقة",
-            el("span", { class: "sub latin" }, ["HuBERT · RMVPE · Pretrained"]),
-          ]),
-          el("div", { class: "loading-line" }, [el("span", { class: "spin" }), "جارٍ التحقق من الأصول…"]),
-        ]),
+        buildHfModelCard(),
       ]),
+      el("div", { class: "card span-2", id: "dash-assets" }, [
+        el("h2", { class: "card-title" }, [
+          "الأصول المسبقة",
+          el("span", { class: "sub latin" }, ["HuBERT · RMVPE · Pretrained"]),
+        ]),
+        el("div", { class: "loading-line" }, [el("span", { class: "spin" }), "جارٍ التحقق من الأصول…"]),
+      ]),
+      buildSystemCard(),
     ])
   );
 
@@ -69,6 +69,7 @@ async function mount(root) {
     renderSystem(system);
     renderCompute(system);
     renderEngine(system);
+    updateHeroTiles(system);
     renderTraining(system?.training || null);
     renderRealtimeCount(system);
     if (system?.tunnel) renderTunnel(system.tunnel);
@@ -96,7 +97,36 @@ function buildHero() {
       ]),
       el("span", { class: "badge info dot", id: "dash-hero-engine" }, ["—"]),
     ]),
+    el("div", { class: "hero-tiles", id: "dash-hero-tiles" }, [
+      tile("إصدار المنصة", "—", "hero-version"),
+      tile("المحرك", "—", "hero-engine"),
+      tile("جلسات لحظية", "—", "hero-sessions"),
+      tile("المساحة الحرة", "—", "hero-disk"),
+    ]),
     el("div", { class: "row mt", id: "dash-hero-msg", style: "min-height:24px" }, []),
+  ]);
+}
+
+function updateHeroTiles(system) {
+  const set = (id, v) => {
+    const node = document.getElementById(id);
+    if (node) node.textContent = v;
+  };
+  if (!system) {
+    set("hero-version", "—"); set("hero-engine", "—");
+    set("hero-sessions", "—"); set("hero-disk", "—");
+    return;
+  }
+  set("hero-version", `v${system.app_version}`);
+  set("hero-engine", ENGINE_LABELS[system.engine] || system.engine);
+  set("hero-sessions", fmtNum(system.realtime_sessions, 0));
+  set("hero-disk", fmtGB(system.disk_free_gb));
+}
+
+function tile(label, value, id = "") {
+  return el("div", { class: "stat-tile", ...(id ? { id } : {}) }, [
+    el("div", { class: "t-label" }, [label]),
+    el("div", { class: "t-value" }, [value]),
   ]);
 }
 
@@ -519,13 +549,6 @@ function renderRealtimeStats(box, stats) {
     tile("الجلسات", fmtNum(agg.sessions ?? 0, 0)),
   );
   box.append(grid);
-}
-
-function tile(label, value) {
-  return el("div", { class: "stat-tile" }, [
-    el("div", { class: "t-label" }, [label]),
-    el("div", { class: "t-value" }, [value]),
-  ]);
 }
 
 /* ------------------------------ tunnel card ------------------------------ */

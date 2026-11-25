@@ -699,3 +699,35 @@ canvas.chart {
 .hf-file-row { display: flex; justify-content: space-between; gap: 10px; font-size: 0.78rem; margin-top: 10px; }
 .hf-file-row .latin { direction: ltr; }
 .hf-url-box { font-size: 0.72rem; direction: ltr; text-align: left; word-break: break-all; }
+
+/* ---------------- history view ---------------- */
+.detail-row > td { background: var(--panel-2); border-bottom: 1px solid var(--line); }
+.detail-row .stack { gap: 10px; padding: 8px 6px; }
+
+/* ---------------- guide view ---------------- */
+.steps { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 12px; }
+.step { display: flex; gap: 14px; align-items: flex-start; }
+.step-num {
+  flex: 0 0 auto;
+  width: 34px; height: 34px;
+  border-radius: 50%;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: var(--amber-dim);
+  border: 1px solid rgba(245, 178, 60, 0.45);
+  color: var(--amber-2);
+  font-weight: 700;
+}
+.guide-block { border-inline-start: 3px solid var(--line-2); padding-inline-start: 14px; }
+.guide-title { margin: 0 0 6px; font-size: 0.95rem; color: var(--amber-2); }
+.guide-p { margin: 0 0 8px; color: var(--text-2); font-size: 0.87rem; }
+.guide-list { margin: 0; padding-inline-start: 18px; display: flex; flex-direction: column; gap: 8px; }
+.guide-list li { color: var(--text-2); font-size: 0.87rem; }
+
+/* ---------------- dashboard hero tiles ---------------- */
+.hero-tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 10px;
+  margin-top: 12px;
+}
+.hero-tiles .stat-tile { background: var(--panel-2); text-align: center; padding: 12px 8px; }

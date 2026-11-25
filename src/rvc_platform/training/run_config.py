@@ -292,11 +292,6 @@ def load_template(sample_rate: str, version: str = "v2") -> dict:
         raise ConfigurationError(f"unknown sample rate template: {sample_rate}")
     if ver not in ("v1", "v2"):
         raise ConfigurationError(f"unknown template version: {version}")
-    if ver == "v2" and sr == "40k":
-        raise ConfigurationError(
-            "40k is a v1-only sample rate officially (configs/v2 has 32k/48k "
-            "only); use v1 with 40k, or v2 with 32k/48k",
-        )
     candidates = [
         get_paths().root / "configs" / "training" / f"v2_{sr}.json",
         Path(__file__).resolve().parent / "templates" / f"v2_{sr}.json",

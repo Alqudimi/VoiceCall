@@ -514,6 +514,11 @@ async function renderResult(state, result) {
     chips.append(el("span", { class: "badge" }, [`${label}: ${v}`]));
   }
   body.append(el("div", { class: "mt" }, [chips]));
+  body.append(el("p", { class: "small muted mt", style: "margin-bottom:0" }, [
+    "حُفظ هذا التحويل في ",
+    el("a", { href: "#history" }, ["سجل التحويلات"]),
+    " مع كل إعداداته.",
+  ]));
 }
 
 function tile(label, value) {

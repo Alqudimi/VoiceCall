@@ -9,17 +9,21 @@ import {
 import dashboard from "./views/dashboard.js";
 import models from "./views/models.js";
 import convert from "./views/convert.js";
+import history from "./views/history.js";
 import realtime from "./views/realtime.js";
 import training from "./views/training.js";
 import settings from "./views/settings.js";
+import guide from "./views/guide.js";
 
 const ROUTES = [
   { id: "dashboard", label: "لوحة التحكم", view: dashboard },
   { id: "models", label: "النماذج", view: models },
   { id: "convert", label: "تحويل الملفات", view: convert },
+  { id: "history", label: "سجل التحويلات", view: history },
   { id: "realtime", label: "البث اللحظي", view: realtime },
   { id: "training", label: "التدريب", view: training },
   { id: "settings", label: "الإعدادات", view: settings },
+  { id: "guide", label: "الدليل", view: guide },
 ];
 
 const viewRoot = document.getElementById("view-root");
@@ -50,7 +54,7 @@ async function route() {
   if (!ROUTES.some((r) => r.id === hash)) {
     hash = "dashboard";
     if (location.hash !== `#${hash}`) {
-      history.replaceState(null, "", `#${hash}`);
+      location.hash = `#${hash}`;
     }
   }
   if (currentRoute === hash && currentCleanup) return;

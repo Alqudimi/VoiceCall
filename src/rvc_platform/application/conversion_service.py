@@ -1,6 +1,7 @@
 """Audio-to-Audio conversion service (file mode)."""
 from __future__ import annotations
 
+import json
 import logging
 import re
 import time
@@ -93,6 +94,7 @@ class ConversionService:
         logger.info("converted %s -> %s (%s)", input_path, out, result.speed_report)
         # exact registry: result_id -> filename (no glob guessing on download)
         self._results[out.stem] = out.name
+        self._write_history_meta(result)
         if len(self._results) > 500:
             self._results = dict(list(self._results.items())[-250:])
         return result
@@ -112,3 +114,59 @@ class ConversionService:
         if without_ext.is_file() and without_ext.with_suffix(".wav").is_file():
             return without_ext.with_suffix(".wav")
         raise ConversionError(f"result not found: {result_id}")
+
+    # ------------------------------------------------------------------ history
+    def history(self, limit: int = 50) -> list[dict[str, Any]]:
+        """Recent conversion outputs (newest first), persisted across restarts.
+
+        Each conversion writes ``<stem>.json`` next to the .wav, so history
+        survives server restarts and process restarts; the in-memory map only
+        accelerates lookups for the current process.
+        """
+        conv_dir = self.paths.conversions
+        rows: list[dict[str, Any]] = []
+        if not conv_dir.is_dir():
+            return rows
+        for wav in sorted(conv_dir.glob("*.wav"), key=lambda p: p.stat().st_mtime,
+                          reverse=True)[:limit]:
+            meta_file = wav.with_suffix(".json")
+            meta: dict[str, Any] = {}
+            try:
+                if meta_file.is_file():
+                    meta = json.loads(meta_file.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                meta = {}
+            st = wav.stat()
+            rows.append({
+                "id": wav.stem,
+                "file": wav.name,
+                "size_mb": round(st.st_size / (1024 * 1024), 2),
+                "created_at": st.st_mtime,
+                "settings": meta.get("settings", {}),
+                "duration_s": meta.get("duration_s"),
+                "processing_s": meta.get("processing_s"),
+                "realtime_factor": meta.get("realtime_factor"),
+            })
+        return rows
+
+    def _write_history_meta(self, result: ConversionResult) -> None:
+        """Persist per-result metadata used by the history endpoint."""
+        try:
+            meta_path = result.output_path.with_suffix(".json")
+            meta_path.write_text(json.dumps({
+                "settings": {
+                    "pitch_shift": result.settings.pitch_shift,
+                    "f0_method": result.settings.f0_method,
+                    "index_rate": result.settings.index_rate,
+                    "rms_mix_rate": result.settings.rms_mix_rate,
+                    "protect": result.settings.protect,
+                    "denoise": result.settings.denoise,
+                    "normalize": result.settings.normalize,
+                },
+                "duration_s": round(result.duration_seconds, 3),
+                "processing_s": round(result.processing_seconds, 3),
+                "realtime_factor": round(result.realtime_factor, 3),
+                "created_at": time.time(),
+            }, ensure_ascii=False), encoding="utf-8")
+        except OSError:
+            pass  # history metadata is best-effort only

@@ -103,6 +103,13 @@ async def convert(
     )
 
 
+@router.get("/history")
+def history(request: Request, limit: int = 50):
+    """Recent conversion outputs with their settings and speed metrics."""
+    limit = max(1, min(limit, 200))
+    return _svc(request)["conversion"].history(limit)
+
+
 @router.get("/results/{result_id}/download")
 def download_result(request: Request, result_id: str):
     try:
