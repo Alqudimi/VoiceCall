@@ -210,3 +210,68 @@ Additionally verified live in this environment (real HuBERT + RMVPE):
 file conversion of 4 s audio (7.9 s on CPU), realtime benchmark
 (min/avg/p95 = 464/519/560 ms per 160 ms block on CPU, real v2/40k weights — honest verdict),
 API+SPA serving, model load via API, clean shutdown.
+
+## 7. ULTIMATE AI VOICE OPTIMIZER (optimizer/ package + web tab)
+
+A per-model intelligent RVC v2 parameter tuner added as a first-class
+subsystem. Design decisions and their evidence:
+
+* **Reference speaker profile per model** (`optimizer/profile.py`) —
+  neural speaker-verification embeddings (WavLM x-vector
+  `microsoft/wavlm-base-plus-sv` — a CORE dependency via `transformers`,
+  no new install; ECAPA-TDNN via the existing SpeechBrain integration,
+  optional) + F0 statistics + MFCC/band/formant timbre statistics + HNR/
+  jitter/ shimmer anchors. Multiple profiles per model; per-model isolation
+  enforced by the store layout (`data/optimizer/reference/<model>/…`).
+  Research basis: cosine similarity between speaker-verification embeddings
+  is the standard VC identity metric (YourTTS, RVC overtraining detectors);
+  WavLM-based similarity tracks *perceptual* similarity well (VoxSim, 2024)
+  — hence a two-model ensemble with an **agreement check** (large spread
+  degrades the reliability verdict instead of hiding inside the mean).
+* **Analysis at one canonical 16 kHz rate** (`optimizer/analysis.py`) —
+  every axis compares like with like regardless of model output rate. F0 via
+  the engine's own registry (RMVPE default, Praat fallback); VAD is
+  dependency-free adaptive energy thresholding with hangover.
+* **Eight-axis evaluation with quality gates** (`optimizer/scoring.py`) —
+  speaker similarity (per-backend + ensemble, never a hidden average),
+  timbre, pitch consistency, naturalness (distance to the *speaker's own*
+  HNR/jitter/shimmer anchors, not absolutes), clarity (vs input), explicit
+  artifact detectors (clipping, metallic=flatness excess, robotic=jitter
+  collapse + HNR excess, buzz, noise-floor rise, spectral holes), prosody
+  preservation (pause structure + distribution correlation vs input),
+  audio quality. Composite = weighted mean (speaker identity leads by
+  design, weights user-adjustable); candidates failing the artifact/clarity/
+  prosody gates are mathematically excluded from selection — **a distorted
+  voice can never win on similarity alone**. Pareto front over
+  (speaker, naturalness, clarity) exposes trade-offs instead of hiding them.
+* **Search backends behind one interface** (`optimizer/search.py`) —
+  Optuna TPE (multivariate, constant liar) or NSGA-II for the Pareto
+  strategy when `optuna` is installed (quality extra); otherwise a
+  dependency-free adaptive backend: golden-ratio low-discrepancy EXPLORATION
+  → TPE-style top-quantile GUIDANCE (per-parameter 1-D KDE) → incumbent
+  FINE-TUNING. Quantised key cache guarantees no duplicate trial is ever
+  executed. The space is honest: `filter_radius` searches {0, 3} because the
+  engine's median filter is a fixed kernel-3 active only when radius > 2.
+* **Resumable sessions** (`optimizer/session.py`) — state.json is written
+  atomically after every trial; restart-safe resume replays the trial log
+  into the sampler. Model-swap guard: if the engine's loaded model changes
+  mid-run, remaining trials fail loudly instead of scoring the wrong voice.
+* **Anti-overfitting** — the input is VAD-split into search vs held-out
+  audio; the top-k candidates are re-validated on the held-out set and the
+  *validated* score decides the winner; validation drops > 15% surface a
+  reliability note. Short inputs (< 3.5 s) honestly skip validation (noted).
+* **Honesty rules** — every report carries reliability notes (profile
+  quality, embedder availability, embedder-set mismatches) and a disclaimer
+  that all scores are relative search metrics, not identity-match
+  probabilities.
+* **One engine, one lock** — trials reuse the already-loaded inference
+  engine (no model reloads); the engine's RLock serialises against UI
+  conversions; a single background thread + per-trial resource sampling
+  (CPU/RAM via psutil, VRAM via torch.cuda) powers the live dashboard.
+
+Verified live in this environment (real HuBERT + synthetic v2/48k model +
+real WavLM embedder): profile build over 2 samples ("good" reliability),
+full quick session through the browser UI (baseline + trials + validation +
+best), live dashboard polling, results/chart/A-B rendering, blind mode,
+APPLY (settings carried into `/api/convert/settings` → one-click fill in
+the convert tab) and JSON report export — zero console errors.

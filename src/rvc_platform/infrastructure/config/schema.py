@@ -104,6 +104,47 @@ class TunnelConfig(BaseModel):
     start_timeout_s: float = Field(default=30.0, ge=5.0, le=120.0)
 
 
+class OptimizerConfig(BaseModel):
+    """ULTIMATE AI VOICE OPTIMIZER defaults (see optimizer/ package docs).
+
+    Every knob maps to a real consumer in the optimizer service; the web UI
+    exposes the same fields so users can override per run.
+    """
+
+    # speaker-embedding backend preference: auto | wavlm | ecapa | both
+    embedder: Literal["auto", "wavlm", "ecapa", "both"] = "auto"
+    # search strategy default: auto (optuna when installed, built-in adaptive
+    # otherwise) | optuna | builtin
+    strategy: Literal["auto", "optuna", "builtin"] = "auto"
+    # default mode budget when the request omits it
+    mode: Literal["quick", "advanced", "deep"] = "advanced"
+    # hard safety caps for a single run
+    max_trials_cap: int = Field(default=400, ge=4, le=400)
+    time_budget_s: float = Field(default=0.0, ge=0.0, le=86_400.0)  # 0 = trials-only
+    # metric weights (speaker identity leads by design) — normalised at use
+    weight_speaker_similarity: float = Field(default=0.30, ge=0.0, le=1.0)
+    weight_timbre_similarity: float = Field(default=0.13, ge=0.0, le=1.0)
+    weight_pitch_consistency: float = Field(default=0.09, ge=0.0, le=1.0)
+    weight_naturalness: float = Field(default=0.13, ge=0.0, le=1.0)
+    weight_clarity: float = Field(default=0.11, ge=0.0, le=1.0)
+    weight_artifact_score: float = Field(default=0.12, ge=0.0, le=1.0)
+    weight_prosody_preservation: float = Field(default=0.07, ge=0.0, le=1.0)
+    weight_audio_quality: float = Field(default=0.05, ge=0.0, le=1.0)
+
+    def default_weights(self) -> dict[str, float]:
+        return {
+            "speaker_similarity": self.weight_speaker_similarity,
+            "timbre_similarity": self.weight_timbre_similarity,
+            "pitch_consistency": self.weight_pitch_consistency,
+            "naturalness": self.weight_naturalness,
+            "clarity": self.weight_clarity,
+            "artifact_score": self.weight_artifact_score,
+            "prosody_preservation": self.weight_prosody_preservation,
+            "audio_quality": self.weight_audio_quality,
+        }
+
+
+
 class DownloadsConfig(BaseModel):
     huggingface_base: str = (
         "https://huggingface.co/lj1995/VoiceConversionWebUI/resolve/main"
@@ -188,6 +229,7 @@ class PlatformConfig(BaseModel):
     realtime: RealtimeConfig = Field(default_factory=RealtimeConfig)
     training: TrainingDefaults = Field(default_factory=TrainingDefaults)
     tunnel: TunnelConfig = Field(default_factory=TunnelConfig)
+    optimizer: OptimizerConfig = Field(default_factory=OptimizerConfig)
     downloads: DownloadsConfig = Field(default_factory=DownloadsConfig)
     huggingface: HuggingFaceConfig = Field(default_factory=HuggingFaceConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
@@ -204,6 +246,12 @@ ENV_OVERRIDES = {
     "RVC_TRAIN_SR": ("training", "sample_rate"),
     "RVC_TUNNEL_ENABLED": ("tunnel", "enabled"),
     "RVC_LOG_LEVEL": ("logging", "level"),
+    # ---- ULTIMATE AI VOICE OPTIMIZER ----
+    "RVC_OPT_EMBEDDER": ("optimizer", "embedder"),
+    "RVC_OPT_STRATEGY": ("optimizer", "strategy"),
+    "RVC_OPT_MODE": ("optimizer", "mode"),
+    "RVC_OPT_MAX_TRIALS_CAP": ("optimizer", "max_trials_cap"),
+    "RVC_OPT_TIME_BUDGET_S": ("optimizer", "time_budget_s"),
     # ---- HuggingFace default voice model (env-injected, never in git) ----
     "RVC_HF_REPO": ("huggingface", "repo_id"),
     "RVC_HF_TOKEN": ("huggingface", "token"),

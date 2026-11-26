@@ -10,6 +10,7 @@ import dashboard from "./views/dashboard.js";
 import models from "./views/models.js";
 import convert from "./views/convert.js";
 import history from "./views/history.js";
+import optimizer from "./views/optimizer.js";
 import realtime from "./views/realtime.js";
 import training from "./views/training.js";
 import settings from "./views/settings.js";
@@ -20,6 +21,7 @@ const ROUTES = [
   { id: "models", label: "النماذج", view: models },
   { id: "convert", label: "تحويل الملفات", view: convert },
   { id: "history", label: "سجل التحويلات", view: history },
+  { id: "optimizer", label: "التحسين الذكي", view: optimizer },
   { id: "realtime", label: "البث اللحظي", view: realtime },
   { id: "training", label: "التدريب", view: training },
   { id: "settings", label: "الإعدادات", view: settings },

@@ -68,6 +68,7 @@ async function loadSettings(state) {
     state.settings = await get("/convert/settings");
     renderEngine(state, state.settings.engine);
     applyDefaults(state.settings);
+    renderOptimizerApplied(state, state.settings.optimizer_applied);
   } catch (err) {
     const card = document.getElementById("convert-engine");
     if (card) {
@@ -75,6 +76,61 @@ async function loadSettings(state) {
       card.append(el("div", { class: "notice danger" }, [el("p", {}, [err.message])]));
     }
   }
+}
+
+/* --- ULTIMATE AI VOICE OPTIMIZER: applied best settings (additive) --- */
+
+function renderOptimizerApplied(state, applied) {
+  const host = document.getElementById("convert-optimizer-applied");
+  if (!host) return;
+  clear(host);
+  if (!applied || !applied.settings) return;
+  const s = applied.settings;
+  host.append(el("div", { class: "notice mt", style: "margin-bottom:0" }, [
+    el("span", { class: "n-icon" }, [icon("wave", 16)]),
+    el("div", {}, [
+      el("p", { style: "margin:0 0 6px" }, [
+        "يتوفر لهذا النموذج إعدادات محسّنة من «التحسين الذكي» ",
+        el("span", { class: "latin" }, [`(composite ${fmtNum(applied.scores?.composite ?? 0, 3)})`]),
+        ".",
+      ]),
+      el("div", { class: "row" }, [
+        el("button", { class: "btn small", type: "button", id: "cv-apply-opt" }, [
+          icon("check", 14), " تطبيق الإعدادات المحسّنة",
+        ]),
+        applied.previous
+          ? el("button", { class: "btn ghost small", type: "button", id: "cv-restore-opt" }, [
+              "استعادة الإعدادات السابقة",
+            ])
+          : null,
+      ]),
+    ]),
+  ]));
+  const applyBtn = document.getElementById("cv-apply-opt");
+  if (applyBtn) applyBtn.addEventListener("click", () => {
+    setSlider("cv-pitch", s.pitch_shift);
+    setSlider("cv-index", s.index_rate);
+    setSlider("cv-filter", s.filter_radius);
+    setSlider("cv-rms", s.rms_mix_rate);
+    setSlider("cv-protect", s.protect);
+    const f0 = document.getElementById("cv-f0");
+    if (f0 && s.f0_method) f0.value = s.f0_method;
+    refreshSliderLabels();
+    toast("تم تعبئة المنزلقات بالإعدادات المحسّنة لهذا النموذج.", "success");
+  });
+  const restoreBtn = document.getElementById("cv-restore-opt");
+  if (restoreBtn && applied.previous) restoreBtn.addEventListener("click", () => {
+    const p = applied.previous;
+    setSlider("cv-pitch", p.pitch_shift);
+    setSlider("cv-index", p.index_rate);
+    setSlider("cv-filter", p.filter_radius);
+    setSlider("cv-rms", p.rms_mix_rate);
+    setSlider("cv-protect", p.protect);
+    const f0 = document.getElementById("cv-f0");
+    if (f0 && p.f0_method) f0.value = p.f0_method;
+    refreshSliderLabels();
+    toast("استُعيدت الإعدادات السابقة.", "info");
+  });
 }
 
 function renderEngine(state, engine) {
@@ -121,6 +177,7 @@ function buildInputCard() {
   return el("div", { class: "card" }, [
     el("h2", { class: "card-title" }, ["الملف المصدر", el("span", { class: "sub latin" }, ["Input"])]),
     dropzone,
+    el("div", { id: "convert-optimizer-applied", class: "mt" }, []),
     el("div", { class: "record-box mt", id: "convert-record-box" }, [
       el("div", { class: "row" }, [
         el("button", { class: "btn", type: "button", id: "convert-record-btn" }, [
@@ -383,6 +440,15 @@ function applyDefaults(settingsData) {
 function setSlider(id, value) {
   const input = document.getElementById(id);
   if (input && value !== undefined && value !== null) input.value = String(value);
+}
+
+function refreshSliderLabels() {
+  for (const [id, step] of [["cv-pitch", 1], ["cv-index", 0.01], ["cv-filter", 1], ["cv-rms", 0.01], ["cv-protect", 0.01]]) {
+    const input = document.getElementById(id);
+    if (!input) continue;
+    const label = input.closest(".slider-row").querySelector(".slider-val");
+    if (label) { clear(label); label.append(document.createTextNode(formatValue(input.value, step))); }
+  }
 }
 
 /* ------------------------------ convert run ------------------------------ */

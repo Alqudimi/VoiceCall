@@ -14,7 +14,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from rvc_platform import __version__
-from rvc_platform.api.routes import conversion, models, realtime, system, training, tunnel
+from rvc_platform.api.routes import conversion, models, optimizer, realtime, system, training, tunnel
 from rvc_platform.application.conversion_service import ConversionService
 from rvc_platform.application.hf_model_service import HuggingFaceModelService
 from rvc_platform.application.model_service import ModelService
@@ -23,6 +23,7 @@ from rvc_platform.application.system_service import SystemService
 from rvc_platform.application.tunnel_service import TunnelService
 from rvc_platform.application.training_service import TrainingService
 from rvc_platform.engine.rvc.inference import RVCInferenceEngine
+from rvc_platform.optimizer.service import OptimizerService
 from rvc_platform.infrastructure.audio.pipeline import AudioProcessingEngine
 from rvc_platform.infrastructure.config.loader import get_config
 from rvc_platform.infrastructure.logging.setup import setup_logging
@@ -112,6 +113,11 @@ def create_app() -> FastAPI:
     process_manager = ProcessManager(paths.logs / "processes")
     training_service = TrainingService(process_manager)
 
+    # ULTIMATE AI VOICE OPTIMIZER — shares the inference engine (same loaded
+    # model, no reloads) and the models service (load/unload lifecycle).
+    optimizer_service = OptimizerService(
+        inference_engine, model_service, config.optimizer)
+
     realtime_service = RealtimeService(profile, repository)
     tunnel_service = TunnelService(
         process_manager, config.server.port, retries=config.tunnel.retries,
@@ -157,6 +163,7 @@ def create_app() -> FastAPI:
         "huggingface": hf_model_service,
         "conversion": conversion_service,
         "training": training_service,
+        "optimizer": optimizer_service,
         "realtime": realtime_service,
         "tunnel": tunnel_service,
         "processes": process_manager,
@@ -186,6 +193,7 @@ def create_app() -> FastAPI:
     app.include_router(models.router)
     app.include_router(conversion.router)
     app.include_router(training.router)
+    app.include_router(optimizer.router)
     app.include_router(realtime.router)
     app.include_router(tunnel.router)
 
@@ -225,6 +233,13 @@ def create_app() -> FastAPI:
             process_manager.stop_all()
         except Exception:
             logger.exception("process cleanup failed on shutdown")
+        try:
+            # the optimizer thread is a daemon and always checkpoint-safe
+            # (state.json is written after every trial); an explicit nudge
+            # still lets the current trial finish recording on best effort.
+            optimizer_service.cancel()
+        except Exception:
+            logger.exception("optimizer cancel on shutdown failed")
         inference_engine.unload()
 
     return app

@@ -470,6 +470,88 @@ curl -s $API/api/models/default
 
 ---
 
+## 7.5 المحسّن الذكي — `/api/optimizer*` — ULTIMATE AI VOICE OPTIMIZER
+
+قسم تحسين معاملات RVC v2 تلقائيًا: يبني بصمة المتحدث من عينات مرجعية
+(WavLM x-vector + ECAPA-TDNN عند توفر speechbrain)، يجري تحويلات حقيقية
+عبر المحرك نفسه، ويقيّم كل مخرَج بثمانية معايير منفصلة، ثم يقود البحث
+(Optuna TPE/NSGA-II عند تثبيت optuna، أو البحث التكيفي المدمج) نحو أفضل
+الإعدادات — مع تحقق على مقاطع منفصلة لم تُستخدم في البحث.
+
+> **صدق النتائج:** جميع الدرجات مقاييس نسبية داخل نطاق البحث. تشابه
+> الهوية هو تشابه كوني (cosine) بين بصمات تحقق من المتحدث — **ليس نسبة
+> تطابق حقيقية**. المرشّح الذي يخفق في بوابات الجودة (تشوهات/وضوح/أداء)
+> يُستبعد من الاختيار النهائي مهما ارتفع تشابهه.
+
+### GET /api/optimizer/capabilities
+
+الطرق والنماذج والأوضاع المتاحة فعليًا (تقرير صادق — لا يعرض خيارات
+شكلية غير مفعّلة).
+
+### GET /api/optimizer/status
+
+حالة الجلسة الحية: المرحلة، نسبة التقدم، التجربة الجارية، أفضل نتيجة،
+قراءات CPU/RAM/VRAM، وحالة نماذج بصمة المتحدث.
+
+### POST /api/optimizer/reference-samples (multipart)
+
+- الحقول: `file` (صوت) + `model_name` + `profile_name` (افتراضي `default`).
+- يخزن عينة مرجعية نظيفة لصوت المتحدث الأصلي. يفضّل 2-5 عينات متنوعة.
+
+### GET /api/optimizer/reference-samples?model_name=&profile_name=
+
+قائمة العينات المخزنة، و`DELETE /api/optimizer/reference-samples/{sid}`
+لحذف عينة (مع `model_name` و`profile_name`).
+
+### POST /api/optimizer/analyze-reference?model_name=&profile_name=
+
+يحلل العينات (بصمات + F0 + MFCC + فورمانت + HNR + VAD...) ويبني الملف
+المرجعي الموحد مع تقرير موثوقية صادق. يدعم عدة ملفات مرجعية مستقلة
+لكل نموذج: `GET /api/optimizer/profiles?model_name=` و
+`DELETE /api/optimizer/profiles/{name}?model_name=`.
+
+### POST /api/optimizer/input (multipart)
+
+رفع الصوت المراد تحويله (مادة البحث).
+
+### POST /api/optimizer/start (form)
+
+بدء الجلسة. الحقول: `model_name`, `input_path`, `profile_name`,
+`mode` (`quick|advanced|deep`), `max_trials`, `time_budget_s`,
+`strategy` (`auto|optuna|builtin`), `pitch_policy` (`preserve|auto|range`)
+مع `pitch_min`/`pitch_max`, `embedder_prefer`, `denoise`, `normalize`,
+`weights_json` (أوزان المعايير الثمانية), `f0_methods_json`,
+`validate_top_k`. الحالة تُحفظ بعد كل تجربة (إيقاف/إعادة تشغيل آمنة).
+
+### POST /api/optimizer/pause | resume | cancel
+
+إيقاف مؤقت / استكمال (يشمل استئناف جلسة انقطعت بإعادة تشغيل الخادم) /
+إلغاء مع الاحتفاظ بالنتائج.
+
+### GET /api/optimizer/results[?session_id=]
+
+النتائج الكاملة: التجارب (معايير + بوابات + موارد)، خط الأساس، الأفضل،
+جدول التحقق المنفصل (`drop` = نسبة الهبوط للكشف عن الإفراط في التخصيص)،
+جبهة باريتو، وبيانات الرسم البياني.
+
+### GET /api/optimizer/results/audio?session_id=&name=
+
+ملفات A/B الصوتية: `input_segment`, `baseline`, `best`,
+`validation_<n>`, `candidate_trial_<n>`.
+
+### POST /api/optimizer/apply[?session_id=] و GET /api/optimizer/models/{name}/applied
+
+تطبيق أفضل الإعدادات وربطها بالنموذج المحدد فقط (مع حفظ الإعدادات
+السابقة لاسترجاعها) — ثم تظهر تلقائيًا في `/api/convert/settings` ضمن
+`optimizer_applied` لتعبئتها بزر واحد من تبويب التحويل.
+
+### GET /api/optimizer/report[?session_id=]
+
+تصدير تقرير JSON كامل (يُحفظ أيضًا بجوار الجلسة) يتضمن إخلاء مسؤولية
+منهجيًا حول دلالة الدرجات.
+
+---
+
 ## 8. النفق — `/api/tunnel*`
 
 ### POST /api/tunnel/start

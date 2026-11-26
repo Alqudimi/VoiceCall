@@ -56,6 +56,8 @@ quality = [
     "speechbrain>=1.0,<2",      # ECAPA speaker-similarity (model: spkrec-ecapa-voxceleb, 16kHz input — auto-resampled)
     "torchcrepe>=0.0.23,<1",    # CREPE F0 extraction method (--f0-method crepe)
     "noisereduce>=3.0.0,<4",    # spectral-gate dataset denoising (--denoise)
+    "optuna>=3.6,<6",            # ULTIMATE AI VOICE OPTIMIZER: TPE / NSGA-II Bayesian search
+    # (without optuna the optimizer falls back to its built-in adaptive search)
 ]
 onnx = ["onnxruntime>=1.18.0,<2"]
 

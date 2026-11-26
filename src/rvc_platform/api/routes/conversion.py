@@ -21,6 +21,15 @@ def settings(request: Request):
     svc = _svc(request)
     defaults = svc["config"].conversion
     loaded = svc["models"].loaded()
+    # ULTIMATE AI VOICE OPTIMIZER: applied best settings for the loaded
+    # model (additive — the convert UI offers them as a one-click preset;
+    # None when this model has no applied optimization result).
+    optimizer_applied = None
+    if loaded is not None and "optimizer" in svc:
+        try:
+            optimizer_applied = svc["optimizer"].applied_settings(loaded.name)
+        except Exception:
+            optimizer_applied = None
     return {
         "defaults": {
             "pitch_shift": defaults.pitch_shift,
@@ -39,6 +48,7 @@ def settings(request: Request):
             "loaded_model": loaded.to_dict() if loaded else None,
         },
         "f0_methods": ["rmvpe", "fcpe", "pm"],
+        "optimizer_applied": optimizer_applied,
     }
 
 
