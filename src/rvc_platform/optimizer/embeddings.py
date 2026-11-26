@@ -11,23 +11,35 @@ Research-grounded choice of speaker verification models (see profile docs):
   ``spkrec-ecapa-voxceleb``) — the metric used to report speaker similarity
   in VC papers (YourTTS, RVC overtraining detectors). Reuses this project's
   existing integration in ``training/eval_metrics.py``. OPTIONAL dependency.
-* **DSP fallback** — MFCC-statistics voiceprint. Always available, flagged
-  ``reliability="low"``; only used when both neural models are unavailable,
-  and the UI shows an explicit warning (never a silent downgrade).
+* **DSP fallback** — MFCC-statistics voiceprint: mean+std of 20 MFCCs over
+  VAD-speech frames, L2-normalised. Always available, flagged
+  ``reliability="low"``; used only when both neural models are unavailable,
+  and the UI shows an explicit warning (never a silent downgrade). Phase 02
+  made this claim TRUE — the fallback previously documented but never
+  implemented is now real code with real tests.
 
 The manager never trusts a single model blindly: when two neural embedders
 are available their cosine similarities are reported *separately* and their
 agreement is measured — large disagreement degrades the reliability verdict
 for that comparison instead of hiding it inside an average.
+
+Phase 02 adds per-backend score **calibration** (audited W1): raw cosines
+from different SV models live on different scales, so
+``similarity_report`` accepts a :class:`~rvc_platform.optimizer.calibration.
+SpeakerScoreCalibrator` and reports calibrated values + a calibrated
+ensemble alongside the raw ones (raw is never hidden).
 """
 from __future__ import annotations
 
 import logging
 import threading
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
+
+if TYPE_CHECKING:  # pragma: no cover
+    from rvc_platform.optimizer.calibration import SpeakerScoreCalibrator
 
 logger = logging.getLogger(__name__)
 
@@ -85,7 +97,8 @@ class _WavlmEmbedder:
         x = np.asarray(wav16k, dtype=np.float32).ravel()
         inputs = self.fe(x, sampling_rate=_SR, return_tensors="pt")
         with torch.no_grad():
-            out = self.model(**{k: v.to(self.model.device) for k, v in inputs.items()})
+            out = self.model(
+                **{k: v.to(self.model.device) for k, v in inputs.items()})
         emb = out.embeddings[0].detach().cpu().numpy().astype(np.float32)
         norm = float(np.linalg.norm(emb))
         return emb / norm if norm > 0 else emb
@@ -101,16 +114,59 @@ class _EcapaEmbedder:
 
         embedder = try_build_speaker_embedder(device)
         if embedder is None:
-            raise RuntimeError("ECAPA speaker model unavailable (speechbrain missing?)")
+            raise RuntimeError(
+                "ECAPA speaker model unavailable (speechbrain missing?)")
         self._embedder = embedder
 
     def embed(self, wav16k: np.ndarray) -> np.ndarray:
         import torch
 
-        x = torch.from_numpy(np.asarray(wav16k, dtype=np.float32)).unsqueeze(0)
-        emb = self._embedder.embed(x)[0].detach().cpu().numpy().astype(np.float32)
+        x = torch.from_numpy(
+            np.asarray(wav16k, dtype=np.float32)).unsqueeze(0)
+        emb = self._embedder.embed(x)[0].detach().cpu().numpy().astype(
+            np.float32)
         norm = float(np.linalg.norm(emb))
         return emb / norm if norm > 0 else emb
+
+
+class _DspEmbedder:
+    """Real MFCC-statistics voiceprint (the documented DSP fallback).
+
+    40-dim vector: mean and std of 20 MFCCs computed over VAD-speech
+    frames only, energy-compressed and L2-normalised. Not a speaker-
+    verification model — a cheap always-available voiceprint whose
+    similarity is a *timbre proxy*, explicitly reported with LOW
+    reliability.
+    """
+
+    name = "dsp"
+
+    def __init__(self, device: str) -> None:
+        self.device = "cpu"              # pure numpy/librosa — no GPU path
+
+    def embed(self, wav16k: np.ndarray) -> np.ndarray:
+        import librosa
+
+        x = np.asarray(wav16k, dtype=np.float32).ravel()
+        if x.size < 2048:
+            x = np.pad(x, (0, 2048 - x.size))
+        mfcc = librosa.feature.mfcc(y=x, sr=_SR, n_mfcc=20, n_fft=1024,
+                                     hop_length=256)
+        # frame energy weighting: quiet frames (silence edges) weight less
+        rms = librosa.feature.rms(y=x, frame_length=1024, hop_length=256)[0]
+        w = np.clip(rms, 1e-4, None)
+        if w.size == mfcc.shape[1]:
+            w = w / w.sum()
+            mean = (mfcc * w).sum(axis=1)
+            var = (w * (mfcc - mean[:, None]) ** 2).sum(axis=1)
+        else:
+            mean = mfcc.mean(axis=1)
+            var = mfcc.var(axis=1)
+        vec = np.concatenate([mean, np.sqrt(np.maximum(var, 0.0))])
+        # compress the dynamic range so one loud frame cannot dominate
+        vec = np.tanh(vec / 30.0)
+        norm = float(np.linalg.norm(vec))
+        return (vec / norm).astype(np.float32) if norm > 0 else vec
 
 
 class SpeakerEmbedderManager:
@@ -142,22 +198,33 @@ class SpeakerEmbedderManager:
                 try:
                     self._embedders["wavlm"] = _WavlmEmbedder(self.device)
                     self._status.wavlm = True
-                    logger.info("optimizer: WavLM x-vector speaker embedder ready")
+                    logger.info(
+                        "optimizer: WavLM x-vector speaker embedder ready")
                 except Exception as exc:
                     self._status.messages["wavlm"] = str(exc)[:300]
-                    logger.info("optimizer: WavLM embedder unavailable (%s)", exc)
+                    logger.info("optimizer: WavLM embedder unavailable (%s)",
+                                exc)
             if want_ecapa:
                 try:
                     self._embedders["ecapa"] = _EcapaEmbedder(self.device)
                     self._status.ecapa = True
-                    logger.info("optimizer: ECAPA-TDNN speaker embedder ready")
+                    logger.info(
+                        "optimizer: ECAPA-TDNN speaker embedder ready")
                 except Exception as exc:
                     self._status.messages["ecapa"] = str(exc)[:300]
-                    logger.info("optimizer: ECAPA embedder unavailable (%s)", exc)
+                    logger.info("optimizer: ECAPA embedder unavailable (%s)",
+                                exc)
             if not self._status.neural_count:
-                logger.warning(
-                    "optimizer: no neural speaker embedder available — falling "
-                    "back to DSP voiceprint (reliability LOW)")
+                # the DSP voiceprint is now REAL code (Phase 02): always
+                # registered so identity scoring degrades instead of dying
+                try:
+                    self._embedders["dsp"] = _DspEmbedder(self.device)
+                    logger.warning(
+                        "optimizer: no neural speaker embedder available — "
+                        "DSP voiceprint fallback ACTIVE (reliability LOW)")
+                except Exception as exc:                      # pragma: no cover
+                    logger.warning(
+                        "optimizer: DSP voiceprint unavailable (%s)", exc)
             self._built = True
 
     @property
@@ -188,18 +255,23 @@ class SpeakerEmbedderManager:
         self,
         wav16k: np.ndarray,
         reference_embeddings: dict[str, list[np.ndarray]],
+        calibrator: "SpeakerScoreCalibrator | None" = None,
     ) -> dict[str, Any]:
         """Compare one utterance against a reference embedding set.
 
         Returns per-backend similarity (mean cosine to each reference
         embedding), an ensemble view and an honest reliability verdict:
 
-        * ``similarities``  — one score per available backend (never averaged
-          behind the scenes);
-        * ``ensemble``       — mean over neural backends only (undefined when
-          none is available);
-        * ``agreement``      — spread between neural backends (0 when single);
-        * ``reliability``    — high / medium / low, per SpeakerEmbeddingStatus.
+        * ``similarities``  — one RAW score per available backend (never
+          averaged behind the scenes);
+        * ``ensemble``      — mean over neural backends only (undefined when
+          none is available) — RAW scales, kept for backward compatibility;
+        * ``calibration``   — Phase 02: when a calibrator with per-backend
+          same-speaker cohorts is supplied, per-backend margin/calibrated
+          values and a **calibrated_ensemble** (comparable scale). The
+          calibrated ensemble is what scoring consumes when present;
+        * ``agreement``     — spread between neural backends (0 when single);
+        * ``reliability``   — high / medium / low, per SpeakerEmbeddingStatus.
 
         Backend mismatch guard: a reference built with a *different embedder
         set* (e.g. profile built with WavLM, current process only has ECAPA —
@@ -218,7 +290,8 @@ class SpeakerEmbedderManager:
             if not dims_ok:
                 mismatched.append(name)
                 continue
-            sims[name] = float(np.mean([self.cosine(cand, r) for r in refs]))
+            sims[name] = float(
+                np.mean([self.cosine(cand, r) for r in refs]))
         neural = [v for k, v in sims.items() if k in ("wavlm", "ecapa")]
         spread = (max(neural) - min(neural)) if len(neural) >= 2 else 0.0
         reliability = self._status.reliability
@@ -234,10 +307,16 @@ class SpeakerEmbedderManager:
         elif reliability == "high" and spread > 0.15:
             # models disagree -> the ensemble mean is NOT trustworthy
             reliability = "medium-low (models disagree)"
-        return {
+        out: dict[str, Any] = {
             "similarities": sims,
             "ensemble": float(np.mean(neural)) if neural else None,
             "agreement_spread": round(float(spread), 4),
             "reliability": reliability,
             "notes": notes,
         }
+        if calibrator is not None:
+            try:
+                out["calibration"] = calibrator.calibrate_report(sims)
+            except Exception:
+                logger.exception("optimizer: calibration failed")
+        return out

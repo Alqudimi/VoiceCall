@@ -22,6 +22,7 @@ const AXIS_LABELS = {
   clarity: "وضوح النطق",
   artifact_score: "خلوّه من التشوهات",
   prosody_preservation: "حفظ الأداء الصوتي",
+  content_preservation: "حفظ المحتوى الكلامي",
   audio_quality: "جودة الصوت",
 };
 
@@ -31,8 +32,9 @@ const AXIS_HINTS = {
   pitch_consistency: "قرب الطبقة والمدى النغمي من مرجع المتحدث",
   naturalness: "قرب الخصائص الصوتية (HNR/اهتزاز) من طبيعية المتحدث",
   clarity: "احتفاظ التفاصيل الطيفية والنطقية بالمدخل",
-  artifact_score: "بوابات كشف التشوهات (معدني/روبوتي/طنين/تشويش)",
-  prosody_preservation: "حفظ الإيقاع والوقفات والديناميكية مقابل المدخل",
+  artifact_score: "١٥ كاشفًا حقيقيًا للتشوهات (معدني/روبوتي/طنين/تشويش/غيرها)",
+  prosody_preservation: "حفظ الإيقاع والديناميكية وخط الطبقة مقابل المدخل (ارتباطات حقيقية)",
+  content_preservation: "بقاء الكلام نفسه (المدة، البنية، معدل الكلام، الحوافر)",
   audio_quality: "نسبة الإشارة للتشويش والمدى الديناميكي",
 };
 
@@ -57,8 +59,30 @@ const MODES = {
 const PHASE_LABELS = {
   idle: "خامل", baseline: "خط الأساس", exploration: "استكشاف",
   optimization: "تحسين موجَّه", fine_tuning: "ضبط دقيق",
-  validation: "تحقق على مقاطع منفصلة", final_selection: "الاختيار النهائي",
+  validation: "تحقق على مقاطع منفصلة", robustness: "تقييم الاستقرارية",
+  final_selection: "الاختيار النهائي",
   completed: "اكتمل", failed: "فشل", stopped: "أُوقف", paused: "متوقف مؤقتًا",
+};
+
+const STRATEGY_LABELS = {
+  balanced: { label: "أفضل توازن", hint: "أعلى نتيجة مركّبة موزونة (بعد التحقق والاستقرارية)" },
+  identity: { label: "أفضل تشابه هوية", hint: "أعلى تشابه لهوية المتحدث" },
+  naturalness: { label: "أفضل طبيعية", hint: "أقرب صوت لطبيعية المتحدث الأصلي" },
+  clarity: { label: "أفضل وضوح", hint: "أوضح نطقًا وأقل فقدًا للتفاصيل" },
+};
+
+const PROBE_LABELS = {
+  normal: "مقطع اعتيادي", short: "مقطع قصير", long: "مقطع طويل",
+  quiet: "صوت هادئ", loud: "صوت مرتفع",
+  voiced_heavy: "غني بالمقاطع المجهورة", unvoiced_heavy: "غني بالمقاطع غير المجهورة",
+};
+
+const DIAG_CLASS_LABELS = {
+  inference_parameters: "إعدادات الاستدلال",
+  reference_data: "بيانات المرجع",
+  input_audio: "الصوت المدخل",
+  model_quality: "جودة النموذج/التدريب",
+  evaluation_models: "نماذج التقييم",
 };
 
 const AXIS_COLORS = {
@@ -76,15 +100,17 @@ async function mount(root) {
     loadedModel: null,
     profiles: [],
     samples: [],
-    inputAudio: null,          // {id, file, path}
+    inputAudios: [],            // [{file, path}] — multi-input (Phase 02)
     settings: null,            // /convert/settings
     capabilities: null,
     mode: "advanced",
     weights: null,
     results: null,
+    strategy: "balanced",     // selected apply strategy (Phase 02)
     blindMode: false,
     lastSessionId: null,
     abUrls: [],                // object URLs to revoke
+    blindPair: null,           // active server-backed blind pair
   };
 
   root.replaceChildren(el("div", { class: "stack" }, [
@@ -97,6 +123,7 @@ async function mount(root) {
     buildLiveCard(state),
     buildResultsCard(state),
     buildABCard(state),
+    buildBlindCard(state),
   ]));
 
   const ui = bindUI(root, state);
@@ -211,14 +238,17 @@ function buildInputsCard(state) {
       el("div", { id: "opt-profile-status", class: "mt" }, []),
     ]),
 
-    // ---- input audio ----
+    // ---- input audio (multi-file: enables file-level data-role split) ----
     el("div", { class: "field mt" }, [
-      el("label", {}, ["الصوت المراد تحويله"]),
+      el("label", {}, ["الصوت المراد تحويله (يمكن اختيار عدة تسجيلات — يُفضّل 3+)"]),
       el("button", { class: "btn block", type: "button", id: "opt-input-upload" }, [
-        icon("upload", 15), " اختيار ملف صوتي للتحسين",
+        icon("upload", 15), " اختيار ملف/ملفات صوتية للتحسين",
       ]),
-      el("input", { type: "file", accept: AUDIO_ACCEPT, id: "opt-input-file", class: "hidden" }),
+      el("input", { type: "file", accept: AUDIO_ACCEPT, multiple: true, id: "opt-input-file", class: "hidden" }),
       el("div", { id: "opt-input-info", class: "mt small muted" }, []),
+      el("span", { class: "hint" }, [
+        "تسجيلات متعددة ⇒ تقسيم ملف-بملف للأدوار (بحث/تحقق/اختبار نهائي) — أقوى ضد التخصيص الزائد على تسجيل واحد.",
+      ]),
     ]),
 
     // ---- current params ----
@@ -403,6 +433,24 @@ function buildABCard(state) {
       el("button", { class: "btn ghost", type: "button", id: "opt-ab-reveal", hidden: true }, ["كشف التسميات"]),
     ]),
     el("div", { class: "opt-ab-grid mt", id: "opt-ab-grid" }, []),
+  ]);
+}
+
+function buildBlindCard(state) {
+  return el("div", { class: "card hidden", id: "opt-blind" }, [
+    el("h2", { class: "card-title" }, [
+      "اختبار A/B أعمى وتفضيلاتك",
+      el("span", { class: "sub latin" }, ["Blind A/B Preference Test"]),
+    ]),
+    el("p", { class: "small muted", style: "margin:6px 0" }, [
+      "المقاييس الحسابية ليست بديلًا كاملًا عن الاستماع. اختر — دون رؤية الإعدادات — النسخة الأقرب لصوت المتحدث المرجعي، وسيُحفظ تفضيلك ويربَط بالإعدادات، ويُستخدم (بشكل معلن ومحدود) في التوصية المدمجة. المقاييس الموضوعية لا تُعدّل أبدًا.",
+    ]),
+    el("div", { class: "row" }, [
+      el("button", { class: "btn primary", type: "button", id: "opt-blind-new" }, [
+        icon("ear", 15), " إنشاء زوج مقارنة أعمى جديد",
+      ]),
+    ]),
+    el("div", { id: "opt-blind-body", class: "mt" }, []),
   ]);
 }
 
@@ -652,6 +700,7 @@ function bindUI(root, state) {
     resultsBody: "opt-results-body",
     abGrid: "opt-ab-grid", abPlay: "opt-ab-play", abStop: "opt-ab-stop",
     abLoop: "opt-ab-loop", abBlind: "opt-ab-blind", abReveal: "opt-ab-reveal",
+    blindBody: "opt-blind-body", blindNew: "opt-blind-new",
   })) {
     ui[k] = document.getElementById(id);
   }
@@ -711,9 +760,7 @@ function wireConfigUI(ui, state) {
   // input audio
   ui.inputUpload.addEventListener("click", () => ui.inputFile.click());
   ui.inputFile.addEventListener("change", () => {
-    const f = ui.inputFile.files && ui.inputFile.files[0];
-    if (!f) return;
-    setInputAudio(ui, state, f);
+    setInputAudio(ui, state, ui.inputFile.files);
   });
 }
 
@@ -790,31 +837,47 @@ function renderProfileStatus(ui, result, state) {
   state.lastProfileAnalysis = result;
 }
 
-function setInputAudio(ui, state, file) {
-  state.inputAudio = { id: null, file };
+function setInputAudio(ui, state, files) {
+  const list = Array.from(files || []);
+  if (!list.length) return;
+  state.inputAudios = list.map(file => ({ file, path: null }));
   const info = ui.inputInfo;
   clear(info);
-  info.append(
-    el("div", { class: "latin small dim" }, [file.name]),
-    el("div", { class: "small" }, [`${fmtMB(file.size / (1024 * 1024))} MB`]),
-  );
-  const probe = el("audio", { src: URL.createObjectURL(file), preload: "metadata" });
-  probe.addEventListener("loadedmetadata", () => {
-    if (Number.isFinite(probe.duration)) {
-      info.append(el("div", { class: "small" }, [`المدة: ${fmtDuration(probe.duration)}`]));
-      if (probe.duration < 4) {
-        info.append(el("div", { class: "small", style: "color:#e0a13c" }, [
-          "تنبيه: المدة قصيرة — التحقق على مقاطع منفصلة قد يتعذر.",
-        ]));
-      }
-    }
+  info.append(el("div", { class: "small" }, [
+    `تم اختيار ${list.length} ملف:`,
+  ]));
+  list.forEach((file) => {
+    info.append(el("div", { class: "latin small dim" }, [
+      `${file.name} · ${fmtMB(file.size / (1024 * 1024))} MB`,
+    ]));
   });
+  if (list.length === 1) {
+    const probe = el("audio", {
+      src: URL.createObjectURL(list[0]), preload: "metadata",
+    });
+    probe.addEventListener("loadedmetadata", () => {
+      if (Number.isFinite(probe.duration)) {
+        info.append(el("div", { class: "small" }, [
+          `المدة: ${fmtDuration(probe.duration)}`,
+        ]));
+        if (probe.duration < 4) {
+          info.append(el("div", { class: "small", style: "color:#e0a13c" }, [
+            "تنبيه: المدة قصيرة — التحقق على مقاطع منفصلة قد يتعذر.",
+          ]));
+        }
+      }
+    });
+  } else {
+    info.append(el("div", { class: "small", style: "color:#8fd48f" }, [
+      "عدة تسجيلات: سيُخصّص ملف كامل للتحقق وآخر للاختبار النهائي — نتائج أكثر موثوقية.",
+    ]));
+  }
   updateStartButton(ui, state);
 }
 
 function updateStartButton(ui, state) {
   const hasModel = Boolean(ui.model.value) || Boolean(state.loadedModel);
-  const hasInput = Boolean(state.inputAudio);
+  const hasInput = state.inputAudios.length > 0;
   const hasProfile = Boolean(state.profiles.find(
     p => p.name === (ui.profile.value || "default") && p.n_samples > 0));
   ui.start.disabled = !(hasModel && hasInput && hasProfile);
@@ -824,22 +887,28 @@ function updateStartButton(ui, state) {
 async function startOptimization(ui, state) {
   const model = ui.model.value;
   const profile = profileSelection(ui);
-  if (!state.inputAudio) { toast("اختر الملف الصوتي أولاً.", "warn"); return; }
+  if (!state.inputAudios.length) { toast("اختر الملف الصوتي أولاً.", "warn"); return; }
   setBusy(ui.start, true, "جارٍ الرفع…");
   try {
-    // 1) upload input audio
-    const form = new FormData();
-    form.append("file", state.inputAudio.file, state.inputAudio.file.name);
-    const stored = await postForm("/optimizer/input", form);
-    state.inputAudio.path = stored.stored.path;
-    state.inputAudio.id = stored.stored.id;
+    // 1) upload input audio (multi-file: one request per file)
+    const paths = [];
+    for (const item of state.inputAudios) {
+      const form = new FormData();
+      form.append("file", item.file, item.file.name);
+      const stored = await postForm("/optimizer/input", form);
+      item.path = stored.stored.path;
+      paths.push(stored.stored.path);
+    }
     // 2) gather f0 methods
     const f0Methods = Array.from(ui.f0Methods.querySelectorAll("input:checked"))
       .map(i => i.value);
     // 3) start
     const startForm = new FormData();
     startForm.append("model_name", model);
-    startForm.append("input_path", stored.stored.path);
+    startForm.append("input_path", paths[0]);
+    if (paths.length > 1) {
+      startForm.append("input_paths_json", JSON.stringify(paths));
+    }
     startForm.append("profile_name", profile);
     startForm.append("mode", state.mode);
     startForm.append("max_trials", ui.trials.value || "24");
@@ -855,9 +924,11 @@ async function startOptimization(ui, state) {
     startForm.append("f0_methods_json", JSON.stringify(f0Methods));
     const started = await postForm("/optimizer/start", startForm);
     state.lastSessionId = started.session_id;
+    state.blindPair = null;
     document.getElementById("opt-live")?.classList.remove("hidden");
     document.getElementById("opt-results")?.classList.add("hidden");
     document.getElementById("opt-ab")?.classList.add("hidden");
+    document.getElementById("opt-blind")?.classList.add("hidden");
     toast("بدأ التحسين الذكي.", "success");
     refreshOptimizerStatus(ui, state);
   } catch (err) {
@@ -893,6 +964,7 @@ function wireControlsUI(ui, state) {
   // A/B controls
   ui.abPlay.addEventListener("click", () => playAllAB(ui, state));
   ui.abStop.addEventListener("click", () => stopAllAB(ui, state));
+  ui.blindNew?.addEventListener("click", () => createBlindPair(ui, state));
   ui.abBlind.addEventListener("change", () => {
     state.blindMode = ui.abBlind.checked;
     ui.abReveal.hidden = !state.blindMode;
@@ -1036,6 +1108,8 @@ async function loadResults(ui, state) {
     renderResults(ui, state);
     document.getElementById("opt-ab")?.classList.remove("hidden");
     renderAB(ui, state);
+    document.getElementById("opt-blind")?.classList.remove("hidden");
+    renderBlindCard(ui, state);
   } catch (err) {
     // no results yet — fine
   }
@@ -1214,12 +1288,265 @@ function renderResults(ui, state) {
         "التطبيق يربط الإعدادات بهذا النموذج فقط، وتبقى الإعدادات السابقة قابلة للاسترجاع.",
       ]),
     ]);
+    // ---- Phase 02: strategy selector (four winners) ----
+    const strategiesBox = renderStrategies(ui, state);
 
-    body.append(bestCard, axesBox, comp, chartBox, validationTable,
-                paretoBox, notes, trialsTable, actions);
+    // ---- Phase 02: data-role split info ----
+    let splitBox = null;
+    if (r.data_split && (r.data_split.notes || []).length) {
+      splitBox = el("div", { class: "mt" }, [
+        el("h3", { class: "small dim" }, ["توزيع أدوار ملفات الإدخال (منع التخصيص الزائد)"]),
+        el("ul", { class: "guide-list" }, (r.data_split.notes || []).map(n =>
+          el("li", {}, [n]))),
+      ]);
+    }
+
+    // ---- Phase 02: robustness panel ----
+    const robustnessBox = renderRobustness(ui, state);
+
+    // ---- Phase 02: parameter intelligence panel ----
+    const insightsBox = renderInsights(ui, state);
+
+    // ---- Phase 02: diagnostics panel ----
+    const diagnosticsBox = renderDiagnostics(ui, state);
+
+    body.append(bestCard, axesBox, strategiesBox, comp, chartBox,
+                validationTable, paretoBox, splitBox, robustnessBox,
+                insightsBox, diagnosticsBox, notes, trialsTable, actions);
     document.getElementById("opt-apply")?.addEventListener("click", () => applyBest(ui, state));
     document.getElementById("opt-export")?.addEventListener("click", () => exportReport(ui, state));
   }
+}
+
+/* ================= Phase 02: strategies / robustness / insights / diagnostics ================ */
+
+function renderStrategies(ui, state) {
+  const r = state.results;
+  const box = el("div", { class: "mt" }, [
+    el("h3", { class: "small dim" }, ["اختيار الهدف: أربعة فائزين لا رقم واحد مخفي"]),
+  ]);
+  const byStrategy = r.best_by_strategy || {};
+  const strategies = byStrategy.strategies || ["balanced", "identity", "naturalness", "clarity"];
+  const tabs = el("div", { class: "opt-strategy-tabs" });
+  for (const key of strategies) {
+    const meta = STRATEGY_LABELS[key] || { label: key, hint: "" };
+    const cand = byStrategy[key];
+    const tab = el("button", {
+      class: `opt-strategy-tab${state.strategy === key ? " active" : ""}`,
+      type: "button", title: meta.hint,
+      dataset: { strategy: key },
+    }, [
+      el("div", { class: "s-name" }, [meta.label]),
+      el("div", { class: "s-score" }, [
+        cand ? fmtNum(cand.validated_composite ?? cand.composite, 3) : "—",
+      ]),
+    ]);
+    tab.addEventListener("click", () => {
+      state.strategy = key;
+      renderResults(ui, state);
+    });
+    tabs.append(tab);
+  }
+  box.append(tabs);
+  const chosen = byStrategy[state.strategy] || r.best;
+  if (chosen) {
+    box.append(el("div", { class: "opt-strategy-detail mt" }, [
+      el("div", { class: "opt-trial-params" }, paramChips(chosen.params, chosen.number)),
+      el("div", { class: "row small mt", style: "gap:10px;flex-wrap:wrap" }, [
+        el("span", { class: "badge" }, [`درجة موضوعية: ${fmtNum(chosen.objective_score ?? chosen.composite, 3)}`]),
+        chosen.validated_composite !== null && chosen.validated_composite !== undefined
+          ? el("span", { class: "badge" }, [`تحقق: ${fmtNum(chosen.validated_composite, 3)}`]) : null,
+        chosen.stability !== null && chosen.stability !== undefined
+          ? el("span", { class: "badge" }, [`استقرارية: ${fmtNum(chosen.stability, 3)}`]) : null,
+        chosen.preference_boost
+          ? el("span", { class: "badge", title: "تعديل الترتيب فقط — لا يغيّر المقاييس" }, [`تفضيلك: +${fmtNum(chosen.preference_boost * 100, 1)}%`]) : null,
+      ].filter(Boolean)),
+      byStrategy.note_preference
+        ? el("p", { class: "small muted", style: "margin:6px 0 0" }, [byStrategy.note_preference])
+        : null,
+    ]));
+  }
+  return box;
+}
+
+function renderRobustness(ui, state) {
+  const r = state.results;
+  const rob = r.robustness;
+  if (!rob) return null;
+  const box = el("div", { class: "mt" }, [
+    el("h3", { class: "small dim" }, ["تقييم الاستقرارية عبر أنواع المقاطع (لم تُستخدم في البحث)"]),
+  ]);
+  const cands = rob.candidates || [];
+  if (cands.length) {
+    const header = el("tr", {}, [
+      el("th", {}, ["تجربة"]), el("th", {}, ["نقاط البحث"]),
+      el("th", {}, ["متوسط التحقق"]), el("th", {}, ["الاستقرارية"]),
+      el("th", {}, ["الأنواع"]),
+    ]);
+    const rows = cands.map(c => {
+      const types = (c.robustness?.per_type) || {};
+      return el("tr", {}, [
+        el("td", { class: "num" }, [String(c.number)]),
+        el("td", { class: "num" }, [fmtNum(c.search_composite, 3)]),
+        el("td", { class: "num" }, [fmtNum(c.validation_composite, 3)]),
+        el("td", { class: "num" }, [fmtNum(c.robustness?.stability, 3)]),
+        el("td", { class: "small" }, [
+          Object.entries(types).map(([t, v]) =>
+            `${PROBE_LABELS[t] || t}: ${fmtNum(v.mean, 3)}`).join(" · ") || "—",
+        ]),
+      ]);
+    });
+    box.append(el("div", { class: "table-wrap" }, [
+      el("table", { class: "tbl" }, [
+        el("thead", {}, [header]), el("tbody", {}, rows),
+      ]),
+    ]));
+    box.append(el("p", { class: "small muted", style: "margin:6px 0 0" }, [
+      "الاستقرارية = المتوسط − ½×الانحراف المعياري عبر الأنواع — مرشّح يستحق الثقة أكثر من قمة واحدة على مقطع واحد.",
+    ]));
+  }
+  const ft = rob.final_test;
+  if (ft) {
+    box.append(el("div", { class: "mt small" }, [
+      el("span", { class: "badge" }, [
+        `اختبار نهائي على تسجيل كامل منفصل: ${fmtNum(ft.test_composite, 3)}`,
+      ]),
+      el("span", { class: "hint", style: "margin-inline-start:8px" }, [
+        "ملف لم يشارك في البحث ولا في التحقق — أدق مؤشر على التعميم.",
+      ]),
+    ]));
+  }
+  const rt = r.roundtrip;
+  if (rt) {
+    box.append(el("div", { class: "mt small" }, [
+      el("span", { class: "badge warn" }, [
+        `سقف النموذج (تحويل عينة مرجعية نفسها): ${fmtNum(rt.speaker_similarity, 3)}`,
+      ]),
+      el("span", { class: "hint", style: "margin-inline-start:8px" }, [
+        "حد أعلى تقريبي لما يمكن لأي إعدادات تحقيقه مع هذا النموذج.",
+      ]),
+    ]));
+  }
+  return box;
+}
+
+function renderInsights(ui, state) {
+  const r = state.results;
+  const ins = r.insights;
+  if (!ins || ins.status === "error") return null;
+  const box = el("div", { class: "mt" }, [
+    el("h3", { class: "small dim" }, ["ذكاء المعاملات: حساسية، أهمية، وتفاعلات (من تجاربك الفعلية)"]),
+  ]);
+  if (ins.status !== "ok") {
+    box.append(el("p", { class: "small muted" }, [
+      ins.note || "بيانات غير كافية بعد — أكمل البحث لاستخراج العلاقات.",
+    ]));
+    return box;
+  }
+  // sensitivity + importance bars per parameter
+  const rows = el("div", { class: "mt" });
+  const params = ins.parameters || {};
+  const order = Object.entries(params)
+    .sort((a, b) => (b[1].sensitivity || 0) - (a[1].sensitivity || 0));
+  for (const [name, rep] of order) {
+    const sens = rep.sensitivity ?? 0;
+    const eta = rep.importance_eta2;
+    const best = rep.best_bin
+      ? `أفضل نطاق: ${rep.best_bin.lo}-${rep.best_bin.hi} (متوسط ${fmtNum(rep.best_bin.mean_composite, 3)}، n=${rep.best_bin.n})`
+      : rep.best_level ? `أفضل مستوى: ${rep.best_level}` : "";
+    const unstable = (rep.unstable_regions || [])
+      .map(u => `${u.range[0]}-${u.range[1]}`).join("، ");
+    rows.append(el("div", { class: "opt-insight-row" }, [
+      el("span", { class: "opt-insight-name latin" }, [name]),
+      el("div", { class: "opt-compare-track grow", title: `حساسية ${fmtNum(sens, 2)}` }, [
+        el("div", { class: "bar-opt", style: `width:${Math.round(Math.max(0, Math.min(1, sens)) * 100)}%` }),
+      ]),
+      el("span", { class: "dim small num" }, [fmtNum(sens, 2)]),
+      eta !== undefined && eta !== null
+        ? el("span", { class: "badge small" }, [`أهمية ${fmtNum(eta, 2)}`]) : null,
+      el("span", { class: "small muted" }, [
+        [best, unstable ? `نطاق غير مستقر: ${unstable}` : "",
+          rep.note || ""].filter(Boolean).join(" · "),
+      ]),
+    ].filter(Boolean)));
+  }
+  box.append(rows);
+  // interactions
+  const interactions = ins.interactions || [];
+  if (interactions.length) {
+    box.append(el("div", { class: "mt" }, [
+      el("h4", { class: "small dim", style: "margin:8px 0 4px" }, ["تفاعلات مكتشفة بين المعاملات"]),
+      el("ul", { class: "guide-list" }, interactions.map(i => el("li", {}, [
+        (i.a && i.b) ? `${i.a} × ${i.b}: تأثير الخلية "${i.strongest_cell.cell.join(" / ")}" = ${fmtNum(i.strongest_cell.interaction_effect, 3)}`
+          : `${i.categorical} × ${i.numeric}: يختلف تأثير ${i.numeric} حسب ${i.categorical} (فرق الاتجاه ${fmtNum(i.trend_spread, 2)})`,
+        el("div", { class: "small muted" }, [i.note]),
+      ]))),
+    ]));
+  }
+  // artifact recurrence
+  const rec = ins.artifact_recurrence;
+  if (rec && (rec.recurrence || []).length) {
+    box.append(el("div", { class: "mt" }, [
+      el("h4", { class: "small dim", style: "margin:8px 0 4px" }, ["تكرار عيوب الصوت وربطها بالمعاملات"]),
+      el("ul", { class: "guide-list" }, rec.recurrence.slice(0, 5).map(a => el("li", {}, [
+        `${a.artifact}: ظهر في ${fmtNum(a.share_of_trials * 100, 0)}% من التجارب (شدة قصوى ${fmtNum(a.max_severity, 2)})`,
+        ((rec.parameter_links || {})[a.artifact] || []).map(l =>
+          el("div", { class: "small muted" }, [
+            `↔ ${l.parameter} (rho=${l.spearman_rho}) — ${l.note}`,
+          ])),
+      ]))),
+    ]));
+  }
+  // recommendations
+  if ((ins.recommendations || []).length) {
+    box.append(el("div", { class: "mt" }, [
+      el("h4", { class: "small dim", style: "margin:8px 0 4px" }, ["توصيات المحرك المستخرجة من البيانات"]),
+      el("ul", { class: "guide-list" }, ins.recommendations.map(x =>
+        el("li", {}, [x]))),
+    ]));
+  }
+  return box;
+}
+
+function renderDiagnostics(ui, state) {
+  const r = state.results;
+  const diag = r.diagnostics;
+  if (!diag || !diag.diagnoses || !diag.diagnoses.length) return null;
+  const box = el("div", { class: "mt" }, [
+    el("h3", { class: "small dim" }, ["التشخيص التلقائي: لماذا لم تصل النتيجة لأعلى؟ (بحسب الأدلة)"]),
+  ]);
+  for (const d of diag.diagnoses.slice(0, 6)) {
+    const label = DIAG_CLASS_LABELS[d.class] || d.class;
+    box.append(el("div", { class: "opt-diag-card mt" }, [
+      el("div", { class: "row", style: "justify-content:space-between" }, [
+        el("span", { class: "badge" }, [label]),
+        el("span", { class: "small dim" }, [`ثقة ${fmtNum(d.confidence, 2)}`]),
+      ]),
+      d.problem ? el("p", { class: "small", style: "margin:6px 0 2px;font-weight:700" }, [d.problem]) : null,
+      d.summary ? el("p", { class: "small", style: "margin:6px 0 2px;font-weight:700" }, [d.summary]) : null,
+      el("ul", { class: "guide-list small" }, (d.evidence || []).map(e =>
+        el("li", { class: "muted" }, [e]))),
+      (d.likely_causes || []).length
+        ? el("div", { class: "small" }, [
+            "الأسباب المرجحة: ",
+            el("span", { class: "muted" }, [
+              d.likely_causes.map(c => `${c.cause} (${c.likelihood})`).join(" · "),
+            ]),
+          ]) : null,
+      d.recommendation
+        ? el("p", { class: "small", style: "margin:6px 0 0" }, [
+            el("b", {}, ["التوصية: "]), d.recommendation,
+          ]) : null,
+      d.engine_action
+        ? el("p", { class: "small muted", style: "margin:2px 0 0" }, [
+            `إجراء مقترح للمحرك: ${d.engine_action}`,
+          ]) : null,
+    ].filter(Boolean)));
+  }
+  box.append(el("p", { class: "small muted", style: "margin:6px 0 0" }, [
+    diag.disclaimer || "",
+  ]));
+  return box;
 }
 
 function drawChart(chart) {
@@ -1293,11 +1620,14 @@ async function applyBest(ui, state) {
   const r = state.results;
   if (!r || !r.best) { toast("لا توجد نتيجة لتطبيقها.", "warn"); return; }
   const btn = document.getElementById("opt-apply");
+  const strategy = state.strategy || "balanced";
+  const meta = STRATEGY_LABELS[strategy] || { label: strategy };
   setBusy(btn, true, "جارٍ التطبيق…");
   try {
     const applied = await post(
-      `/optimizer/apply?session_id=${encodeURIComponent(r.session_id)}`);
-    toast("تم تطبيق أفضل الإعدادات وربطها بالنموذج — ستظهر في تبويب التحويل.", "success");
+      `/optimizer/apply?session_id=${encodeURIComponent(r.session_id)}` +
+      `&strategy=${encodeURIComponent(strategy)}`);
+    toast(`تم تطبيق إعدادات «${meta.label}» وربطها بالنموذج — ستظهر في تبويب التحويل.`, "success");
     if (applied.previous) {
       toast("الإعدادات السابقة محفوظة ويمكن استرجاعها بإعادة التطبيق.", "info");
     }
@@ -1424,6 +1754,108 @@ function hashStr(s) {
   let h = 0;
   for (let i = 0; i < s.length; i += 1) h = (h * 31 + s.charCodeAt(i)) >>> 0;
   return h;
+}
+
+/* ================= blind A/B preference (server-backed) ================= */
+
+async function renderBlindCard(ui, state) {
+  const body = ui.blindBody;
+  if (!body) return;
+  clear(body);
+  const r = state.results;
+  if (!r) return;
+  // preference summary for the model
+  try {
+    const summary = await get(
+      `/optimizer/preferences?model_name=${encodeURIComponent(r.model)}`);
+    if (summary && summary.n_preferences > 0) {
+      body.append(el("div", { class: "small muted" }, [
+        `تفضيلاتك المسجّلة لهذا النموذج: ${summary.n_preferences} اختيارًا أعمى`,
+        " — تؤثر على التوصية المدمجة فقط (معلنة ومحدودة).",
+      ]));
+    }
+  } catch (err) { /* optional view */ }
+  if (!state.blindPair) {
+    body.append(el("span", { class: "hint" }, [
+      "أنشئ زوجًا ثم استمع للنسختين واختر الأقرب للمرجع — الإعدادات تُكشف بعد اختيارك فقط.",
+    ]));
+  }
+}
+
+async function createBlindPair(ui, state) {
+  const r = state.results;
+  if (!r || !r.best) { toast("لا توجد نتائج كاملة بعد.", "warn"); return; }
+  setBusy(ui.blindNew, true, "جارٍ التحضير…");
+  try {
+    const pair = await post(`/optimizer/ab?session_id=${encodeURIComponent(r.session_id)}`);
+    state.blindPair = pair;
+    renderBlindPair(ui, state);
+  } catch (err) {
+    toast(err.message, "error", 9000);
+  } finally { setBusy(ui.blindNew, false); }
+}
+
+function renderBlindPair(ui, state) {
+  const body = ui.blindBody;
+  clear(body);
+  const pair = state.blindPair;
+  if (!pair) return renderBlindCard(ui, state);
+  const sid = state.results.session_id;
+  const audioUrl = (name) =>
+    `/api/optimizer/results/audio?session_id=${encodeURIComponent(sid)}&name=${encodeURIComponent(name)}`;
+  const sides = ["a", "b"].map((side) => {
+    const card = el("div", { class: "opt-ab-card blind" }, [
+      el("div", { class: "ab-head" }, [
+        el("span", { class: "ab-title" }, [side === "a" ? "النسخة أ" : "النسخة ب"]),
+        el("span", { class: "badge" }, ["؟"]),
+      ]),
+      el("span", { class: "ab-sub" }, ["الإعدادات مخفية — استمع ثم اختر"]),
+      el("audio", { controls: true, preload: "metadata",
+        src: audioUrl(side === "a" ? pair.a_audio : pair.b_audio) }),
+      el("button", {
+        class: "btn block mt", type: "button",
+        id: `opt-blind-choose-${side}`,
+      }, [side === "a" ? "أ اختيار" : "ب اختيار"]),
+    ]);
+    return card;
+  });
+  body.append(el("div", { class: "opt-ab-grid" }, sides));
+  document.getElementById("opt-blind-choose-a")
+    ?.addEventListener("click", () => blindChoose(ui, state, "a"));
+  document.getElementById("opt-blind-choose-b")
+    ?.addEventListener("click", () => blindChoose(ui, state, "b"));
+}
+
+async function blindChoose(ui, state, side) {
+  const pair = state.blindPair;
+  if (!pair) return;
+  try {
+    const revealed = await post(
+      `/optimizer/ab/choice?session_id=${encodeURIComponent(pair.session_id)}` +
+      `&pair_id=${encodeURIComponent(pair.pair_id)}&choice=${encodeURIComponent(side)}`);
+    const body = ui.blindBody;
+    clear(body);
+    const fmt = (p) => p
+      ? `idx ${fmtNum(p.index_rate, 2)} · ${p.f0_method} · rms ${fmtNum(p.rms_mix_rate, 2)} · pr ${fmtNum(p.protect, 2)}`
+      : "—";
+    body.append(
+      el("div", { class: "notice ok" }, [
+        el("span", { class: "n-icon" }, [icon("check", 16)]),
+        el("p", { style: "margin:0" }, [
+          `سُجّل اختيارك (${side.toUpperCase()}) وكُشفت الإعدادات. شكرًا — سيُستخدم في التوصية المدمجة فقط.`,
+        ]),
+      ]),
+      el("div", { class: "row mt", style: "gap:12px;flex-wrap:wrap" }, [
+        el("span", { class: "badge" }, [`أ: ${fmt(revealed.a_params)} (${revealed.a_label})`]),
+        el("span", { class: "badge" }, [`ب: ${fmt(revealed.b_params)} (${revealed.b_label})`]),
+      ]),
+    );
+    state.blindPair = null;
+    // refresh results (preference boost in the combined view may change)
+    await loadResults(ui, state);
+  } catch (err) {
+    toast(err.message, "error", 9000);
+  }
 }
 
 function playAllAB(ui, state) {

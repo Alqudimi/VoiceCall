@@ -232,34 +232,93 @@ subsystem. Design decisions and their evidence:
   every axis compares like with like regardless of model output rate. F0 via
   the engine's own registry (RMVPE default, Praat fallback); VAD is
   dependency-free adaptive energy thresholding with hangover.
-* **Eight-axis evaluation with quality gates** (`optimizer/scoring.py`) —
-  speaker similarity (per-backend + ensemble, never a hidden average),
-  timbre, pitch consistency, naturalness (distance to the *speaker's own*
-  HNR/jitter/shimmer anchors, not absolutes), clarity (vs input), explicit
-  artifact detectors (clipping, metallic=flatness excess, robotic=jitter
-  collapse + HNR excess, buzz, noise-floor rise, spectral holes), prosody
-  preservation (pause structure + distribution correlation vs input),
-  audio quality. Composite = weighted mean (speaker identity leads by
-  design, weights user-adjustable); candidates failing the artifact/clarity/
-  prosody gates are mathematically excluded from selection — **a distorted
+* **Nine-axis evaluation with quality gates** (`optimizer/scoring.py`) —
+  speaker similarity (per-backend + **per-backend calibrated** ensemble —
+  see `optimizer/calibration.py` — never a hidden average), timbre, pitch
+  consistency, naturalness (distance to the *speaker's own*
+  HNR/jitter/shimmer/vibrato-irregularity anchors, not absolutes), clarity
+  (vs input), artifacts (the real 15-detector bank in `optimizer/quality.py`
+  — see below), prosody preservation (**true** frame-envelope correlation +
+  time-warped F0 contour correlation + speech-rate agreement vs input),
+  content preservation (duration, voiced structure, speech-rate ratio,
+  consonant-band retention vs input — the linguistic-content axis), audio
+  quality. Composite = weighted mean (speaker identity leads by design,
+  weights user-adjustable); candidates failing the artifact/clarity/prosody/
+  content gates are mathematically excluded from selection — **a distorted
   voice can never win on similarity alone**. Pareto front over
-  (speaker, naturalness, clarity) exposes trade-offs instead of hiding them.
+  (speaker, naturalness, clarity, artifact) exposes trade-offs, and
+  best-by-strategy (identity/naturalness/clarity/balanced) exposes four
+  explicit winners instead of one hidden weighting.
+* **Per-backend speaker-score calibration** (`optimizer/calibration.py`) —
+  raw cosines from different SV models live on different scales, so each
+  backend gets a same-speaker cohort (intra-speaker pairwise cosines from
+  the profile, persisted in profile.json) and raw scores are converted to
+  margins + calibrated 0..1 values before any ensembling; backends without
+  a cohort are reported uncalibrated and the ensemble is withheld rather
+  than averaging incomparable scales.
+* **Real artifact intelligence** (`optimizer/quality.py`) — 15 detectors
+  (metallic, robotic, buzzing, crackling, resonance, pitch stability,
+  vibrato, sibilance, THD, spectral holes, clipping, noise, breathing,
+  broken consonants, unnatural transitions), each with severity, time
+  locations, evidence and confidence; cross-trial recurrence analysis links
+  artifact severity to parameters (Spearman, always labelled statistical
+  association, never causation).
+* **Parameter relationship discovery** (`optimizer/interactions.py`) —
+  binned marginal effects, sensitivity (anchored to the session's composite
+  spread), one-way ANOVA importance (eta²), pairwise interactions (2-D cell
+  deviation from the additive main-effects model; median-split cells with a
+  minimum cell size — sparse data degrades to an honest "insufficient
+  evidence" instead of inventing interactions), unstable-region detection
+  and evidence-backed recommendations — all derived from the session's real
+  trials only.
+* **Root-cause diagnostics** (`optimizer/diagnostics.py`) — separates five
+  problem classes (inference parameters / reference data / input audio /
+  model training quality via honest proxies incl. the optional round-trip
+  ceiling / evaluation models); every diagnosis carries evidence, ranked
+  causes, confidence, a recommendation and — when one exists — an engine
+  action grounded in the session's own measurements.
+* **Experiment memory** (`optimizer/memory.py`) — append-only log keyed by
+  model/index/input hashes + optimizer version: warm start (prior best
+  gate-passing parameters seed stage A), cross-session duplicate prevention
+  and a conversion cache that replays the stored analysis + raw
+  similarities through the *current* calibration/weights without
+  re-converting (version mismatches are excluded, never mixed).
+* **Human-in-the-loop** (`optimizer/preferences.py`) — server-backed blind
+  A/B pairs (labels randomised, parameters hidden until the choice, one
+  choice per pair) + preference learning kept strictly separate: a bounded
+  (≤ 5%) boost affects only the combined *ranking* view; objective axes are
+  never modified.
+* **Generalisation protocol** (`optimizer/robustness.py`) — file-level
+  search/validation/test role assignment when multiple inputs are supplied
+  (segment-level fallback with an explicit note for a single take); probe-
+  type robustness evaluation (short/long/quiet/loud/voiced-heavy/…) with
+  stability = mean − 0.5×std; the final test runs on a take that never
+  participated in search or validation.
 * **Search backends behind one interface** (`optimizer/search.py`) —
-  Optuna TPE (multivariate, constant liar) or NSGA-II for the Pareto
-  strategy when `optuna` is installed (quality extra); otherwise a
-  dependency-free adaptive backend: golden-ratio low-discrepancy EXPLORATION
-  → TPE-style top-quantile GUIDANCE (per-parameter 1-D KDE) → incumbent
-  FINE-TUNING. Quantised key cache guarantees no duplicate trial is ever
-  executed. The space is honest: `filter_radius` searches {0, 3} because the
-  engine's median filter is a fixed kernel-3 active only when radius > 2.
+  Optuna TPE (multivariate, constant liar) or NSGA-II with objectives
+  (speaker similarity, naturalness) — two REAL axes, not two views of one
+  composite — when `optuna` is installed (quality extra); otherwise a
+  dependency-free **staged** backend whose behaviour genuinely changes per
+  stage: A) warm-started golden-ratio low-discrepancy exploration (30% of
+  budget), B) TPE-style top-quantile guidance with categorical Thompson
+  sampling + adaptive KDE bandwidth (45%), C) fine-grained Gaussian
+  refinement around the top-3 incumbents (25%); multi-objective mode keeps
+  a Pareto archive and samples around random non-dominated members.
+  Deterministic CRC-32 seeds (Phase 01 used process-salted `hash()`).
+  Quantised key cache guarantees no duplicate trial is ever executed. The
+  space is honest: `filter_radius` searches {0, 3} because the engine's
+  median filter is a fixed kernel-3 active only when radius > 2.
 * **Resumable sessions** (`optimizer/session.py`) — state.json is written
   atomically after every trial; restart-safe resume replays the trial log
   into the sampler. Model-swap guard: if the engine's loaded model changes
   mid-run, remaining trials fail loudly instead of scoring the wrong voice.
-* **Anti-overfitting** — the input is VAD-split into search vs held-out
-  audio; the top-k candidates are re-validated on the held-out set and the
-  *validated* score decides the winner; validation drops > 15% surface a
-  reliability note. Short inputs (< 3.5 s) honestly skip validation (noted).
+* **Anti-overfitting** — with multiple inputs, whole FILES are assigned
+  to search/validation/test roles (single takes degrade to segment-level
+  splits with an explicit note); the top-k candidates are re-validated on
+  held-out probes of distinct types (short/long/quiet/loud) and the
+  *validated + stability-aware* score decides the winner; validation drops
+  > 15% surface a reliability note. Short inputs (< 3.5 s) honestly skip
+  validation (noted), and so do runs where no candidate passed the gates.
 * **Honesty rules** — every report carries reliability notes (profile
   quality, embedder availability, embedder-set mismatches) and a disclaimer
   that all scores are relative search metrics, not identity-match

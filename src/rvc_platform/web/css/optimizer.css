@@ -87,7 +87,35 @@
 
 .opt-chip-row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
 
+/* ---------------- Phase 02: strategy / insights / diagnostics ---------------- */
+.opt-strategy-tabs { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; }
+.opt-strategy-tab {
+  border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px;
+  cursor: pointer; background: rgba(255,255,255,0.015); text-align: start;
+  transition: border-color .15s; color: inherit; font: inherit;
+}
+.opt-strategy-tab:hover { border-color: var(--accent-soft, #5aa2e8); }
+.opt-strategy-tab.active { border-color: var(--accent, #5aa2e8); background: rgba(90,162,232,0.08); }
+.opt-strategy-tab .s-name { font-weight: 700; font-size: 0.9rem; }
+.opt-strategy-tab .s-score { font-size: 0.85rem; color: var(--text-2); font-variant-numeric: tabular-nums; margin-top: 2px; }
+.opt-strategy-detail { border: 1px dashed var(--line); border-radius: 10px; padding: 10px 12px; }
+
+.opt-insight-row {
+  display: grid; grid-template-columns: 110px 1fr 48px auto 1.4fr;
+  gap: 10px; align-items: center; font-size: 0.83rem; padding: 4px 0;
+}
+.opt-insight-name { font-weight: 600; direction: ltr; text-align: start; }
+
+.opt-diag-card {
+  border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px;
+  display: flex; flex-direction: column; gap: 6px;
+  background: rgba(255,255,255,0.012);
+}
+.opt-diag-card .guide-list { margin: 2px 18px 0 0; padding: 0; }
+
 @media (max-width: 720px) {
   .opt-mode-grid { grid-template-columns: 1fr; }
   .opt-compare-row { grid-template-columns: 76px 1fr 52px 46px; }
+  .opt-insight-row { grid-template-columns: 90px 1fr 42px; }
+  .opt-insight-row > :nth-child(n+4) { grid-column: 1 / -1; }
 }

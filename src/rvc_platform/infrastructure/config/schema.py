@@ -122,13 +122,14 @@ class OptimizerConfig(BaseModel):
     max_trials_cap: int = Field(default=400, ge=4, le=400)
     time_budget_s: float = Field(default=0.0, ge=0.0, le=86_400.0)  # 0 = trials-only
     # metric weights (speaker identity leads by design) — normalised at use
-    weight_speaker_similarity: float = Field(default=0.30, ge=0.0, le=1.0)
-    weight_timbre_similarity: float = Field(default=0.13, ge=0.0, le=1.0)
+    weight_speaker_similarity: float = Field(default=0.29, ge=0.0, le=1.0)
+    weight_timbre_similarity: float = Field(default=0.11, ge=0.0, le=1.0)
     weight_pitch_consistency: float = Field(default=0.09, ge=0.0, le=1.0)
-    weight_naturalness: float = Field(default=0.13, ge=0.0, le=1.0)
-    weight_clarity: float = Field(default=0.11, ge=0.0, le=1.0)
-    weight_artifact_score: float = Field(default=0.12, ge=0.0, le=1.0)
+    weight_naturalness: float = Field(default=0.11, ge=0.0, le=1.0)
+    weight_clarity: float = Field(default=0.10, ge=0.0, le=1.0)
+    weight_artifact_score: float = Field(default=0.11, ge=0.0, le=1.0)
     weight_prosody_preservation: float = Field(default=0.07, ge=0.0, le=1.0)
+    weight_content_preservation: float = Field(default=0.07, ge=0.0, le=1.0)
     weight_audio_quality: float = Field(default=0.05, ge=0.0, le=1.0)
 
     def default_weights(self) -> dict[str, float]:
@@ -140,6 +141,7 @@ class OptimizerConfig(BaseModel):
             "clarity": self.weight_clarity,
             "artifact_score": self.weight_artifact_score,
             "prosody_preservation": self.weight_prosody_preservation,
+            "content_preservation": self.weight_content_preservation,
             "audio_quality": self.weight_audio_quality,
         }
 

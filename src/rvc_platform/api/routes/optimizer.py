@@ -14,11 +14,25 @@ All routes are additive; existing endpoints and panels are untouched.
     GET  /api/optimizer/profiles                 — profiles (+reliability)
     DELETE /api/optimizer/profiles/{name}
     POST /api/optimizer/input                    — upload the input audio
+    POST /api/optimizer/inputs                   — upload MULTIPLE inputs (Phase 02)
     POST /api/optimizer/start                    — start a session
     POST /api/optimizer/pause|resume|cancel      — live controls
     POST /api/optimizer/apply                    — apply best settings to model
     GET  /api/optimizer/models/{name}/applied    — applied settings (convert UI)
     GET  /api/optimizer/report                   — export full JSON report
+
+Phase 02 (additive):
+
+    GET  /api/optimizer/results/insights         — parameter intelligence
+    GET  /api/optimizer/results/diagnostics      — root-cause report
+    GET  /api/optimizer/results/robustness       — probe stability report
+    POST /api/optimizer/ab                       — create a BLIND A/B pair
+    GET  /api/optimizer/ab                       — blind pair view
+    POST /api/optimizer/ab/choice                 — record the blind choice
+    GET  /api/optimizer/preferences              — preference learning state
+    GET  /api/optimizer/memory/stats              — experiment memory stats
+    GET  /api/optimizer/memory/sessions          — cross-session summaries
+    GET  /api/optimizer/memory/best               — best-known params (model)
 """
 from __future__ import annotations
 
@@ -163,10 +177,32 @@ async def upload_input(request: Request, file: UploadFile = File(...)):
     return {"stored": meta}
 
 
+@router.post("/inputs")
+async def upload_inputs(request: Request,
+                        files: list[UploadFile] = File(...)):
+    """Upload MULTIPLE input takes — enables the file-level data-role
+    split (search / validation / final-test on different takes)."""
+    stored, errors = [], []
+    for f in files:
+        try:
+            meta = _svc(request).store_input_audio(
+                f.filename or "input.wav", await f.read())
+            stored.append(meta)
+        except ValueError as exc:
+            errors.append({"file": f.filename, "error": str(exc)})
+        except Exception as exc:  # noqa: BLE001
+            errors.append({"file": f.filename, "error": str(exc)})
+    return {"stored": stored, "errors": errors,
+            "hint": "pass all stored 'path' values as input_paths when "
+                    "starting the session to enable the file-level "
+                    "search/validation/test split"}
+
+
 # ------------------------------------------------------------------ control
 @router.post("/start")
 async def start(request: Request, model_name: str = Form(...),
-                input_path: str = Form(...),
+                input_path: str = Form(""),
+                input_paths_json: str = Form(""),
                 profile_name: str = Form("default"),
                 mode: str = Form("advanced"),
                 max_trials: int | None = Form(None),
@@ -183,17 +219,21 @@ async def start(request: Request, model_name: str = Form(...),
 
     weights: dict = {}
     f0_methods: list = []
+    input_paths: list = []
     try:
         if weights_json:
             weights = dict(_json.loads(weights_json))
         if f0_methods_json:
             f0_methods = list(_json.loads(f0_methods_json))
+        if input_paths_json:
+            input_paths = list(_json.loads(input_paths_json))
     except _json.JSONDecodeError as exc:
         raise HTTPException(status_code=400,
                             detail=f"invalid JSON field: {exc}") from exc
     config = {
         "model_name": model_name,
         "input_path": input_path,
+        "input_paths": input_paths,
         "profile_name": profile_name,
         "mode": mode,
         "max_trials": max_trials,
@@ -235,9 +275,10 @@ def cancel(request: Request):
 
 # ------------------------------------------------------------- apply/report
 @router.post("/apply")
-def apply_best(request: Request, session_id: str | None = None):
+def apply_best(request: Request, session_id: str | None = None,
+               strategy: str = "balanced"):
     try:
-        return _svc(request).apply_best(session_id)
+        return _svc(request).apply_best(session_id, strategy=strategy)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -255,3 +296,108 @@ def export_report(request: Request, session_id: str | None = None):
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return report
+
+
+# ------------------------------------------- Phase 02: intelligence routes
+@router.get("/results/insights")
+def results_insights(request: Request, session_id: str | None = None):
+    """Parameter intelligence: sensitivity, importance, interactions,
+    unstable regions, artifact recurrence + parameter links."""
+    try:
+        results = _svc(request).results(session_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {
+        "session_id": results["session_id"],
+        "insights": results.get("insights"),
+        "search_space": results.get("search_space"),
+    }
+
+
+@router.get("/results/diagnostics")
+def results_diagnostics(request: Request, session_id: str | None = None):
+    """Root-cause report across the five problem classes."""
+    try:
+        results = _svc(request).results(session_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {
+        "session_id": results["session_id"],
+        "diagnostics": results.get("diagnostics"),
+        "reliability_notes": results.get("reliability_notes"),
+    }
+
+
+@router.get("/results/robustness")
+def results_robustness(request: Request, session_id: str | None = None):
+    """Probe-type stability report + final-test result."""
+    try:
+        results = _svc(request).results(session_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {
+        "session_id": results["session_id"],
+        "robustness": results.get("robustness"),
+        "validation": results.get("validation"),
+        "data_split": results.get("data_split"),
+        "roundtrip": results.get("roundtrip"),
+    }
+
+
+# ------------------------------------------------------ blind A/B + choices
+@router.post("/ab")
+def create_ab_pair(request: Request, session_id: str,
+                   left_number: int | None = None,
+                   right_number: int | None = None):
+    """Create a BLIND A/B pair — parameters are hidden until the choice."""
+    try:
+        return _svc(request).create_ab_pair(session_id, left_number,
+                                             right_number)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/ab")
+def ab_pair_view(request: Request, session_id: str, pair_id: str):
+    try:
+        return _svc(request).ab_pair_blind_view(session_id, pair_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/ab/choice")
+def record_ab_choice(request: Request, session_id: str, pair_id: str,
+                      choice: str, note: str = ""):
+    """Lock the blind choice; returns the REVEALED parameters + the
+    preference-learning summary."""
+    try:
+        return _svc(request).record_preference(session_id, pair_id,
+                                                choice, note)
+    except ValueError as exc:
+        status = 400 if "already answered" in str(exc) else 404
+        raise HTTPException(status_code=status, detail=str(exc)) from exc
+
+
+@router.get("/preferences")
+def preference_summary(request: Request, model_name: str):
+    return _svc(request).preference_summary(model_name)
+
+
+# -------------------------------------------------------- experiment memory
+@router.get("/memory/stats")
+def memory_stats(request: Request):
+    return _svc(request).memory_stats()
+
+
+@router.get("/memory/sessions")
+def memory_sessions(request: Request):
+    return {"sessions": _svc(request).memory_sessions()}
+
+
+@router.get("/memory/best")
+def memory_best(request: Request, model_name: str):
+    try:
+        best = _svc(request).best_known(model_name)
+    except ModelNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"best_known": best}

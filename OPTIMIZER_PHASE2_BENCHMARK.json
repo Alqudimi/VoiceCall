@@ -1,0 +1,60 @@
+{
+  "generated_at": 1795728806.1548378,
+  "setup": {
+    "model": "synthetic v2/48k random-weight checkpoint (tests/conftest SYNTH_CONFIG_40K)",
+    "hubert": "deterministic stand-in (tests/conftest)",
+    "embedders": "deterministic stand-in (wavlm+ecapa shaped)",
+    "f0": "Praat pm (real extractor)",
+    "trials": 10,
+    "inputs": "3 synthetic takes -> file-level data-role split",
+    "seed": 424242,
+    "disclaimer": "absolute scores are NOT comparable to production models — the RELATIVE effect of the optimizer pipeline is what is measured"
+  },
+  "session_a": {
+    "session_id": "opt_20261126_213218_a2dfa6",
+    "elapsed_s": 57.55,
+    "baseline_composite": 0.1499,
+    "best_composite": 0.16151202219154542,
+    "final_test_composite": null,
+    "improvement_over_baseline": 0.0116,
+    "final_test_improvement": null,
+    "trials_to_90pct_of_gain": 5,
+    "winner_stability": null,
+    "strategies": {
+      "identity": 0.16151202219154542,
+      "naturalness": 0.16151202219154542,
+      "clarity": 0.16151202219154542,
+      "balanced": 0.16151202219154542
+    }
+  },
+  "session_b_cache": {
+    "session_id": "opt_20261126_213316_6fabe0",
+    "elapsed_s": 10.04,
+    "cached_trial_replays": 10,
+    "wall_time_speedup": 5.73
+  },
+  "baseline_axes": {
+    "speaker_similarity": 0.3505,
+    "timbre_similarity": 0.0,
+    "pitch_consistency": 0.1667,
+    "naturalness": 0.2909,
+    "clarity": 0.144,
+    "artifact_score": 0.6,
+    "prosody_preservation": 0.3072,
+    "content_preservation": 0.4993,
+    "audio_quality": 0.2857
+  },
+  "best_axes": {
+    "speaker_similarity": 0.3668,
+    "timbre_similarity": 0.0,
+    "pitch_consistency": 0.1667,
+    "naturalness": 0.4273,
+    "clarity": 0.144,
+    "artifact_score": 0.6,
+    "prosody_preservation": 0.3573,
+    "content_preservation": 0.4993,
+    "audio_quality": 0.2857
+  },
+  "insights_status": "ok",
+  "diagnoses_count": 6
+}

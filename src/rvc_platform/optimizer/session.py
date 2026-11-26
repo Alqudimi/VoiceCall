@@ -12,6 +12,19 @@ Files per session::
     <id>/state.json     — config + phase + trials + validation + best
     <id>/audio/         — baseline.wav, best.wav, candidate_<n>.wav,
                           validation_<n>.wav, input_segment.wav
+
+Phase 02 state additions (all persisted):
+
+* ``input_paths`` — the full multi-file input set + role assignment
+  (``data_split``) recorded for reproducibility;
+* ``insights`` — the parameter-intelligence report (sensitivity/
+  importance/interactions) computed at completion;
+* ``diagnostics`` — the root-cause report (5 problem classes);
+* ``robustness`` — per-candidate probe-type results + stability;
+* ``best_by_strategy`` — identity / naturalness / clarity / balanced
+  winners;
+* ``roundtrip`` — optional model-quality round-trip probe result;
+* ``memory_stats`` — experiment-memory bookkeeping for this session.
 """
 from __future__ import annotations
 
@@ -34,6 +47,7 @@ PHASES = (
     "optimization",    # model-guided sampling of promising regions
     "fine_tuning",     # local refinement around the best candidates
     "validation",      # held-out re-test of top candidates
+    "robustness",      # probe-type stability evaluation (Phase 02)
     "final_selection", # pick + record the winner
     "completed",
     "failed",
@@ -51,7 +65,8 @@ class OptimizerSessionConfig:
     model_path: str = ""
     index_path: str | None = None
     profile_name: str = "default"
-    input_path: str = ""                # stored uploaded input audio
+    input_path: str = ""                # stored uploaded input audio (primary)
+    input_paths: list[str] = field(default_factory=list)  # multi-input (Phase 02)
     mode: str = "advanced"               # quick | advanced | deep
     max_trials: int = 24
     time_budget_s: float = 0.0          # 0 = unlimited (trials-only budget)
@@ -77,6 +92,7 @@ class OptimizerSessionConfig:
             "index_path": self.index_path,
             "profile_name": self.profile_name,
             "input_path": self.input_path,
+            "input_paths": list(self.input_paths),
             "mode": self.mode,
             "max_trials": self.max_trials,
             "time_budget_s": self.time_budget_s,
@@ -104,6 +120,7 @@ class OptimizerSessionConfig:
             index_path=data.get("index_path"),
             profile_name=str(data.get("profile_name", "default")),
             input_path=str(data.get("input_path", "")),
+            input_paths=list(data.get("input_paths") or []),
             mode=str(data.get("mode", "advanced")),
             max_trials=int(data.get("max_trials", 24)),
             time_budget_s=float(data.get("time_budget_s", 0.0)),
@@ -127,7 +144,8 @@ class OptimizerSessionConfig:
 class OptimizerSessionState:
     """Mutable live state of a session (persisted after every trial)."""
 
-    config: OptimizerSessionConfig = field(default_factory=OptimizerSessionConfig)
+    config: OptimizerSessionConfig = field(
+        default_factory=OptimizerSessionConfig)
     phase: str = "baseline"
     started_at: float = 0.0
     updated_at: float = 0.0
@@ -140,6 +158,15 @@ class OptimizerSessionState:
     current_trial: dict[str, Any] | None = None  # live in-flight trial (info only)
     message: str = ""
     reliability_notes: list[str] = field(default_factory=list)
+    # ---- Phase 02 additions ----
+    data_split: dict[str, Any] | None = None     # input role assignment
+    insights: dict[str, Any] | None = None        # parameter intelligence
+    diagnostics: dict[str, Any] | None = None     # root-cause report
+    robustness: dict[str, Any] | None = None      # probe stability report
+    best_by_strategy: dict[str, Any] | None = None
+    roundtrip: dict[str, Any] | None = None       # model-quality probe
+    memory_stats: dict[str, Any] | None = None    # experiment-memory usage
+    n_cache_replays: int = 0                      # conversions served from cache
 
     # ------------------------------------------------------------------ io
     def to_dict(self) -> dict[str, Any]:
@@ -157,12 +184,21 @@ class OptimizerSessionState:
             "current_trial": self.current_trial,
             "message": self.message,
             "reliability_notes": self.reliability_notes,
+            "data_split": self.data_split,
+            "insights": self.insights,
+            "diagnostics": self.diagnostics,
+            "robustness": self.robustness,
+            "best_by_strategy": self.best_by_strategy,
+            "roundtrip": self.roundtrip,
+            "memory_stats": self.memory_stats,
+            "n_cache_replays": self.n_cache_replays,
         }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "OptimizerSessionState":
         return cls(
-            config=OptimizerSessionConfig.from_dict(data.get("config") or {}),
+            config=OptimizerSessionConfig.from_dict(
+                data.get("config") or {}),
             phase=str(data.get("phase", "baseline")),
             started_at=float(data.get("started_at", 0.0)),
             updated_at=float(data.get("updated_at", 0.0)),
@@ -176,6 +212,14 @@ class OptimizerSessionState:
             current_trial=data.get("current_trial"),
             message=str(data.get("message", "")),
             reliability_notes=list(data.get("reliability_notes") or []),
+            data_split=data.get("data_split"),
+            insights=data.get("insights"),
+            diagnostics=data.get("diagnostics"),
+            robustness=data.get("robustness"),
+            best_by_strategy=data.get("best_by_strategy"),
+            roundtrip=data.get("roundtrip"),
+            memory_stats=data.get("memory_stats"),
+            n_cache_replays=int(data.get("n_cache_replays", 0)),
         )
 
 
@@ -190,7 +234,8 @@ class SessionStore:
         self._io_lock = threading.Lock()
 
     def session_dir(self, session_id: str) -> Path:
-        safe = "".join(c for c in session_id if c.isalnum() or c in "-_") or "s"
+        safe = "".join(c for c in session_id
+                       if c.isalnum() or c in "-_") or "s"
         d = self.root / safe
         d.mkdir(parents=True, exist_ok=True)
         return d
@@ -232,7 +277,8 @@ class SessionStore:
         out: list[dict[str, Any]] = []
         if not self.root.is_dir():
             return out
-        for d in sorted(self.root.iterdir(), key=lambda p: p.name, reverse=True):
+        for d in sorted(self.root.iterdir(),
+                        key=lambda p: p.name, reverse=True):
             state = self.load(d.name)
             if state is None:
                 continue
@@ -253,4 +299,5 @@ class SessionStore:
 
     @staticmethod
     def new_session_id() -> str:
-        return f"opt_{time.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
+        return (f"opt_{time.strftime('%Y%m%d_%H%M%S')}_"
+                f"{uuid.uuid4().hex[:6]}")

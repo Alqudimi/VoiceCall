@@ -134,9 +134,9 @@ def test_optuna_restore_replays_trials():
 def test_build_backend_falls_back_to_builtin():
     sp = OptimizationSpace(f0_methods=["pm"])
     be, name = build_backend(sp, strategy="auto")
-    assert name in ("optuna-tpe", "builtin-adaptive")
+    assert name in ("optuna-tpe", "builtin-staged")
     be2, name2 = build_backend(sp, strategy="builtin")
-    assert name2 == "builtin-adaptive"
+    assert name2 == "builtin-staged"
     assert isinstance(be2, BuiltInOptimizer)
 
 
