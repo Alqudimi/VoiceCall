@@ -1,32 +1,45 @@
 /* ============================================================
-   realtime.js — البث اللحظي: مايكروفون → AudioWorklet (16kHz int16)
-   → WebSocket → خادم RVC → PCM → تشغيل مع مخزن امتصاص تذبذب،
-   مع قياسات زمن الاستجابة (الخادم + العميل).
+   realtime.js — البث اللحظي (نسخة مطوّرة بحثيًا 2025):
+   مايكروفون → AudioWorklet (16kHz int16) → WebSocket → محرك RVC
+   → PCM محوّل → تشغيل بمخزن امتصاص تذبذب + مرئيات لحظية.
 
-   هذه الصفحة تعمل كمكالمة صوتية حيّة: كل ما تقوله في الميكروفون
-   يُحوَّل فورًا بخامة الصوت العراقي ويُبَث عبر مكبر الصوت في نفس اللحظة.
-
-   لوحة "معاملات النبرة والصوت" تضم كل ما يُمرَّر للمحرك:
-   انزياح النغمة، نسبة الفهرس، مزج الشدة، بوابة الصمت، طريقة f0،
-   حجم الكتلة (block_ms)، حجم الخرج، وسماع الدخل — وكلها تُطبَّق
-   لحظيًا أثناء البث دون قطع الجلسة.
+   الجديد في هذه النسخة (مبنية على بحث مكثف في NetEQ/W-Okuda/
+   WebAudio/RVC والواجهات الاحترافية):
+   · مرئي Waveform/Spectrum حي (AnalyserNode + rAF واحد).
+   · مخزن امتصاص تذبذب تكيفي (preroll يتوسع عند underruns)
+     + تصحيح انزلاق playbackRate (نموذج NetEQ مبسّط).
+   · مقيد خرج ناعم (soft limiter) يمنع القطع دون سحق الصوت.
+   · إعادة اتصال تلقائية أسّية مع jitter + كشف اتصال ميت (pong).
+   · مؤشر جودة اتصال EWMA + hysteresis (أنماط getStats).
+   · دفع للكلام Push-to-Talk (Space/زر) + كتم M (نمط Zoom:
+     أيقونة حالة + تسمية إجراء + aria-pressed ثابتة).
+   · مقارنة A/B أصلي⇄محوّل (crossfade 20ms على GainNode).
+   · تسجيل الجلسة WAV (قناة محوّل + قناة أصلية = ستيريو) يدويًا.
+   · sparkline للكمون (عميل/خادم) + p50/p95 + ميزانية الكتلة.
+   · عدادات بايت/معدل/underruns/مدة + سجل أحداث الجلسة.
+   · اقتراح حجم كتلة تلقائي من p95 الخادم + حفظ الإعدادات.
    ============================================================ */
 
 import {
   get, post, openRealtimeWS, toast, el, clear, icon, clamp, fmtNum, fmtMs, f0MethodSelect,
 } from "../api.js";
+import {
+  WORKLET_CODE, RingHistory, JitterAdaptor, ConnQuality, QUALITY_LABELS,
+  WavRecorder, Scope, drawSparkline, fmtKbps, fmtDur, nowClock,
+} from "./rt-helpers.js";
 
 export default { mount };
 
 const INPUT_RATE = 16000;
-const PREQUEUE_BLOCKS = 2;          // jitter absorption: 2 blocks preroll
-const RTT_KEEP = 100;                // keep last 100 client round-trips
-const STATS_EVERY_MS = 2000;
+const STATS_EVERY_MS = 1000;
 const PING_EVERY_MS = 5000;
-const PUSH_MIN_MS = 60;              // throttle for live settings frames
-const HF_POLL_MS = 2000;             // HF model download progress poll
+const PUSH_MIN_MS = 60;
+const HF_POLL_MS = 2000;
+const PONG_TIMEOUT_MS = 11000;
 const BLOCK_MS_CHOICES = [60, 80, 100, 128, 160, 200, 250, 320, 400, 500];
 const SPEAKER_PROFILE_KEY = "ivs_speaker_profile";
+const SETTINGS_KEY = "ivs_rt_settings_v1";
+const EVT_KEEP = 40;
 
 /* كل معاملات النبرة القابلة للتعديل لحظيًا (تُرسل عبر إطار settings) */
 const TONE_PARAMS = [
@@ -56,34 +69,41 @@ const TONE_PARAMS = [
     label: "بوابة الصمت (عزل البعيد)", latin: "Silence Gate · dB",
     min: -70, max: -20, step: 1, def: -36,
     fmt: (v) => `${Math.round(v)} dB`,
-    hint: "عزل ذكي مع ثبات واستمرار (220ms) لمنع تقطيع الحروف: الأصوات الأهدأ من هذا المستوى (كالضجيج والأصوات البعيدة) تُرفض قبل التحويل. ارفعه (-32..-28) لعزل أشد للمتحدث القريب فقط.",
+    hint: "عزل ذكي مع ثبات واستمرار (220ms) لمنع تقطيع الحروف: الأصوات الأهدأ من هذا المستوى تُرفض قبل التحويل. ارفعه (-32..-28) لعزل أشد للمتحدث القريب فقط.",
   },
 ];
 
 /* ------------------------------ mount ------------------------------ */
 
 async function mount(root) {
+  const saved = loadSavedSettings();
   const state = {
     phase: "idle", // idle | connecting | streaming | error
     models: [],
     info: null,
     hf: null,
-    blockMs: 160,
+    blockMs: saved.blockMs || 160,
     modelSr: null,
     settings: {
-      pitch_shift: 0,
-      index_rate: 0.88,
-      rms_mix_rate: 0.25,
-      f0_method: "rmvpe",
-      silence_threshold_db: -36,
-      strict_isolation: true,
+      pitch_shift: saved.pitch_shift ?? 0,
+      index_rate: saved.index_rate ?? 0.88,
+      rms_mix_rate: saved.rms_mix_rate ?? 0.25,
+      f0_method: saved.f0_method || "rmvpe",
+      silence_threshold_db: saved.silence_threshold_db ?? -36,
+      strict_isolation: saved.strict_isolation !== false,
       speaker_profile: loadSavedProfile(),
     },
     // client-side live controls
-    volume: 1.0,          // 0..2 output gain
-    monitor: false,       // hear the raw microphone alongside
-    aec: true,            // browser echo cancellation + noise suppression (blocks speaker feedback & far noise)
-    speakerGuard: false,  // strict half-duplex: mute mic while speaker plays
+    volume: saved.volume ?? 1.0,
+    monitor: saved.monitor === true,
+    aec: saved.aec !== false,
+    speakerGuard: saved.speakerGuard === true,
+    autoReconnect: saved.autoReconnect !== false,
+    pttMode: saved.pttMode === true,
+    pttHold: false,
+    muted: false,
+    abHold: false,
+    recording: false,
     enrolling: false,
     // live session objects
     ws: null,
@@ -97,22 +117,45 @@ async function mount(root) {
     workletNode: null,
     workletUrl: null,
     micSource: null,
-    // stats
+    analyserIn: null,
+    analyserOut: null,
+    recorder: null,
+    // stats & instrumentation
+    quality: new ConnQuality(),
+    jitter: null,
+    cliHist: new RingHistory(240),
+    srvHist: new RingHistory(240),
+    pingHist: new RingHistory(240),
     pendingTs: [],
     rttHistory: [],
     blocksSent: 0,
     blocksReceived: 0,
     serverStats: null,
     serverBlocks: 0,
-    nextTime: 0,
-    nextTimeMon: 0,
-    speakerBusyUntil: 0,
+    bytesIn: 0,
+    bytesOut: 0,
+    rateIn: 0,
+    rateOut: 0,
+    underruns: 0,
+    reconnects: 0,
+    startedAt: 0,
+    pingSentAt: 0,
+    lastBytesAt: 0,
+    lastBytesIn: 0,
+    lastBytesOut: 0,
+    evtLog: [],
+    scopeIn: null,
+    scopeOut: null,
+    drawRaf: null,
+    reconnect: { attempts: 0, timer: null, max: 5 },
     statsTimer: null,
     pingTimer: null,
     hfTimer: null,
     lastError: null,
     sessionId: 0,
-    userTouched: false,   // don't override sliders the user already moved
+    userTouched: false,
+    suggested: { dir: 0, val: 0 },
+    keyboardOn: false,
   };
 
   root.replaceChildren(el("div", { class: "stack" }, [
@@ -123,6 +166,7 @@ async function mount(root) {
     buildStatusCard(),
     buildMetersCard(),
     buildLatencyCard(),
+    buildEventsCard(),
   ]));
 
   const ui = {
@@ -144,6 +188,22 @@ async function mount(root) {
     aec: root.querySelector("#rt-aec"),
     speakerGuard: root.querySelector("#rt-speaker-guard"),
     strictIsolation: root.querySelector("#rt-strict-isolation"),
+    autoReconnect: root.querySelector("#rt-autoreconnect"),
+    pttMode: root.querySelector("#rt-ptt-mode"),
+    pttBtn: root.querySelector("#rt-ptt"),
+    muteBtn: root.querySelector("#rt-mute"),
+    abBtn: root.querySelector("#rt-ab"),
+    recBtn: root.querySelector("#rt-rec"),
+    recBox: root.querySelector("#rt-rec-box"),
+    quality: root.querySelector("#rt-quality"),
+    evtBox: root.querySelector("#rt-evt-box"),
+    sparkCli: root.querySelector("#rt-spark-cli"),
+    sparkSrv: root.querySelector("#rt-spark-srv"),
+    autoSuggest: root.querySelector("#rt-auto-suggest"),
+    autoSuggestBtn: root.querySelector("#rt-auto-suggest-btn"),
+    uptime: root.querySelector("#rt-uptime"),
+    bytes: root.querySelector("#rt-bytes"),
+    underruns: root.querySelector("#rt-underruns"),
     btnEnroll: root.querySelector("#rt-enroll"),
     btnEnrollClear: root.querySelector("#rt-enroll-clear"),
     spkBadge: root.querySelector("#rt-spk-badge"),
@@ -152,6 +212,9 @@ async function mount(root) {
     blocksRecv: root.querySelector("#rt-blocks-recv"),
     srvBlocks: root.querySelector("#rt-srv-blocks"),
     verdict: root.querySelector("#rt-verdict"),
+    waveIn: root.querySelector("#rt-wave-in"),
+    waveOut: root.querySelector("#rt-wave-out"),
+    specOut: root.querySelector("#rt-spec-out"),
     pitch: {}, index: {}, rms: {}, gate: {},
   };
 
@@ -173,6 +236,8 @@ async function mount(root) {
   function cleanup() {
     if (offDeviceChange) offDeviceChange();
     if (state.hfTimer) { clearInterval(state.hfTimer); state.hfTimer = null; }
+    if (state.reconnect.timer) { clearTimeout(state.reconnect.timer); state.reconnect.timer = null; }
+    unbindKeyboard(state, ui);
     teardownSession(state, ui);
   }
   return cleanup;
@@ -186,8 +251,14 @@ function buildIntroCard() {
     el("div", {}, [
       el("p", { style: "font-weight:700;margin:0 0 4px" }, ["مكالمة صوتية حيّة بخامة الصوت العراقي"]),
       el("p", { class: "small", style: "margin:0" }, [
-        "اضغط «بدء البث اللحظي» وتكلم في الميكروفون — كل كلمة تُسمع تُحوَّل فورًا بنموذج الاستنساخ وتُبث عبر مكبر الصوت في نفس اللحظة، تمامًا كأنك في مكالمة. عدّل أي معامل من لوحة المعاملات أدناه أثناء الكلام وسيُطبَّق فورًا دون قطع الصوت. ",
+        "اضغط «بدء البث اللحظي» وتكلم في الميكروفون — كل كلمة تُسمع تُحوَّل فورًا وتُبث عبر مكبر الصوت في نفس اللحظة. عدّل أي معامل أثناء الكلام وسيُطبَّق فورًا دون قطع الصوت. ",
         el("span", { class: "dim" }, ["نصيحة: استخدم سماعات رأس لتجنب ارتداد الصوت المحوّل إلى الميكروفون."]),
+      ]),
+      el("p", { class: "small dim", style: "margin:6px 0 0" }, [
+        "اختصارات لوحة المفاتيح أثناء البث: ",
+        el("span", { class: "kbd" }, ["M"]), " كتم/إلغاء · ",
+        el("span", { class: "kbd" }, ["B"]), " (مع الاستمرار) سماع الأصلي · ",
+        el("span", { class: "kbd" }, ["Space"]), " (مع الاستمرار) دفع للكلام",
       ]),
     ]),
   ]);
@@ -213,6 +284,7 @@ function buildControlsCard() {
     el("div", { class: "rt-state", id: "rt-state" }, [
       el("span", { class: "badge idle dot" }, ["خامل"]),
       el("span", { class: "small dim" }, ["اضغط زر البدء بعد اختيار نموذج f0."]),
+      el("span", { class: "badge info dot", id: "rt-quality", title: "جودة الاتصال (RTT منعّم)" }, ["—"]),
     ]),
     el("div", { class: "form-grid mt" }, [
       el("div", { class: "field" }, [
@@ -252,14 +324,45 @@ function buildControlsCard() {
         "مسح البصمة",
       ]),
     ]),
-    el("button", { class: "btn primary block mt", type: "button", id: "rt-start" }, [
-      icon("play", 16), " بدء البث اللحظي",
+    el("div", { class: "ptt-row mt" }, [
+      el("button", { class: "btn primary block", type: "button", id: "rt-start" }, [
+        icon("play", 16), " بدء البث اللحظي",
+      ]),
+      el("div", { class: "ptt-group" }, [
+        el("button", {
+          class: "btn sm", type: "button", id: "rt-mute",
+          "aria-pressed": "false", title: "كتم الميكروفون (M)",
+        }, [icon("mic", 14), " كتم الميكروفون"]),
+        el("button", {
+          class: "btn sm", type: "button", id: "rt-ptt",
+          "aria-pressed": "false", title: "اضغط مع الاستمرار للتحدث (أو المسافة)",
+        }, [icon("play", 14), " دفع للكلام"]),
+        el("button", {
+          class: "btn sm ghost", type: "button", id: "rt-ab",
+          "aria-pressed": "false", title: "قارن صوتك الأصلي (B مع الاستمرار)",
+        }, ["قارن الأصلي ⇄ المحوّل"]),
+        el("button", {
+          class: "btn sm ghost", type: "button", id: "rt-rec",
+          "aria-pressed": "false", title: "تسجيل الجلسة صوتيًا (ستيريو: محوّل + أصلي)",
+        }, [icon("wave", 14), " تسجيل الجلسة"]),
+      ]),
+    ]),
+    el("label", { class: "check mt" }, [
+      el("input", { type: "checkbox", id: "rt-ptt-mode" }),
+      " وضع «دفع للكلام» — الميكروفون مكتوم إلا أثناء ضغط المسافة/الزر ",
+      el("span", { class: "opt-latin" }, ["Push-to-Talk"]),
+    ]),
+    el("label", { class: "check" }, [
+      el("input", { type: "checkbox", id: "rt-autoreconnect", checked: true }),
+      " إعادة اتصال تلقائية عند الانقطاع (5 محاولات بتراجع أسّي) ",
+      el("span", { class: "opt-latin" }, ["Auto-Reconnect"]),
     ]),
     el("div", { class: "row mt", style: "gap:8px;flex-wrap:wrap" }, [
       el("button", { class: "btn sm ghost", type: "button", id: "rt-test-speaker" }, [
         icon("speaker", 14), " اختبار المكبر (نغمة قصيرة)",
       ]),
     ]),
+    el("div", { id: "rt-rec-box", class: "mt hidden" }, []),
     el("div", { id: "rt-playback-alert", class: "mt hidden" }, []),
     el("div", { id: "rt-error", class: "mt hidden" }, []),
   ]);
@@ -305,7 +408,7 @@ function buildParamsCard() {
         el("span", { class: "slider-val", id: "rt-volume-val" }, ["100%"]),
       ]),
       el("input", { type: "range", id: "rt-volume", min: "0", max: "2", step: "0.05", value: "1" }),
-      el("div", { class: "param-hint" }, ["مستوى صوت مكبر الصوت للصوت المحوّل — يُطبَّق لحظيًا داخل المتصفح دون أي تأخير إضافي."]),
+      el("div", { class: "param-hint" }, ["مستوى صوت مكبر الصوت للصوت المحوّل — يُطبَّق لحظيًا داخل المتصفح دون أي تأخير إضافي، ومقيد بمانع قطع ناعم."]),
     ]),
     el("label", { class: "check" }, [
       el("input", { type: "checkbox", id: "rt-strict-isolation", checked: true }),
@@ -324,7 +427,7 @@ function buildParamsCard() {
     ]),
     el("label", { class: "check" }, [
       el("input", { type: "checkbox", id: "rt-monitor" }),
-      " سماع صوتي الأصلي مع المحوّل ",
+      " سماع صوتك الأصلي مع المحوّل ",
       el("span", { class: "opt-latin" }, ["Monitor Input"]),
     ]),
   ]);
@@ -344,10 +447,58 @@ function buildMetersCard() {
     el("h2", { class: "card-title" }, ["المستويات والعدادات", el("span", { class: "sub latin" }, ["Meters"])]),
     meterRow("rt-meter-in", "الدخل (مايكروفون)"),
     meterRow("rt-meter-out", "الخرج (الصوت المحوّل)"),
+    el("div", { class: "scope-grid mt" }, [
+      scopeBox("rt-wave-in", "موجة الدخل — Input"),
+      scopeBox("rt-wave-out", "موجة الخرج — Output"),
+      scopeBox("rt-spec-out", "طيف الخرج — Spectrum"),
+    ]),
     el("div", { class: "latency-grid mt" }, [
       tileEl("rt-blocks-sent", "كتل مُرسلة"),
       tileEl("rt-blocks-recv", "كتل مستلمة"),
       tileEl("rt-srv-blocks", "كتل معالجة (خادم)"),
+      tileEl("rt-uptime", "مدة الجلسة"),
+      tileEl("rt-bytes", "معدل البيانات"),
+      tileEl("rt-underruns", "انقطاعات تشغيل"),
+    ]),
+  ]);
+}
+
+function buildLatencyCard() {
+  return el("div", { class: "card" }, [
+    el("h2", { class: "card-title" }, ["لوحة زمن الاستجابة", el("span", { class: "sub latin" }, ["Latency"])]),
+    el("div", { class: "small dim" }, [
+      "الخادم: زمن استدلال المحرك لكل كتلة. العميل: زمن الذهاب-والإياب حتى جدولة الكتلة للتشغيل (آخر 100 قياس). العتبات: أخضر ≤150ms، كهرماني ≤400ms (ITU G.114).",
+    ]),
+    el("div", { class: "latency-grid mt", id: "rt-srv-tiles" }, [
+      tileEl("rt-srv-min", "خادم — أدنى"),
+      tileEl("rt-srv-avg", "خادم — متوسط"),
+      tileEl("rt-srv-p95", "خادم — p95"),
+      tileEl("rt-srv-max", "خادم — أقصى"),
+      tileEl("rt-srv-bridge", "جسر النقل"),
+    ]),
+    el("div", { class: "latency-grid mt", id: "rt-cli-tiles" }, [
+      tileEl("rt-cli-min", "عميل — أدنى"),
+      tileEl("rt-cli-avg", "عميل — متوسط"),
+      tileEl("rt-cli-p95", "عميل — p95"),
+    ]),
+    el("div", { class: "spark-grid mt" }, [
+      sparkBox("rt-spark-srv", "استدلال الخادم لكل كتلة (ms)"),
+      sparkBox("rt-spark-cli", "ذهاب-وإياب العميل (ms)"),
+    ]),
+    el("div", { class: "row mt hidden", id: "rt-auto-suggest", style: "gap:8px;align-items:center;flex-wrap:wrap" }, [
+      el("span", { class: "small", id: "rt-auto-suggest-txt" }, [""]),
+      el("button", { class: "btn sm", type: "button", id: "rt-auto-suggest-btn" }, ["طبّق وأعد البدء"]),
+    ]),
+    el("div", { class: "verdict", id: "rt-verdict" }, ["لا توجد قياسات بعد."]),
+  ]);
+}
+
+function buildEventsCard() {
+  return el("div", { class: "card" }, [
+    el("h2", { class: "card-title" }, ["سجل أحداث الجلسة", el("span", { class: "sub latin" }, ["Events"])]),
+    el("div", { class: "small dim" }, ["آخر 40 حدثًا: اتصالات، أعطال، إعادة اتصال، انقطاعات تشغيل، وتطبيقات إعدادات."]),
+    el("div", { class: "evt-box mt", id: "rt-evt-box" }, [
+      el("p", { class: "muted small" }, ["لا أحداث بعد."]),
     ]),
   ]);
 }
@@ -370,25 +521,17 @@ function tileEl(id, label) {
   ]);
 }
 
-function buildLatencyCard() {
-  return el("div", { class: "card" }, [
-    el("h2", { class: "card-title" }, ["لوحة زمن الاستجابة", el("span", { class: "sub latin" }, ["Latency"])]),
-    el("div", { class: "small dim" }, [
-      "الخادم: زمن استدلال المحرك لكل كتلة. العميل: زمن الذهاب-والإياب حتى جدولة الكتلة للتشغيل (آخر 100 قياس).",
-    ]),
-    el("div", { class: "latency-grid mt", id: "rt-srv-tiles" }, [
-      tileEl("rt-srv-min", "خادم — أدنى"),
-      tileEl("rt-srv-avg", "خادم — متوسط"),
-      tileEl("rt-srv-p95", "خادم — p95"),
-      tileEl("rt-srv-max", "خادم — أقصى"),
-      tileEl("rt-srv-bridge", "جسر النقل"),
-    ]),
-    el("div", { class: "latency-grid mt", id: "rt-cli-tiles" }, [
-      tileEl("rt-cli-min", "عميل — أدنى"),
-      tileEl("rt-cli-avg", "عميل — متوسط"),
-      tileEl("rt-cli-p95", "عميل — p95"),
-    ]),
-    el("div", { class: "verdict", id: "rt-verdict" }, ["لا توجد قياسات بعد."]),
+function scopeBox(id, label) {
+  return el("div", { class: "scope-box" }, [
+    el("span", { class: "scope-label" }, [label]),
+    el("canvas", { class: "scope", id }),
+  ]);
+}
+
+function sparkBox(id, label) {
+  return el("div", { class: "spark-box" }, [
+    el("span", { class: "scope-label" }, [label]),
+    el("canvas", { class: "spark", id }),
   ]);
 }
 
@@ -512,7 +655,6 @@ function renderHf(state, ui) {
   clear(box);
   const hf = state.hf;
 
-  // جاهز؟ بطاقة مختصرة
   if (hf.model.present && hf.download.state !== "downloading") {
     box.append(el("div", { class: "row" }, [
       el("span", { class: `badge ${hf.model.present ? "ok" : "warn"} dot` }, [
@@ -524,7 +666,6 @@ function renderHf(state, ui) {
     return;
   }
 
-  // قيد التنزيل — أشرطة تقدم لكل ملف
   if (hf.download.state === "downloading") {
     box.append(el("div", { class: "row" }, [
       el("span", { class: "badge loading dot" }, ["جارٍ تنزيل النموذج من HuggingFace…"]),
@@ -550,7 +691,6 @@ function renderHf(state, ui) {
     return;
   }
 
-  // مفقود — زر تنزيل أو تحذير التوكن
   if (!hf.token_configured) {
     box.append(el("div", { class: "notice warn" }, [
       el("span", { class: "n-icon" }, [icon("alert", 18)]),
@@ -627,6 +767,7 @@ function wireLiveControls(ui, state) {
       if (from !== "num") num.value = String(v);
       val.textContent = p.fmt(v);
       pushSettings(state, ui);
+      persistSettings(state);
     };
     slider.addEventListener("input", () => apply(slider.value, "slider"));
     num.addEventListener("change", () => apply(num.value, "num"));
@@ -636,15 +777,16 @@ function wireLiveControls(ui, state) {
     state.userTouched = true;
     state.settings.f0_method = ui.f0.value;
     pushSettings(state, ui);
+    persistSettings(state);
   });
 
-  // حجم الخرج — يُطبَّق داخل المتصفح فورًا (بدون دورة خادم)
   ui.volume.addEventListener("input", () => {
     state.volume = Number(ui.volume.value);
     ui.volumeVal.textContent = `${Math.round(state.volume * 100)}%`;
     if (state.outGain) state.outGain.gain.value = state.volume;
+    persistSettings(state);
     if (state.volume > 0.001 && state.zeroVolWarned) {
-      state.zeroVolWarned = false;          // volume restored — drop the alert
+      state.zeroVolWarned = false;
       const box = document.getElementById("rt-playback-alert");
       if (box && state.outCtx && state.outCtx.state === "running") {
         clear(box);
@@ -653,16 +795,18 @@ function wireLiveControls(ui, state) {
     }
   });
 
-  // سماع الدخل — بوابة صوتية تنفتح لحظيًا
   ui.monitor.addEventListener("change", () => {
     state.monitor = ui.monitor.checked;
-    if (state.monGain) state.monGain.gain.value = state.monitor ? 1.0 : 0.0;
-    if (state.monitor) toast("سماع الدخل مفعّل — ستسمع صوتك الأصلي مع المحوّل. استخدم سماعات لتجنب الارتداد.", "info");
+    if (state.monGain) state.monGain.gain.setTargetAtTime(state.monitor ? 1.0 : 0.0, state.outCtx.currentTime, 0.01);
+    if (state.monitor) toast("سماع الدخل مفعّل — استخدم سماعات لتجنب الارتداد.", "info");
+    persistSettings(state);
   });
 
   if (ui.aec) {
+    ui.aec.checked = state.aec;
     ui.aec.addEventListener("change", () => {
       state.aec = ui.aec.checked;
+      persistSettings(state);
       if (state.phase === "streaming") {
         toast("يُطبَّق تغيير عزل الصدى عند إعادة بدء الجلسة.", "info", 5000);
       }
@@ -670,15 +814,60 @@ function wireLiveControls(ui, state) {
   }
 
   if (ui.speakerGuard) {
+    ui.speakerGuard.checked = state.speakerGuard;
     ui.speakerGuard.addEventListener("change", () => {
       state.speakerGuard = ui.speakerGuard.checked;
+      persistSettings(state);
     });
   }
 
+  if (ui.autoReconnect) {
+    ui.autoReconnect.checked = state.autoReconnect;
+    ui.autoReconnect.addEventListener("change", () => {
+      state.autoReconnect = ui.autoReconnect.checked;
+      persistSettings(state);
+    });
+  }
+
+  if (ui.pttMode) {
+    ui.pttMode.checked = state.pttMode;
+    ui.pttMode.addEventListener("change", () => {
+      state.pttMode = ui.pttMode.checked;
+      setMuted(state, ui, state.pttMode && !state.pttHold);
+      persistSettings(state);
+    });
+  }
+
+  if (ui.muteBtn) {
+    ui.muteBtn.addEventListener("click", () => setMuted(state, ui, !state.muted));
+  }
+  if (ui.pttBtn) {
+    ui.pttBtn.addEventListener("pointerdown", (ev) => {
+      if (ev.button !== 0) return;
+      ui.pttBtn.setPointerCapture?.(ev.pointerId);
+      setPttHold(state, ui, true);
+    });
+    ui.pttBtn.addEventListener("pointerup", () => setPttHold(state, ui, false));
+    ui.pttBtn.addEventListener("pointercancel", () => setPttHold(state, ui, false));
+  }
+  if (ui.abBtn) {
+    ui.abBtn.addEventListener("pointerdown", (ev) => {
+      if (ev.button !== 0) return;
+      ui.abBtn.setPointerCapture?.(ev.pointerId);
+      setAbHold(state, ui, true);
+    });
+    ui.abBtn.addEventListener("pointerup", () => setAbHold(state, ui, false));
+    ui.abBtn.addEventListener("pointercancel", () => setAbHold(state, ui, false));
+    ui.abBtn.addEventListener("click", () => { /* click يتبع hold؛ تجاهل */ });
+  }
+  if (ui.recBtn) ui.recBtn.addEventListener("click", () => toggleRecording(state, ui));
+
   if (ui.strictIsolation) {
+    ui.strictIsolation.checked = state.settings.strict_isolation;
     ui.strictIsolation.addEventListener("change", () => {
       state.settings.strict_isolation = ui.strictIsolation.checked;
       pushSettings(state, ui);
+      persistSettings(state);
       renderSpeakerBadge(state, ui);
     });
   }
@@ -696,15 +885,14 @@ function wireLiveControls(ui, state) {
     });
   }
 
-  // حجم الكتلة — يُطبَّق عند بدء الجلسة القادمة
   ui.blockMs.addEventListener("change", () => {
     state.blockMs = Number(ui.blockMs.value) || 160;
+    persistSettings(state);
     if (state.phase === "streaming") {
       toast(`حجم الكتلة الجديد (${state.blockMs} ms) سيُطبَّق عند إعادة بدء البث.`, "info", 6000);
     }
   });
 
-  // الإعدادات الجاهزة
   document.getElementById("rt-preset-best").addEventListener("click", () => {
     const rec = state.hf?.recommended || state.info?.recommended || {
       pitch_shift: 0, index_rate: 0.88, rms_mix_rate: 0.25, f0_method: "rmvpe",
@@ -718,6 +906,41 @@ function wireLiveControls(ui, state) {
       silence_threshold_db: state.settings.silence_threshold_db,
     }, { quiet: false });
   });
+}
+
+/* كتم/دفع للكلام/مقارنة A-B: كلها إرسال أصفار أم إشارة + تحكم مكاسب مرئي */
+function setMuted(state, ui, muted) {
+  state.muted = muted;
+  if (ui.muteBtn) {
+    ui.muteBtn.setAttribute("aria-pressed", muted ? "true" : "false");
+    ui.muteBtn.classList.toggle("muted", muted);
+    ui.muteBtn.replaceChildren(
+      icon(muted ? "mic" : "mic", 14),
+      document.createTextNode(muted ? " إلغاء الكتم" : " كتم الميكروفون"),
+    );
+  }
+  logEvt(state, ui, muted ? "كُتم الميكروفون" : "أُلغي الكتم", muted ? "warn" : "ok");
+}
+
+function setPttHold(state, ui, hold) {
+  if (state.pttHold === hold) return;
+  state.pttHold = hold;
+  if (ui.pttBtn) {
+    ui.pttBtn.setAttribute("aria-pressed", hold ? "true" : "false");
+    ui.pttBtn.classList.toggle("ptt-on", hold);
+  }
+}
+
+function setAbHold(state, ui, hold) {
+  if (state.abHold === hold) return;
+  state.abHold = hold;
+  if (ui.abBtn) ui.abBtn.setAttribute("aria-pressed", hold ? "true" : "false");
+  if (state.outCtx && state.outGain && state.monGain) {
+    const t = state.outCtx.currentTime;
+    // crossfade 20ms بين المحوّل والأصلي — لا نقرة
+    state.outGain.gain.setTargetAtTime(hold ? 0 : state.volume, t, 0.01);
+    state.monGain.gain.setTargetAtTime(hold ? 1 : (state.monitor ? 1 : 0), t, 0.01);
+  }
 }
 
 function applyRecommended(state, ui, rec, { quiet = false } = {}) {
@@ -738,10 +961,11 @@ function applyRecommended(state, ui, rec, { quiet = false } = {}) {
     ui.f0.value = rec.f0_method;
   }
   pushSettings(state, ui);
+  persistSettings(state);
   if (!quiet) toast("طُبِّق الإعداد الموصى به لنموذج الصوت العراقي.", "success", 2500);
 }
 
-/* إرسال إطار settings مع خنق خفيف كي لا يُغرق الخادم أثناء السحب المتواصل */
+/* إرسال إطار settings مع خنق خفيف */
 function pushSettings(state, ui) {
   if (state.phase === "streaming" && state.ws) {
     state._pushQueued = true;
@@ -766,6 +990,77 @@ function settingsPayload(state) {
     strict_isolation: state.settings.strict_isolation,
     speaker_profile: state.settings.speaker_profile || null,
   };
+}
+
+/* حفظ/استعادة الإعدادات (localStorage — مقاوم للحجب) */
+function persistSettings(state) {
+  try {
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify({
+      blockMs: state.blockMs,
+      pitch_shift: state.settings.pitch_shift,
+      index_rate: state.settings.index_rate,
+      rms_mix_rate: state.settings.rms_mix_rate,
+      f0_method: state.settings.f0_method,
+      silence_threshold_db: state.settings.silence_threshold_db,
+      strict_isolation: state.settings.strict_isolation,
+      volume: state.volume,
+      monitor: state.monitor,
+      aec: state.aec,
+      speakerGuard: state.speakerGuard,
+      autoReconnect: state.autoReconnect,
+      pttMode: state.pttMode,
+    }));
+  } catch { /* storage blocked — non-fatal */ }
+}
+
+function loadSavedSettings() {
+  try {
+    const raw = localStorage.getItem(SETTINGS_KEY);
+    return raw ? JSON.parse(raw) : {};
+  } catch { return {}; }
+}
+
+/* ------------------------------ keyboard (PTT/Mute/AB) ------------------------------ */
+
+function bindKeyboard(state, ui) {
+  if (state.keyboardOn) return;
+  state.keyboardOn = true;
+  state._kd = (ev) => {
+    if (ev.repeat) return;
+    if (ev.code === "Space") {
+      if (isTypingTarget(ev.target)) return;
+      ev.preventDefault();
+      setPttHold(state, ui, true);
+    } else if (ev.key === "m" || ev.key === "M") {
+      if (isTypingTarget(ev.target)) return;
+      setMuted(state, ui, !state.muted);
+    } else if (ev.code === "KeyB") {
+      if (isTypingTarget(ev.target)) return;
+      setAbHold(state, ui, true);
+    }
+  };
+  state._ku = (ev) => {
+    if (ev.code === "Space") setPttHold(state, ui, false);
+    else if (ev.code === "KeyB") setAbHold(state, ui, false);
+  };
+  state._kb = () => { setPttHold(state, ui, false); setAbHold(state, ui, false); };
+  window.addEventListener("keydown", state._kd);
+  window.addEventListener("keyup", state._ku);
+  window.addEventListener("blur", state._kb);
+}
+
+function unbindKeyboard(state, ui) {
+  if (!state.keyboardOn) return;
+  state.keyboardOn = false;
+  window.removeEventListener("keydown", state._kd);
+  window.removeEventListener("keyup", state._ku);
+  window.removeEventListener("blur", state._kb);
+}
+
+function isTypingTarget(t) {
+  return t instanceof HTMLInputElement || t instanceof HTMLTextAreaElement
+    || t instanceof HTMLSelectElement || t.isContentEditable
+    || (t instanceof HTMLElement && t.closest?.("button"));
 }
 
 /* ------------------------------ device selection ------------------------------ */
@@ -804,11 +1099,9 @@ async function attachOutputSink(outCtx, ui, state = null) {
       await outCtx.setSinkId(deviceId || "");
       if (state) state.sinkFailed = false;
     } else {
-      return; // context already created; sink selection unavailable
+      return;
     }
   } catch (err) {
-    // The selected output device is gone/invalid — fall back to the system
-    // default so playback ALWAYS has a valid destination, and tell the user.
     if (state) state.sinkFailed = true;
     toast(`تعذّر اختيار جهاز الإخراج (${err.message}) — سيستخدم الافتراضي.`, "warn");
     try { await outCtx.setSinkId(""); } catch { /* default already active */ }
@@ -817,9 +1110,6 @@ async function attachOutputSink(outCtx, ui, state = null) {
 
 /* ------------------------ playback health watchdog ------------------------ */
 
-/** Play a short audible tone through the exact playback graph (outGain →
- *  destination). Diagnoses in one click: suspended context, wrong/missing
- *  output device, zero volume, or OS-level mute. */
 async function testSpeaker(state, ui) {
   const ok = await resumeOutCtx(state, ui);
   const ctx = state.outCtx;
@@ -846,9 +1136,6 @@ async function testSpeaker(state, ui) {
   toast("نغمة الاختبار تعمل الآن عبر نفس مسار الصوت — إن لم تسمعها فالمشكلة في جهاز/مستوى الإخراج وليست في البث.", "info", 8000);
 }
 
-/** Resume the playback context; verify it actually left "suspended".
- *  A silent resume() failure (autoplay policy lost after the permission
- *  dialog) is the #1 cause of "mic meter moves but speaker silent". */
 async function resumeOutCtx(state, ui) {
   const ctx = state.outCtx;
   if (!ctx) return false;
@@ -858,7 +1145,6 @@ async function resumeOutCtx(state, ui) {
   return ctx.state === "running";
 }
 
-/** One-time warning + retry when the playback context is stuck suspended. */
 async function checkPlaybackHealth(state, ui) {
   const ctx = state.outCtx;
   if (!ctx || state.phase !== "streaming") return;
@@ -870,7 +1156,6 @@ async function checkPlaybackHealth(state, ui) {
   }
 }
 
-/** Visible alert card for playback problems (suspended ctx / zero volume / bad sink). */
 function renderPlaybackAlert(state, ui) {
   const box = document.getElementById("rt-playback-alert");
   if (!box) return;
@@ -921,23 +1206,29 @@ async function startSession(state, ui) {
   state.serverStats = null;
   state.sinkFailed = false;
   state.zeroVolWarned = false;
+  state.underruns = 0;
+  state.reconnects = 0;
+  state.reconnect.attempts = 0;
+  state.bytesIn = 0; state.bytesOut = 0;
+  state.evtLog = [];
+  state.cliHist = new RingHistory(240);
+  state.srvHist = new RingHistory(240);
+  state.pingHist = new RingHistory(240);
+  state.quality = new ConnQuality();
   const pbAlert = document.getElementById("rt-playback-alert");
   if (pbAlert) { clear(pbAlert); pbAlert.classList.add("hidden"); }
   if (ui.blocksSent) ui.blocksSent.textContent = "0";
   if (ui.blocksRecv) ui.blocksRecv.textContent = "0";
   if (ui.srvBlocks) ui.srvBlocks.textContent = "0";
+  if (ui.underruns) ui.underruns.textContent = "0";
   const sessionId = ++state.sessionId;
   const alive = () => state.sessionId === sessionId && (state.phase === "connecting" || state.phase === "streaming");
   setPhase(state, ui, "connecting", `جارٍ الاتصال والتحميل — ${modelName}`);
+  logEvt(state, ui, `بدء الجلسة: ${modelName}`, "info");
 
-  // Create playback context synchronously under the user click gesture so
-  // autoplay policies never keep it suspended after async permission awaits.
   state.outCtx = new AudioContext();
-  state.outCtxSuspendedWarned = false;   // one-time user warning when playback is blocked
+  state.outCtxSuspendedWarned = false;
   state.outCtx.setSinkId?.("")?.catch?.(() => {});
-  // Aggressive initial resume + watchdog: some browsers drop the user-gesture
-  // status after the async mic-permission dialog, leaving the context
-  // suspended => mic meter moves but the speaker plays nothing.
   resumeOutCtx(state, ui);
   if (state.outCtx.state === "suspended") {
     state.outCtx.resume().then(() => checkPlaybackHealth(state, ui)).catch(() => {});
@@ -947,13 +1238,29 @@ async function startSession(state, ui) {
   state.speakerBusyUntil = 0;
   state.outGain = state.outCtx.createGain();
   state.outGain.gain.value = state.volume;
-  state.outGain.connect(state.outCtx.destination);
+  // مقيد ناعم قبل الوجهة: threshold -6dB، knee صغيرة، ratio 20 (limiter نمطي)
+  state.limiter = state.outCtx.createDynamicsCompressor();
+  state.limiter.threshold.value = -6;
+  state.limiter.knee.value = 3;
+  state.limiter.ratio.value = 20;
+  state.limiter.attack.value = 0.003;
+  state.limiter.release.value = 0.15;
+  state.outGain.connect(state.limiter);
+  state.limiter.connect(state.outCtx.destination);
   state.monGain = state.outCtx.createGain();
   state.monGain.gain.value = state.monitor ? 1.0 : 0.0;
   state.monGain.connect(state.outCtx.destination);
+  // محللات مرئية (taps): دخل من ميكروفون، وخرج المحوّل
+  state.analyserIn = state.outCtx.createAnalyser();
+  state.analyserIn.fftSize = 1024;
+  state.analyserOut = state.outCtx.createAnalyser();
+  state.analyserOut.fftSize = 1024;
+  state.outGain.connect(state.analyserOut);
+  state.scopeIn = new Scope(ui.waveIn, { color: "#60a5fa" });
+  state.scopeOut = new Scope(ui.waveOut, { color: "#34d399" });
+  state.scopeIn.attach(state.analyserIn);
+  state.scopeOut.attach(state.analyserOut);
 
-  // 1) microphone (selected device if any; AEC + NS block speaker feedback & room noise,
-  //    while autoGainControl stays off so distant voices are NOT amplified)
   let stream;
   const micId = ui.micSelect ? ui.micSelect.value : "";
   const audioConstraints = {
@@ -971,8 +1278,9 @@ async function startSession(state, ui) {
   }
   if (!alive()) { for (const t of stream.getAudioTracks()) t.stop(); teardownSession(state, ui); return; }
   state.stream = stream;
+  state.startedAt = performance.now();
+  state.lastBytesAt = performance.now();
 
-  // 2) input context @16k (fallback: native rate + resample)
   try {
     state.inCtx = new AudioContext({ sampleRate: INPUT_RATE });
   } catch {
@@ -982,12 +1290,10 @@ async function startSession(state, ui) {
   if (!alive()) { teardownSession(state, ui); return; }
   const inRate = state.inCtx.sampleRate;
 
-  // 3) ensure playback context resumed & output sink attached
   resumeOutCtx(state, ui);
   await attachOutputSink(state.outCtx, ui, state);
   if (!alive()) { teardownSession(state, ui); return; }
 
-  // 4) worklet — بحجم الكتلة المختار (block_ms)
   try {
     state.workletUrl = URL.createObjectURL(new Blob([WORKLET_CODE], { type: "application/javascript" }));
     await state.inCtx.audioWorklet.addModule(state.workletUrl);
@@ -1015,10 +1321,13 @@ async function startSession(state, ui) {
     state.micSource.connect(hpf);
     hpf.connect(lpf);
     lpf.connect(state.workletNode);
+    // محلل الدخل يتغذى من نفس الإشارة المرشّحة
+    lpf.connect(state.analyserIn);
   } else {
     state.micFilter = null;
     state.micLowpass = null;
     state.micSource.connect(state.workletNode);
+    state.micSource.connect(state.analyserIn);
   }
 
   const track = stream.getAudioTracks()[0];
@@ -1028,20 +1337,23 @@ async function startSession(state, ui) {
     }
   });
 
+  state.jitter = new JitterAdaptor({ blockSec: state.blockMs / 1000, prerollBlocks: 2 });
+
   state.workletNode.port.onmessage = (ev) => {
-    const block = ev.data; // Float32Array at input-ctx rate
+    const block = ev.data;
     if (!(block instanceof Float32Array)) return;
 
-    // Anti-feedback guard (when enabled): mute mic capture while speaker is playing
     const speakerActive = Boolean(
       state.speakerGuard && state.outCtx && state.outCtx.currentTime < state.speakerBusyUntil
     );
-    const activeBlock = speakerActive ? new Float32Array(block.length) : block;
+    // كتم يدوي أو وضع PTT دون ضغط: أرسل صمتًا (يحفظ استمرارية الخادم)
+    const txSilent = state.muted || (state.pttMode && !state.pttHold);
+    let activeBlock = speakerActive ? new Float32Array(block.length) : block;
+    if (txSilent) activeBlock = new Float32Array(block.length);
 
-    const rms = rmsOf(activeBlock);
+    const rms = rmsOf(block);
     updateMeter(state, ui, "in", rms);
 
-    // سماع الدخل: بث الصوت الأصلي عبر مكبر الصوت في نفس اللحظة
     if (state.monitor && state.outCtx && state.monGain && !speakerActive) {
       const ctx = state.outCtx;
       if (ctx.state === "suspended") ctx.resume().catch(() => {});
@@ -1063,17 +1375,51 @@ async function startSession(state, ui) {
 
     let pcm = activeBlock;
     if (inRate !== INPUT_RATE) pcm = resampleLinear(activeBlock, inRate, INPUT_RATE);
+    if (state.recorder && !txSilent) state.recorder.push("dry", resampleLinear(activeBlock, inRate, state.outCtx.sampleRate));
     const int16 = floatToInt16(pcm);
     if (state.ws && state.ws.readyState() === WebSocket.OPEN) {
       state.pendingTs.push(performance.now());
       if (state.pendingTs.length > 8) state.pendingTs.shift();
       state.blocksSent += 1;
+      state.bytesOut += int16.byteLength;
       if (ui.blocksSent) ui.blocksSent.textContent = String(state.blocksSent);
       state.ws.sendBinary(int16.buffer);
     }
   };
 
-  // 5) websocket — مع تمرير حجم الكتلة المختار
+  bindKeyboard(state, ui);
+  openStream(state, ui, modelName, alive);
+
+  // مؤقتات الحياة: إحصاءات كل ثانية، ping كل 5s مع كشف الموت
+  state.statsTimer = setInterval(() => {
+    if (state.ws && state.phase === "streaming") state.ws.sendText({ type: "stats" });
+    renderRates(state, ui);
+    if (ui.uptime) ui.uptime.textContent = fmtDur((performance.now() - state.startedAt) / 1000);
+  }, STATS_EVERY_MS);
+  state.pingTimer = setInterval(() => {
+    if (!state.ws || state.phase !== "streaming") return;
+    state.pingSentAt = performance.now();
+    state.ws.sendText({ type: "ping" });
+    if (state.quality.stale) {
+      state.quality.notePongTimeout();
+      logEvt(state, ui, "انتهت مهلة النبضة — يُشتبه باتصال ميت", "error");
+      if (state.autoReconnect) beginReconnect(state, ui, "انتهت مهلة النبضة (pong)");
+    }
+  }, PING_EVERY_MS);
+  // رسم المرئيات في rAF واحد
+  state.drawRaf = requestAnimationFrame(function drawLoop() {
+    if (state.phase !== "streaming" && state.phase !== "connecting") return;
+    state.scopeIn?.draw();
+    state.scopeOut?.draw();
+    drawSpectrum(state, ui);
+    drawSparkline(ui.sparkCli, state.cliHist, { budget: state.blockMs, color: "#60a5fa" });
+    drawSparkline(ui.sparkSrv, state.srvHist, { budget: state.blockMs, color: "#34d399" });
+    state.drawRaf = requestAnimationFrame(drawLoop);
+  });
+}
+
+/* فتح WebSocket + كل المعالجات */
+function openStream(state, ui, modelName, alive) {
   const ws = openRealtimeWS();
   state.ws = ws;
 
@@ -1098,9 +1444,7 @@ async function startSession(state, ui) {
       setPhase(state, ui, "streaming", `بث نشط — ${msg.model || modelName} · خرج ${fmtNum((msg.sample_rate || 0) / 1000, 1)} kHz · ميزانية ${msg.latency_budget_ms || state.blockMs} ms`);
       toast("بدأ البث اللحظي — تكلم في الميكروفون وستسمع صوتك بالخامة العراقية فورًا.", "success");
       ui.model.disabled = true;
-      state.statsTimer = setInterval(() => ws.sendText({ type: "stats" }), STATS_EVERY_MS);
-      state.pingTimer = setInterval(() => ws.sendText({ type: "ping" }), PING_EVERY_MS);
-      ws.sendText({ type: "stats" });
+      logEvt(state, ui, `اتصال ناجح — الخادم جاهز (${msg.model || modelName})`, "ok");
     } else if (msg.type === "settings_applied") {
       flashApplied(ui);
     } else if (msg.type === "stats") {
@@ -1110,6 +1454,12 @@ async function startSession(state, ui) {
     } else if (msg.type === "pong") {
       state.serverBlocks = msg.blocks ?? 0;
       if (ui.srvBlocks) ui.srvBlocks.textContent = String(state.serverBlocks);
+      const rtt = state.pingSentAt ? performance.now() - state.pingSentAt : 0;
+      if (rtt > 0) {
+        state.quality.notePong(rtt);
+        state.pingHist.push(rtt);
+      }
+      renderQualityBadge(state, ui);
       renderSpeakerBadge(state, ui, msg);
     } else if (msg.type === "error") {
       fail(state, ui, `خطأ من الخادم: ${msg.message || "غير معروف"}`);
@@ -1120,11 +1470,10 @@ async function startSession(state, ui) {
     if (!alive() || !state.outCtx) return;
     const int16 = new Int16Array(buffer);
     if (!int16.length) return;
+    state.bytesIn += buffer.byteLength || int16.byteLength;
     let floats = int16ToFloat(int16);
     const ctx = state.outCtx;
     if (ctx.state === "suspended") {
-      // a suspended context freezes currentTime: the block would be scheduled
-      // into a future that never arrives — resume first, then re-check health
       ctx.resume().then(() => checkPlaybackHealth(state, ui)).catch(() => {});
     }
     const outRate = ctx.sampleRate;
@@ -1133,9 +1482,12 @@ async function startSession(state, ui) {
     }
     const rms = rmsOf(floats);
     updateMeter(state, ui, "out", rms);
+    if (state.recorder) state.recorder.push("wet", floats);
 
     const blockSec = floats.length / outRate;
-    // Drop excess queued silent blocks when jitter buffer grows > 0.65s so latency self-heals
+    state.jitter?.noteArrival(performance.now());
+
+    // تخطي الفائض الصامت إذا تراكم المخزن (تشافي ذاتي للكمون)
     if (state.nextTime > 0 && state.nextTime - ctx.currentTime > Math.max(0.65, 4 * blockSec) && rms < 0.004) {
       if (state.pendingTs.length) state.pendingTs.shift();
       state.blocksReceived += 1;
@@ -1148,12 +1500,18 @@ async function startSession(state, ui) {
       state.nextTime = ctx.currentTime + Math.max(0.18, PREQUEUE_BLOCKS * blockSec);
       needsFadeIn = true;
     } else if (state.nextTime < ctx.currentTime + 0.004) {
+      // underrun: الفجوة وصلت قبل موعد التشغيل — سجّلها ووسّع الامتصاص
+      state.underruns += 1;
+      const grew = state.jitter?.noteUnderrun();
+      if (ui.underruns) ui.underruns.textContent = String(state.underruns);
+      if (grew) logEvt(state, ui, `وسّع مخزن الامتصاص إلى ${grew} كتل (underrun)`, "warn");
       const gap = ctx.currentTime - state.nextTime;
       state.nextTime = ctx.currentTime + (gap > 0.35
         ? Math.max(0.18, PREQUEUE_BLOCKS * blockSec)
         : Math.max(0.06, 0.75 * blockSec));
       needsFadeIn = true;
     }
+    state.jitter?.noteScheduled(state.nextTime - ctx.currentTime);
     if (needsFadeIn) {
       const fadeSamples = Math.min(floats.length, Math.round(outRate * 0.004));
       for (let i = 0; i < fadeSamples; i++) floats[i] *= i / fadeSamples;
@@ -1163,26 +1521,33 @@ async function startSession(state, ui) {
     audioBuffer.copyToChannel(floats, 0);
     const src = ctx.createBufferSource();
     src.buffer = audioBuffer;
+    // تصحيح انزلاق تدريجي (drift): playbackRate محدود ±0.5%
+    if (state.jitter && state.jitter.driftCorr !== 1) {
+      src.playbackRate.value = clamp(state.jitter.driftCorr, 0.995, 1.005);
+    }
     src.connect(state.outGain);
     src.start(state.nextTime);
     if (rms > 0.012 && state.volume > 0.02) {
       state.speakerBusyUntil = Math.max(state.speakerBusyUntil, state.nextTime + blockSec + 0.14);
     }
     state.nextTime += blockSec;
-    // if the context can never run, surface the problem instead of silence
     if (ctx.state === "suspended") checkPlaybackHealth(state, ui);
     if (state.volume <= 0.001 && !state.zeroVolWarned) {
       state.zeroVolWarned = true;
       renderPlaybackAlert(state, ui);
     }
 
-    // client round-trip: oldest pending send timestamp ↔ its scheduled playback
     if (state.pendingTs.length) {
       const sentAt = state.pendingTs.shift();
       const rtt = performance.now() - sentAt;
       state.rttHistory.push(rtt);
       if (state.rttHistory.length > RTT_KEEP) state.rttHistory.shift();
+      state.cliHist.push(rtt);
       renderClientStats(state, ui);
+      // أبلغ الخادم بالقياس (يُغذّي client_rtt_p95_ms في /realtime/stats)
+      if (state.ws && state.ws.readyState() === WebSocket.OPEN && state.blocksReceived % 4 === 0) {
+        state.ws.sendText({ type: "rtt", rtt_ms: Math.round(rtt * 10) / 10 });
+      }
     }
     state.blocksReceived += 1;
     if (ui.blocksRecv) ui.blocksRecv.textContent = String(state.blocksReceived);
@@ -1192,6 +1557,8 @@ async function startSession(state, ui) {
     if (state.phase === "streaming" || state.phase === "connecting") {
       if (code === 4401) {
         fail(state, ui, "الرمز غير صالح أو مفقود — أضف الرمز من تبويب الإعدادات ثم أعد المحاولة.");
+      } else if (state.autoReconnect) {
+        beginReconnect(state, ui, `انقطع الاتصال (code ${code})`);
       } else {
         fail(state, ui, `انقطع الاتصال بالخادم (code ${code}${reason ? ` — ${reason}` : ""}) — استخدم زر إعادة الاتصال.`);
       }
@@ -1199,12 +1566,41 @@ async function startSession(state, ui) {
   };
   ws.onerror = () => {
     if (state.phase === "connecting") {
-      fail(state, ui, "خطأ في اتصال WebSocket — تأكد من الخادم ومن الرمز إن كان مطلوبًا.");
+      beginReconnect(state, ui, "خطأ في اتصال WebSocket");
     }
   };
 }
 
-/** وميض هادئ بدل التوست المتكرر عند كل تطبيق إعدادات أثناء السحب */
+/* إعادة اتصال أسّية مع jitter (نمط قياسي: base 500ms → max 8s) */
+function beginReconnect(state, ui, why) {
+  if (state.reconnect.timer) return;
+  if (state.reconnect.attempts >= state.reconnect.max) {
+    fail(state, ui, `${why} — نفدت محاولات إعادة الاتصال (${state.reconnect.max}).`);
+    return;
+  }
+  state.reconnect.attempts += 1;
+  state.reconnects += 1;
+  const attempt = state.reconnect.attempts;
+  const base = Math.min(500 * 2 ** (attempt - 1), 8000);
+  const delay = base * (0.5 + Math.random() * 0.5);
+  setPhase(state, ui, "connecting", `${why} — إعادة اتصال ${attempt}/${state.reconnect.max} خلال ${Math.round(delay / 100) / 10}s`);
+  logEvt(state, ui, `${why} — محاولة ${attempt}/${state.reconnect.max}`, "warn");
+  // أغلق القديم وصفّر الجدولة، أبقِ الميكروفون يعمل
+  if (state.ws) { try { state.ws.close(); } catch {} state.ws = null; }
+  state.pendingTs = [];
+  state.nextTime = 0;
+  state.pingSentAt = 0;
+  state.reconnect.timer = setTimeout(() => {
+    state.reconnect.timer = null;
+    if (state.phase !== "connecting") return;
+    const modelName = ui.model.value;
+    const sessionId = state.sessionId;
+    const alive = () => state.sessionId === sessionId && (state.phase === "connecting" || state.phase === "streaming");
+    openStream(state, ui, modelName, alive);
+  }, delay);
+}
+
+/** وميض هادئ بدل التوست المتكرر */
 function flashApplied(ui) {
   const node = ui.applied;
   if (!node) return;
@@ -1215,45 +1611,56 @@ function flashApplied(ui) {
 
 /** clean stop (user action or cleanup) — no error UI. */
 function stopSession(state, ui) {
+  finishRecording(state, ui);
   teardownSession(state, ui, false);
   setPhase(state, ui, "idle", "أُوقفت الجلسة.");
 }
 
 /** stop + show Arabic error with reconnect button. */
 function fail(state, ui, message) {
+  finishRecording(state, ui);
   teardownSession(state, ui, false);
   state.lastError = message;
   setPhase(state, ui, "error", message);
+  logEvt(state, ui, message, "error");
   toast(message, "error", 9000);
 }
 
 /** closes everything without touching the phase UI. */
 function teardownSession(state, ui) {
-  state.sessionId = (state.sessionId || 0) + 1; // invalidate in-flight start()
+  state.sessionId = (state.sessionId || 0) + 1;
   if (state._pushTimer) { clearTimeout(state._pushTimer); state._pushTimer = null; }
   state._pushQueued = false;
+  if (state.reconnect.timer) { clearTimeout(state.reconnect.timer); state.reconnect.timer = null; }
   if (state.statsTimer) { clearInterval(state.statsTimer); state.statsTimer = null; }
   if (state.pingTimer) { clearInterval(state.pingTimer); state.pingTimer = null; }
+  if (state.drawRaf) { cancelAnimationFrame(state.drawRaf); state.drawRaf = null; }
   if (state.ws) {
     const ws = state.ws;
     ws.onclose = null; ws.ontext = null; ws.onbinary = null; ws.onerror = null;
     ws.close();
     state.ws = null;
   }
-  if (state.micSource) { try { state.micSource.disconnect(); } catch { /* already gone */ } state.micSource = null; }
-  if (state.micFilter) { try { state.micFilter.disconnect(); } catch { /* already gone */ } state.micFilter = null; }
-  if (state.micLowpass) { try { state.micLowpass.disconnect(); } catch { /* already gone */ } state.micLowpass = null; }
-  if (state.workletNode) { try { state.workletNode.disconnect(); } catch { /* already gone */ } state.workletNode = null; }
+  if (state.micSource) { try { state.micSource.disconnect(); } catch { } state.micSource = null; }
+  if (state.micFilter) { try { state.micFilter.disconnect(); } catch { } state.micFilter = null; }
+  if (state.micLowpass) { try { state.micLowpass.disconnect(); } catch { } state.micLowpass = null; }
+  if (state.workletNode) { try { state.workletNode.disconnect(); } catch { } state.workletNode = null; }
   if (state.stream) { for (const t of state.stream.getAudioTracks()) t.stop(); state.stream = null; }
-  if (state.inCtx) { try { state.inCtx.close(); } catch { /* ignore */ } state.inCtx = null; }
-  if (state.outCtx) { try { state.outCtx.close(); } catch { /* ignore */ } state.outCtx = null; }
+  if (state.inCtx) { try { state.inCtx.close(); } catch { } state.inCtx = null; }
+  if (state.outCtx) { try { state.outCtx.close(); } catch { } state.outCtx = null; }
   state.outGain = null;
   state.monGain = null;
+  state.limiter = null;
+  state.analyserIn = null;
+  state.analyserOut = null;
+  state.scopeIn?.stop(); state.scopeIn = null;
+  state.scopeOut?.stop(); state.scopeOut = null;
   if (state.workletUrl) { URL.revokeObjectURL(state.workletUrl); state.workletUrl = null; }
   state.pendingTs = [];
   state.nextTime = 0;
   state.nextTimeMon = 0;
   state.modelSr = null;
+  unbindKeyboard(state, ui);
   ui.model.disabled = state.models.length === 0;
   resetMeters(ui);
 }
@@ -1274,6 +1681,7 @@ function setPhase(state, ui, phase, message) {
   ui.stateLine.append(
     el("span", { class: `badge ${cls} dot` }, [label]),
     el("span", { class: "small dim" }, [message || ""]),
+    ui.quality ? ui.quality : el("span", {}),
   );
   ui.btnStart.innerHTML = "";
   if (phase === "streaming" || phase === "connecting") {
@@ -1307,7 +1715,7 @@ function renderStatusBox(state, ui) {
     );
     return;
   }
-  if (state.phase === "streaming") {
+  if (state.phase === "streaming" || state.phase === "connecting") {
     box.append(el("dl", { class: "kv" }, [
       el("dt", {}, ["معدل خرج النموذج"]),
       el("dd", { class: "latin" }, [`${fmtNum((state.modelSr || 0) / 1000, 1)} kHz`]),
@@ -1321,6 +1729,8 @@ function renderStatusBox(state, ui) {
       el("dd", { class: "latin" }, [`${Math.round(state.volume * 100)}%`]),
       el("dt", {}, ["حالة محرك الجلسة"]),
       el("dd", { class: "latin" }, [state.serverStats?.engine_status || "—"]),
+      el("dt", {}, ["إعادة اتصال / انقطاعات"]),
+      el("dd", { class: "latin" }, [`${state.reconnects} / ${state.underruns}`]),
     ]));
     return;
   }
@@ -1329,7 +1739,7 @@ function renderStatusBox(state, ui) {
   ]));
 }
 
-/* ------------------------------ meters ------------------------------ */
+/* ------------------------------ meters & rates ------------------------------ */
 
 function updateMeter(state, ui, which, rms) {
   const base = which === "in" ? "rt-meter-in" : "rt-meter-out";
@@ -1355,12 +1765,42 @@ function resetMeters(ui) {
     if (peak) { peak.style.opacity = "0"; peak.style.insetInlineStart = "0%"; }
     if (db) db.textContent = "-inf dB";
   }
+  for (const id of ["rt-blocks-sent", "rt-blocks-recv", "rt-srv-blocks", "rt-uptime", "rt-bytes", "rt-underruns"]) {
+    const node = document.getElementById(id);
+    if (node) node.textContent = "—";
+  }
+}
+
+function renderRates(state, ui) {
+  const now = performance.now();
+  const dt = Math.max(0.001, (now - state.lastBytesAt) / 1000);
+  state.rateOut = (state.bytesOut - state.lastBytesOut) / dt;
+  state.rateIn = (state.bytesIn - state.lastBytesIn) / dt;
+  state.lastBytesAt = now;
+  state.lastBytesIn = state.bytesIn;
+  state.lastBytesOut = state.bytesOut;
+  if (ui.bytes) {
+    ui.bytes.textContent = `↑ ${fmtKbps(state.rateOut)} · ↓ ${fmtKbps(state.rateIn)}`;
+  }
+}
+
+/* ------------------------------ quality badge ------------------------------ */
+
+function renderQualityBadge(state, ui) {
+  const badge = ui.quality;
+  if (!badge) return;
+  const lvl = state.quality.compute();
+  const [txt, cls] = QUALITY_LABELS[lvl] || ["—", "info"];
+  const rtt = state.quality.rttEwma;
+  badge.className = `badge ${cls} dot`;
+  badge.textContent = rtt != null ? `${txt} · RTT ~${fmtMs(rtt)}` : txt;
 }
 
 /* ------------------------------ latency panels ------------------------------ */
 
 function renderServerStats(state, ui, msg) {
   const srv = msg.server || {};
+  if (Number.isFinite(Number(srv.avg_ms))) state.srvHist.push(Number(srv.avg_ms));
   const set = (id, v) => {
     const node = document.getElementById(id);
     if (node) node.textContent = v;
@@ -1374,6 +1814,7 @@ function renderServerStats(state, ui, msg) {
     state.serverBlocks = msg.blocks;
     if (ui.srvBlocks) ui.srvBlocks.textContent = String(msg.blocks);
   }
+  maybeSuggestBlockMs(state, ui, srv);
   if (state.phase === "streaming") renderStatusBox(state, ui);
   renderVerdict(state, ui, srv);
 }
@@ -1390,6 +1831,40 @@ function renderClientStats(state, ui) {
   set("rt-cli-avg", fmtMs(stats.avg));
   set("rt-cli-p95", fmtMs(stats.p95));
   renderVerdict(state, ui, state.serverStats?.server || null);
+}
+
+/** اقتراح حجم كتلة من p95 الخادم (نمط adaptive: >0.85 الميزانية → ارفع) */
+function maybeSuggestBlockMs(state, ui, srv) {
+  const p95 = Number(srv?.p95_ms);
+  if (!Number.isFinite(p95) || state.phase !== "streaming") return;
+  const ratio = p95 / state.blockMs;
+  let dir = 0, target = state.blockMs;
+  if (ratio > 0.85 && state.blockMs < 500) {
+    dir = 1;
+    target = BLOCK_MS_CHOICES.find((v) => v > state.blockMs) || state.blockMs;
+  } else if (ratio < 0.4 && state.blockMs > 80) {
+    dir = -1;
+    target = [...BLOCK_MS_CHOICES].reverse().find((v) => v < state.blockMs) || state.blockMs;
+  }
+  const box = ui.autoSuggest;
+  const txt = ui.autoSuggest ? ui.autoSuggest.querySelector("#rt-auto-suggest-txt") : null;
+  if (!dir || target === state.blockMs || target === state.suggested.val) { return; }
+  state.suggested = { dir, val: target };
+  box?.classList.remove("hidden");
+  if (txt) txt.textContent = dir > 0
+    ? `استدلال الخادم p95 (${fmtMs(p95)}) يقترب من ميزانية الكتلة (${state.blockMs} ms) — يُقترح رفع حجم الكتلة إلى ${target} ms لسلاسة أفضل.`
+    : `استدلال الخادم p95 (${fmtMs(p95)}) أدنى بكثير من الميزانية (${state.blockMs} ms) — يمكن خفض حجم الكتلة إلى ${target} ms لتقليص الكمون.`;
+  const btn = ui.autoSuggestBtn;
+  if (btn && !btn.dataset.wired) {
+    btn.dataset.wired = "1";
+    btn.addEventListener("click", () => {
+      state.blockMs = state.suggested.val;
+      if (ui.blockMs) ui.blockMs.value = String(state.blockMs);
+      persistSettings(state);
+      box?.classList.add("hidden");
+      toast(`سيُطبَّق حجم الكتلة ${state.blockMs} ms عند إعادة بدء البث.`, "info", 5000);
+    });
+  }
 }
 
 function renderVerdict(state, ui, srv) {
@@ -1423,6 +1898,106 @@ function miniStats(values) {
     avg: sorted.reduce((a, b) => a + b, 0) / n,
     p95: sorted[Math.min(n - 1, Math.floor(0.95 * (n - 1)))],
   };
+}
+
+/* ------------------------------ spectrum ------------------------------ */
+
+function drawSpectrum(state, ui) {
+  const cv = ui.specOut;
+  if (!cv || !state.analyserOut) return;
+  const dpr = window.devicePixelRatio || 1;
+  const w = cv.clientWidth || 300, h = cv.clientHeight || 70;
+  if (cv.width !== Math.round(w * dpr) || cv.height !== Math.round(h * dpr)) {
+    cv.width = Math.round(w * dpr);
+    cv.height = Math.round(h * dpr);
+  }
+  const ctx = cv.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, w, h);
+  state.scopeOut?.drawSpectrumInto(ctx, w, h, dpr);
+}
+
+/* ------------------------------ events log ------------------------------ */
+
+function logEvt(state, ui, text, kind = "info") {
+  if (!ui.evtBox) return;
+  state.evtLog.push({ t: nowClock(), text, kind });
+  if (state.evtLog.length > EVT_KEEP) state.evtLog.shift();
+  renderEvtBox(state, ui);
+}
+
+function renderEvtBox(state, ui) {
+  const box = ui.evtBox;
+  if (!box) return;
+  clear(box);
+  if (!state.evtLog.length) {
+    box.append(el("p", { class: "muted small" }, ["لا أحداث بعد."]));
+    return;
+  }
+  for (const e of state.evtLog.slice().reverse()) {
+    box.append(el("div", { class: `evt-row ${e.kind}` }, [
+      el("span", { class: "evt-time latin" }, [e.t]),
+      el("span", {}, [e.text]),
+    ]));
+  }
+  box.scrollTop = 0;
+}
+
+/* ------------------------------ recording ------------------------------ */
+
+function toggleRecording(state, ui) {
+  if (state.recording) { finishRecording(state, ui); return; }
+  if (!state.outCtx) {
+    toast("ابدأ البث أولًا ثم فعّل التسجيل.", "warn");
+    return;
+  }
+  state.recorder = new WavRecorder();
+  state.recorder.addTrack("wet", state.outCtx.sampleRate);
+  state.recorder.addTrack("dry", state.outCtx.sampleRate);
+  state.recording = true;
+  if (ui.recBtn) {
+    ui.recBtn.setAttribute("aria-pressed", "true");
+    ui.recBtn.classList.add("rec-on");
+    ui.recBtn.replaceChildren(icon("stop", 14), document.createTextNode(" إيقاف التسجيل"));
+  }
+  if (ui.recBox) {
+    ui.recBox.classList.remove("hidden");
+    clear(ui.recBox);
+    ui.recBox.append(el("span", { class: "badge error dot" }, ["● التسجيل جارٍ — ستيريو (محوّل/أصلي)"]));
+  }
+  logEvt(state, ui, "بدأ تسجيل الجلسة (ستيريو)", "info");
+}
+
+function finishRecording(state, ui) {
+  if (!state.recording) return;
+  state.recording = false;
+  const rec = state.recorder;
+  state.recorder = null;
+  if (ui.recBtn) {
+    ui.recBtn.setAttribute("aria-pressed", "false");
+    ui.recBtn.classList.remove("rec-on");
+    ui.recBtn.replaceChildren(icon("wave", 14), document.createTextNode(" تسجيل الجلسة"));
+  }
+  if (ui.recBox) { clear(ui.recBox); ui.recBox.classList.add("hidden"); }
+  if (!rec || rec.empty) {
+    toast("لا عينات صوتية للجلسة — لم يُنشأ ملف.", "warn");
+    return;
+  }
+  try {
+    const blob = rec.finish();
+    const url = URL.createObjectURL(blob);
+    const a = el("a", { class: "btn sm", href: url, download: `realtime-session-${Date.now()}.wav` }, [
+      icon("download", 14), ` تنزيل التسجيل (${fmtDur(rec.seconds)}، ${(blob.size / 1024 / 1024).toFixed(1)} MB)`,
+    ]);
+    if (ui.recBox) {
+      ui.recBox.classList.remove("hidden");
+      ui.recBox.append(el("div", { class: "row", style: "gap:8px;align-items:center;flex-wrap:wrap" }, [a]));
+    }
+    logEvt(state, ui, `اكتمل التسجيل (${fmtDur(rec.seconds)})`, "ok");
+    toast("اكتمل تسجيل الجلسة — جاهز للتنزيل.", "success");
+  } catch (err) {
+    toast(`فشل إنشاء ملف التسجيل: ${err.message}`, "error");
+  }
 }
 
 /* ------------------------------ DSP helpers ------------------------------ */
@@ -1596,6 +2171,7 @@ async function enrollSpeakerVoice(state, ui) {
     saveSpeakerProfile(res.profile);
     state.settings.speaker_profile = res.profile;
     pushSettings(state, ui);
+    logEvt(state, ui, `سُجّلت بصمة الصوت (${res.f0_hz ? `${res.f0_hz} Hz` : "جاهزة"})`, "ok");
     toast(`تم حفظ بصمة صوتك بنجاح (${res.f0_hz ? `${res.f0_hz} Hz` : "جاهزة"}) — سيتم تجاهل أي صوت آخر.`, "success", 5000);
   } catch (err) {
     toast(err.message || "تعذّر تسجيل بصمة الصوت.", "error", 6000);
@@ -1611,36 +2187,6 @@ async function enrollSpeakerVoice(state, ui) {
   }
 }
 
-/* ------------------------------ worklet source ------------------------------ */
-
-const WORKLET_CODE = `
-class IvsBlockProcessor extends AudioWorkletProcessor {
-  constructor(options) {
-    super();
-    const blockMs = (options && options.processorOptions && options.processorOptions.blockMs) || 160;
-    this.blockSamples = Math.max(1, Math.round(sampleRate * blockMs / 1000));
-    this.buf = new Float32Array(this.blockSamples);
-    this.pos = 0;
-  }
-  process(inputs) {
-    const input = inputs[0];
-    if (input && input.length && input[0]) {
-      const ch = input[0];
-      let i = 0;
-      while (i < ch.length) {
-        const take = Math.min(this.blockSamples - this.pos, ch.length - i);
-        this.buf.set(ch.subarray(i, i + take), this.pos);
-        this.pos += take;
-        i += take;
-        if (this.pos >= this.blockSamples) {
-          const out = this.buf.slice(0);
-          this.port.postMessage(out, [out.buffer]);
-          this.pos = 0;
-        }
-      }
-    }
-    return true;
-  }
-}
-registerProcessor('ivs-block', IvsBlockProcessor);
-`;
+/* ثوابت متأخرة عن التعريف */
+const RTT_KEEP = 100;
+const PREQUEUE_BLOCKS = 2;

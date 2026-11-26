@@ -132,6 +132,16 @@ async def realtime_ws(ws: WebSocket) -> None:
                 elif kind == "settings" and session is not None:
                     session.update(control.get("settings") or {})
                     await ws.send_json({"type": "settings_applied"})
+                elif kind == "rtt" and session is not None:
+                    # client-measured round-trip of a played block (ms) — feeds
+                    # client_rtt_p95_ms in /stats (was never populated before).
+                    try:
+                        rtt_ms = float(control.get("rtt_ms"))
+                    except (TypeError, ValueError):
+                        rtt_ms = None
+                    if rtt_ms is not None and rtt_ms > 0:
+                        session.client_reported_rtt_ms.append(rtt_ms)
+                        del session.client_reported_rtt_ms[:-20]
                 elif kind == "ping":
                     await ws.send_json({
                         "type": "pong",

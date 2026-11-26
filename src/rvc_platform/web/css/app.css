@@ -731,3 +731,24 @@ canvas.chart {
   margin-top: 12px;
 }
 .hero-tiles .stat-tile { background: var(--panel-2); text-align: center; padding: 12px 8px; }
+
+/* ---------------- realtime v2: scopes, sparks, PTT, events ---------------- */
+.scope-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; }
+.scope-box, .spark-box { background: var(--panel-2); border: 1px solid var(--line); border-radius: var(--radius-s); padding: 8px 10px; }
+.scope-label { display: block; font-size: 0.72rem; color: var(--muted); margin-bottom: 4px; }
+canvas.scope { display: block; width: 100%; height: 70px; direction: ltr; }
+canvas.spark { display: block; width: 100%; height: 46px; direction: ltr; }
+.spark-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px; }
+.ptt-row { display: flex; flex-wrap: wrap; gap: 10px; align-items: stretch; }
+.ptt-row .btn.block { flex: 1 1 220px; }
+.ptt-group { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+#rt-mute.muted { background: var(--red-dim, rgba(239,68,68,0.15)); border-color: var(--red, #ef4444); color: #fca5a5; }
+#rt-ptt.ptt-on { background: var(--emerald-dim); border-color: var(--emerald); }
+#rt-rec.rec-on { background: var(--red-dim, rgba(239,68,68,0.15)); border-color: var(--red, #ef4444); color: #fca5a5; }
+.evt-box { max-height: 240px; overflow-y: auto; display: flex; flex-direction: column; gap: 4px; }
+.evt-row { display: flex; gap: 10px; align-items: baseline; font-size: 0.76rem; padding: 3px 8px; border-radius: 6px; border-inline-start: 3px solid var(--line-2); }
+.evt-row.ok { border-inline-start-color: var(--emerald); }
+.evt-row.warn { border-inline-start-color: var(--amber); }
+.evt-row.error { border-inline-start-color: var(--red, #ef4444); }
+.evt-row .evt-time { font-family: var(--mono); color: var(--muted); direction: ltr; min-width: 62px; }
+.kbd { display: inline-block; padding: 1px 7px; border: 1px solid var(--line-2); border-bottom-width: 2px; border-radius: 5px; font-family: var(--mono); font-size: 0.72rem; direction: ltr; background: var(--panel-2); }
