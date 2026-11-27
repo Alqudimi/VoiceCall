@@ -1,0 +1,156 @@
+{
+  "dataset": "/home/z/my-project/VoiceCall/data/raw/iraqi_voice",
+  "n_files": 18,
+  "total_duration_s": 2254.47,
+  "total_duration_min": 37.57,
+  "duration_min_s": 16.8,
+  "duration_max_s": 301.49,
+  "mean_snr_db": 29.68,
+  "min_snr_db": 19.29,
+  "mean_noise_floor_db": -47.12,
+  "max_clipping_ratio": 6e-06,
+  "mean_voiced_ratio": 0.9048,
+  "f0_median_hz_across_files": 79.5,
+  "f0_range_across_files_hz": [
+    75.0,
+    85.5
+  ],
+  "mean_hnr_db": 8.02,
+  "quality_grades": {
+    "good": 18
+  },
+  "sample_weights": {
+    "voice_0001.wav": 1.02,
+    "voice_0002.wav": 1.025,
+    "voice_0003.wav": 0.985,
+    "voice_0004.wav": 0.989,
+    "voice_0005.wav": 1.022,
+    "voice_0006.wav": 1.033,
+    "voice_0007.wav": 0.981,
+    "voice_0008.wav": 0.944,
+    "voice_0009.wav": 0.992,
+    "voice_0010.wav": 0.989,
+    "voice_0011.wav": 0.991,
+    "voice_0012.wav": 1.025,
+    "voice_0013.wav": 0.988,
+    "voice_0014.wav": 0.982,
+    "voice_0015.wav": 1.011,
+    "voice_0016.wav": 0.995,
+    "voice_0017.wav": 1.006,
+    "voice_0018.wav": 1.02
+  },
+  "outlier_samples": [],
+  "profile_reliability": {
+    "level": "ok",
+    "n_samples": 18,
+    "total_duration_s": 2254.47,
+    "embedding_counts": {
+      "wavlm": 18,
+      "ecapa": 18
+    },
+    "self_consistency": {
+      "wavlm": 0.9799,
+      "ecapa": 0.8775
+    },
+    "sample_quality": [
+      {
+        "file": "voice_0001.wav",
+        "score": 1.0,
+        "grade": "good"
+      },
+      {
+        "file": "voice_0002.wav",
+        "score": 1.0,
+        "grade": "good"
+      },
+      {
+        "file": "voice_0003.wav",
+        "score": 1.0,
+        "grade": "good"
+      },
+      {
+        "file": "voice_0004.wav",
+        "score": 1.0,
+        "grade": "good"
+      },
+      {
+        "file": "voice_0005.wav",
+        "score": 1.0,
+        "grade": "good"
+      },
+      {
+        "file": "voice_0006.wav",
+        "score": 1.0,
+        "grade": "good"
+      },
+      {
+        "file": "voice_0007.wav",
+        "score": 1.0,
+        "grade": "good"
+      },
+      {
+        "file": "voice_0008.wav",
+        "score": 1.0,
+        "grade": "good"
+      },
+      {
+        "file": "voice_0009.wav",
+        "score": 1.0,
+        "grade": "good"
+      },
+      {
+        "file": "voice_0010.wav",
+        "score": 1.0,
+        "grade": "good"
+      },
+      {
+        "file": "voice_0011.wav",
+        "score": 1.0,
+        "grade": "good"
+      },
+      {
+        "file": "voice_0012.wav",
+        "score": 1.0,
+        "grade": "good"
+      },
+      {
+        "file": "voice_0013.wav",
+        "score": 1.0,
+        "grade": "good"
+      },
+      {
+        "file": "voice_0014.wav",
+        "score": 1.0,
+        "grade": "good"
+      },
+      {
+        "file": "voice_0015.wav",
+        "score": 1.0,
+        "grade": "good"
+      },
+      {
+        "file": "voice_0016.wav",
+        "score": 1.0,
+        "grade": "good"
+      },
+      {
+        "file": "voice_0017.wav",
+        "score": 1.0,
+        "grade": "good"
+      },
+      {
+        "file": "voice_0018.wav",
+        "score": 1.0,
+        "grade": "good"
+      }
+    ],
+    "outliers": [],
+    "notes": []
+  },
+  "profile_aggregate_f0_median_hz": null,
+  "embedder_backends": [
+    "ecapa",
+    "wavlm"
+  ],
+  "elapsed_seconds": 123.1
+}

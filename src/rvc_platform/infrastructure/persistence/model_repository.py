@@ -140,8 +140,13 @@ class ModelRepository:
         if not source.is_file() or source.suffix != ALLOWED_INDEX_SUFFIX:
             raise ModelNotFoundError(f"index file missing: {source}")
         self._safe_name(model_name)
-        target = self.dir / f"{Path(model_name).stem}.index"
-        shutil.copy2(source, target)
+        # same guard as ``register``: copying a file onto itself raises
+        # shutil.SameFileError and breaks idempotent re-registration (found
+        # during the real-data phase-02 benchmark when the HF service
+        # re-registered a freshly downloaded index).
+        target = (self.dir / f"{Path(model_name).stem}.index").resolve()
+        if source != target:
+            shutil.copy2(source, target)
         return target
 
     def delete(self, name: str, with_index: bool = True) -> None:

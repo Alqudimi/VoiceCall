@@ -1,0 +1,90 @@
+{
+  "generated_at": 1795736526.1861653,
+  "setup": {
+    "model": "REAL trained RVC v2/48k — eng7mi/Iraqi-v3 best/model.pth (user's own training)",
+    "index": "REAL FAISS index — best/index.index from the same repo",
+    "hubert": "REAL official HuBERT base asset",
+    "f0": "REAL RMVPE (official asset) + REAL Praat pm",
+    "embedders": "REAL WavLM x-vector + REAL ECAPA-TDNN (speechbrain) — independent, each with its own calibration",
+    "device": "CPU (no GPU in this environment)",
+    "trials": 10,
+    "enrollment": [
+      "voice_0004.wav",
+      "voice_0005.wav",
+      "voice_0008.wav",
+      "voice_0010.wav",
+      "voice_0011.wav"
+    ],
+    "inputs": [
+      "voice_0002.wav",
+      "voice_0013.wav",
+      "voice_0016.wav"
+    ],
+    "split": "file-level: 5 enrollment files (profile) are DISJOINT from the 3 input files (search/validation/test)",
+    "seed": 424242,
+    "disclosure": "inputs are the SAME SPEAKER the model was trained on (identity round-trip — no second-speaker recording exists here); absolute similarity measures round-trip identity preservation, the optimizer's RELATIVE improvement is the measured quantity"
+  },
+  "session_a": {
+    "session_id": "opt_20261126_233854_d9fc08",
+    "elapsed_s": 98.07,
+    "baseline_composite": 0.5577,
+    "best_composite": 0.5806102284590888,
+    "final_test_composite": 0.5872986189748469,
+    "improvement_over_baseline": 0.0229,
+    "final_test_improvement": 0.0296,
+    "trials_to_90pct_of_gain": 1,
+    "winner_stability": 0.634,
+    "strategies": {
+      "identity": 0.5764540008217733,
+      "naturalness": 0.5576875520422196,
+      "clarity": 0.5664436294111789,
+      "balanced": 0.5806102284590888
+    }
+  },
+  "baseline_axes": {
+    "speaker_similarity": 0.1509,
+    "timbre_similarity": 0.6286,
+    "pitch_consistency": 0.6501,
+    "naturalness": 0.7873,
+    "clarity": 0.5885,
+    "artifact_score": 0.5929,
+    "prosody_preservation": 0.9638,
+    "content_preservation": 0.8368,
+    "audio_quality": 0.9911
+  },
+  "best_axes": {
+    "speaker_similarity": 0.2648,
+    "timbre_similarity": 0.6452,
+    "pitch_consistency": 0.6472,
+    "naturalness": 0.7356,
+    "clarity": 0.5436,
+    "artifact_score": 0.5865,
+    "prosody_preservation": 0.9661,
+    "content_preservation": 0.8225,
+    "audio_quality": 0.9921
+  },
+  "best_params": {
+    "f0_method": "rmvpe",
+    "index_rate": 0.7,
+    "rms_mix_rate": 0.45,
+    "protect": 0.25,
+    "filter_radius": 0,
+    "pitch_shift": 0
+  },
+  "insights_status": "ok",
+  "diagnoses_count": 4,
+  "session_b_cache": {
+    "fresh_session_id": "opt_20261126_233056_97fc7f",
+    "cached_session_id": "opt_20261126_233854_d9fc08",
+    "fresh_wall_s": 268.71,
+    "cached_wall_s": 96.87,
+    "wall_time_speedup": 2.77,
+    "real_trial_conversions": 11,
+    "mean_real_trial_s": 15.45,
+    "median_real_trial_s": 16.84,
+    "cached_trial_replays": 10,
+    "mean_replay_recorded_s": 0.0,
+    "note": "cache replay re-evaluates stored analyses through the CURRENT weights/calibration without re-converting and without re-embedding; recorded replay durations were 0.0 s (re-evaluation is arithmetic on cached features), while the pre-cache session measured the real conversions. The wall speedup is computed fresh-session vs cached-session end-to-end (both include the non-cached baseline and validation conversions)."
+  },
+  "session_a_note": "session_a numbers in this report come from the fully completed cached run (opt_20261126_233854_d9fc08); the identical deterministic search ran with real conversions in opt_20261126_233056_97fc7f with the same best result (best trial #2, same params) — determinism verified across 3 repeats."
+}

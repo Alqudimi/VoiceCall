@@ -93,3 +93,30 @@ class TestRegistrySelfHealing:
         (tmp_path / "registry.json").write_text('{"models": 7}', encoding="utf-8")
         repo.delete("m")                             # must not raise
         assert not (tmp_path / "m.pth").exists()
+
+
+class TestRegisterIndexIdempotent:
+    """Regression from the REAL-data phase-02 benchmark session.
+
+    ``ModelRepository.register`` was already guarded against copying a file
+    onto itself, but ``register_index`` was not: re-registering the SAME
+    index file (source == target) crashed with ``shutil.SameFileError``.
+    This surfaced when the HuggingFace download service re-registered a
+    freshly downloaded index that already sat at its final location.
+    """
+
+    def test_register_index_is_idempotent_same_file(self, repo, tmp_path):
+        _touch(tmp_path / "ahmed.index", b"faiss-index-bytes")
+        first = repo.register_index(tmp_path / "ahmed.index", "ahmed")
+        assert first == (tmp_path / "ahmed.index").resolve()
+        # re-registering the same file must be a no-op, not a crash
+        second = repo.register_index(tmp_path / "ahmed.index", "ahmed")
+        assert second == first
+        assert (tmp_path / "ahmed.index").read_bytes() == b"faiss-index-bytes"
+
+    def test_register_index_copies_when_source_differs(self, repo, tmp_path):
+        _touch(tmp_path / "outside" / "src.index", b"other-bytes")
+        target = repo.register_index(tmp_path / "outside" / "src.index", "ahmed")
+        assert target == (tmp_path / "ahmed.index").resolve()
+        assert target.read_bytes() == b"other-bytes"
+        assert (tmp_path / "outside" / "src.index").read_bytes() == b"other-bytes"

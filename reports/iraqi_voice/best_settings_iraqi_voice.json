@@ -1,0 +1,44 @@
+{
+  "model": "iraqi_voice",
+  "source": "REAL Phase-02 optimizer benchmark (eng7mi/Iraqi-v3, real data, session opt_20261126_233854)",
+  "strategy": "balanced",
+  "params": {
+    "f0_method": "rmvpe",
+    "index_rate": 0.7,
+    "rms_mix_rate": 0.45,
+    "protect": 0.25,
+    "filter_radius": 0,
+    "pitch_shift": 0
+  },
+  "scores": {
+    "baseline_composite": 0.5577,
+    "best_composite": 0.5806102284590888,
+    "final_test_composite": 0.5872986189748469,
+    "final_test_improvement": 0.0296,
+    "winner_stability": 0.634
+  },
+  "axes_baseline": {
+    "speaker_similarity": 0.1509,
+    "timbre_similarity": 0.6286,
+    "pitch_consistency": 0.6501,
+    "naturalness": 0.7873,
+    "clarity": 0.5885,
+    "artifact_score": 0.5929,
+    "prosody_preservation": 0.9638,
+    "content_preservation": 0.8368,
+    "audio_quality": 0.9911
+  },
+  "axes_best": {
+    "speaker_similarity": 0.2648,
+    "timbre_similarity": 0.6452,
+    "pitch_consistency": 0.6472,
+    "naturalness": 0.7356,
+    "clarity": 0.5436,
+    "artifact_score": 0.5865,
+    "prosody_preservation": 0.9661,
+    "content_preservation": 0.8225,
+    "audio_quality": 0.9921
+  },
+  "saved_at": 1795736526.1861653,
+  "restorable": true
+}
