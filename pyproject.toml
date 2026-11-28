@@ -92,7 +92,7 @@ dev = [
     "pytest>=8.2,<9",
     "pytest-asyncio>=0.23,<2",
     "pytest-cov>=6,<8",
-    "psutil>=6.0,<7",
+    "psutil>=6.0,<8",
     "ffmpeg-python>=0.2,<1",
     "av>=12,<16",
 ]
