@@ -94,7 +94,7 @@ dev = [
     "pytest-cov>=6,<8",
     "psutil>=6.0,<7",
     "ffmpeg-python>=0.2,<1",
-    "av>=12,<16",
+    "av>=12,<20",
 ]
 
 [tool.pytest.ini_options]
